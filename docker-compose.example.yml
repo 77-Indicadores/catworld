@@ -3,10 +3,21 @@ services:
     build: .
     command: ["node", "server.js"]
     env_file: .env
+    environment:
+      CATWORLD_UPLOAD_DIR: /data/uploads
     ports: ["3000:3000"]
+    volumes:
+      - uploads:/data/uploads
     restart: unless-stopped
   worker:
     build: .
     command: ["./node_modules/.bin/tsx", "src/worker/index.ts"]
     env_file: .env
+    environment:
+      CATWORLD_UPLOAD_DIR: /data/uploads
+    volumes:
+      - uploads:/data/uploads
     restart: unless-stopped
+
+volumes:
+  uploads:

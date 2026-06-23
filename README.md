@@ -33,12 +33,12 @@ O seed exige `CATWORLD_ADMIN_PASSWORD`. Não há fallback automático para mocks
 
 ## Docker / Coolify
 
-A mesma imagem deve ser publicada em dois serviços:
+A mesma imagem deve ser publicada em dois serviços (veja `docker-compose.example.yml`, copie para `docker-compose.yml` e ajuste antes de usar):
 
 - web: `node server.js`
 - worker: `./node_modules/.bin/tsx src/worker/index.ts`
 
-Use as mesmas variáveis e a mesma imagem para ambos. Execute `npm run migrate` e `npm run seed` como comandos de implantação controlados. O worker inclui LibreOffice Calc para converter `.xls` legado antes do processamento.
+Use as mesmas variáveis e a mesma imagem para ambos. **Os dois serviços precisam compartilhar o mesmo volume** apontado por `CATWORLD_UPLOAD_DIR` (ex: `/data/uploads`) — o `web` grava o arquivo enviado e o `worker` precisa lê-lo do mesmo disco; sem volume compartilhado os uploads falham. Execute `npm run migrate` e `npm run seed` como comandos de implantação controlados (no Coolify, configure como post-deployment command). O worker inclui LibreOffice Calc para converter `.xls` legado antes do processamento.
 
 ## Segurança
 
