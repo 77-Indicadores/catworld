@@ -18,7 +18,7 @@ async function previewCsv(path:string){
   if(!headers.length){headers=row.map(String);stats=headers.map(newStats);continue}
   count++;
   if(sampleRows.length<20)sampleRows.push(row.map(v=>v??""));
-  row.forEach((v,i)=>{stats[i]??=newStats();updateStats(stats[i],v)});
+  headers.forEach((_,i)=>{stats[i]??=newStats();updateStats(stats[i],row[i])});
  }
  const columns=columnsFromStats(headers,stats),objects=sampleRows.map(row=>Object.fromEntries(columns.map((c,i)=>[c.sqlName,row[i]??null])));
  return{columns,rows:objects,rowCount:count,encoding,separator,sheetNames:[]};
@@ -31,7 +31,7 @@ async function previewXlsx(path:string){
   if(rowNumber===1){headers=values;stats=headers.map(newStats);return}
   count++;
   if(sampleRows.length<20)sampleRows.push(values);
-  values.forEach((v,i)=>{stats[i]??=newStats();updateStats(stats[i],v)});
+  headers.forEach((_,i)=>{stats[i]??=newStats();updateStats(stats[i],values[i])});
  });
  const columns=columnsFromStats(headers,stats),objects=sampleRows.map(row=>Object.fromEntries(columns.map((c,i)=>[c.sqlName,row[i]??null])));
  return{columns,rows:objects,rowCount:count,encoding:"xlsx",separator:null,sheetNames:workbook.worksheets.map(s=>s.name)};

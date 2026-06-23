@@ -9,6 +9,7 @@ type Project = { id: string; name: string; datasets: { id: string; name: string 
 export function ManageGrantsDialog({ userId, userName }: { userId: string; userName: string }) {
   const ref = useRef<HTMLDialogElement>(null), router = useRouter();
   const [grants, setGrants] = useState<Grant[]>([]), [projects, setProjects] = useState<Project[]>([]), [error, setError] = useState("");
+  const [scopeType, setScopeType] = useState("GLOBAL");
 
   async function load() {
     const [g, p] = await Promise.all([
@@ -29,7 +30,8 @@ export function ManageGrantsDialog({ userId, userName }: { userId: string; userN
     e.preventDefault();
     setError("");
     const f = new FormData(e.currentTarget);
-    const scopeType = String(f.get("scopeType"));
+    if (scopeType === "PROJECT" && !f.get("projectId")) { setError("Selecione um projeto"); return; }
+    if (scopeType === "DATASET" && !f.get("datasetId")) { setError("Selecione um dataset"); return; }
     const response = await fetch(`/api/v1/users/${userId}/grants`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -42,6 +44,7 @@ export function ManageGrantsDialog({ userId, userName }: { userId: string; userN
     });
     if (!response.ok) { const body = await response.json(); setError(body.error?.message ?? "Falha ao conceder acesso"); return; }
     e.currentTarget.reset();
+    setScopeType("GLOBAL");
     await load();
     router.refresh();
   }
@@ -61,10 +64,10 @@ export function ManageGrantsDialog({ userId, userName }: { userId: string; userN
             ))}
           </div>
           <form onSubmit={add} className="mt-5 grid gap-3 border-t border-base-300 pt-4 sm:grid-cols-2">
-            <select name="scopeType" className="select select-sm w-full"><option value="GLOBAL">Global</option><option value="PROJECT">Projeto</option><option value="DATASET">Dataset</option></select>
+            <select name="scopeType" value={scopeType} onChange={(e) => setScopeType(e.target.value)} className="select select-sm w-full"><option value="GLOBAL">Global</option><option value="PROJECT">Projeto</option><option value="DATASET">Dataset</option></select>
             <select name="permission" className="select select-sm w-full"><option value="READ">Leitura</option><option value="WRITE">Escrita</option><option value="ADMIN">Admin</option></select>
-            <select name="projectId" className="select select-sm w-full"><option value="">Projeto...</option>{projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
-            <select name="datasetId" className="select select-sm w-full"><option value="">Dataset...</option>{projects.flatMap((p) => p.datasets.map((d) => <option key={d.id} value={d.id}>{p.name} / {d.name}</option>))}</select>
+            {scopeType === "PROJECT" && <select name="projectId" className="select select-sm w-full"><option value="">Projeto...</option>{projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select>}
+            {scopeType === "DATASET" && <select name="datasetId" className="select select-sm w-full"><option value="">Dataset...</option>{projects.flatMap((p) => p.datasets.map((d) => <option key={d.id} value={d.id}>{p.name} / {d.name}</option>))}</select>}
             <button className="btn btn-primary btn-sm sm:col-span-2">Conceder acesso</button>
           </form>
           {error && <div className="alert alert-error alert-soft mt-3">{error}</div>}
