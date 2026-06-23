@@ -11,10 +11,12 @@ export type FilePreview={columns:ParsedColumn[];rows:Record<string,unknown>[];ro
 export async function previewFile(path:string):Promise<FilePreview>{
  const ext=extname(path).toLowerCase(); if(ext===".csv")return previewCsv(path); if(ext===".xlsx")return previewXlsx(path); if(ext===".xls")throw new Error("XLS legado deve ser convertido pelo worker antes da leitura"); throw new Error("Formato não suportado. Use CSV, XLSX ou XLS");
 }
+function csvStream(path:string,encoding:string,separator:string):AsyncIterable<string[]>{
+ return createReadStream(path).pipe(iconv.decodeStream(encoding)).pipe(parse({delimiter:separator,bom:true,relax_column_count:true,relax_quotes:true,skip_empty_lines:true})) as AsyncIterable<string[]>;
+}
 async function previewCsv(path:string){
  const encoding=await detectEncoding(path),separator=await detectSeparator(path,encoding),sampleRows:string[][]=[];let headers:string[]=[],stats:ColumnStats[]=[],count=0;
- const stream=createReadStream(path).pipe(iconv.decodeStream(encoding)).pipe(parse({delimiter:separator,bom:true,relax_column_count:true,skip_empty_lines:true}));
- for await(const row of stream as AsyncIterable<string[]>){
+ for await(const row of csvStream(path,encoding,separator)){
   if(!headers.length){headers=row.map(String);stats=headers.map(newStats);continue}
   count++;
   if(sampleRows.length<20)sampleRows.push(row.map(v=>v??""));
@@ -47,8 +49,7 @@ export async function* rowsFromFile(path:string,columns:ParsedColumn[]):AsyncGen
  const ext=extname(path).toLowerCase();
  if(ext===".csv"){
   const encoding=await detectEncoding(path),separator=await detectSeparator(path,encoding);let header=true;
-  const stream=createReadStream(path).pipe(iconv.decodeStream(encoding)).pipe(parse({delimiter:separator,bom:true,relax_column_count:true,skip_empty_lines:true}));
-  for await(const row of stream as AsyncIterable<string[]>){if(header){header=false;continue}yield Object.fromEntries(columns.map((c,i)=>[c.sqlName,row[i]??null]));}
+  for await(const row of csvStream(path,encoding,separator)){if(header){header=false;continue}yield Object.fromEntries(columns.map((c,i)=>[c.sqlName,row[i]??null]));}
   return;
  }
  if(ext===".xlsx"){
