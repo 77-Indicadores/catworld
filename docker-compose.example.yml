@@ -5,7 +5,7 @@ services:
     env_file: .env
     environment:
       CATWORLD_UPLOAD_DIR: /data/uploads
-    ports: ["3000:3000"]
+    ports: ["8088:3000"]
     volumes:
       - uploads:/data/uploads
     restart: unless-stopped
