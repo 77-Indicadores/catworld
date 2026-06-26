@@ -17,8 +17,11 @@ class CatworldClient:
     def query(self,sql:str,timeout:int=30,limit:int=10000): return self._request("POST","/api/v1/queries",json={"sql":sql,"timeout":timeout,"limit":limit})
     def upload(self,path:str|Path,dataset_id:str,mode:str="replace",key_column:str|None=None,poll_interval:float=2):
         file=Path(path);created=self._request("POST","/api/v1/uploads",json={"filename":file.name,"sizeBytes":file.stat().st_size});
-        with file.open("rb") as stream:
-            response=self._client.put(created["sas"]["url"],content=stream,headers={"content-type":"application/octet-stream"},timeout=None);response.raise_for_status()
+        for attempt in range(3):
+            with file.open("rb") as stream:
+                response=self._client.put(created["sas"]["url"],content=stream,headers={"content-type":"application/octet-stream"},timeout=None)
+            if response.status_code!=499 or attempt==2:response.raise_for_status();break
+            time.sleep(1)
         upload_id=created["upload"]["id"];self._request("POST",f"/api/v1/uploads/{upload_id}/uploaded");preview=self._wait(upload_id,"AWAITING_CONFIRMATION",poll_interval)
         mapping=preview["previewJson"];import json as _json
         if isinstance(mapping,str): mapping=_json.loads(mapping)
