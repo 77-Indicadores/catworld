@@ -17,6 +17,8 @@ function parsePrismaSqlServerUrl(url: string): sql.config {
     user: params.user,
     password: params.password,
     options: { encrypt: params.encrypt !== "false", trustServerCertificate: params.trustservercertificate === "true" },
+    requestTimeout: 600_000,
+    connectionTimeout: 30_000,
   };
 }
 
