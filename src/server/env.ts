@@ -7,7 +7,7 @@ const schema = z.object({
   CATWORLD_UPLOAD_DIR: z.string().default("./var/uploads"),
   CATWORLD_WORKER_ID: z.string().default("worker-1"),
   CATWORLD_JOB_POLL_MS: z.coerce.number().int().positive().default(2000),
-  CATWORLD_UPLOAD_MAX_BYTES: z.coerce.number().int().positive().default(262144000),
+  CATWORLD_UPLOAD_MAX_BYTES: z.coerce.number().int().positive().default(500 * 1024 * 1024),
 });
 
 export function env() {
