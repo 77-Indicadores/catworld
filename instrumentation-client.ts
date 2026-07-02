@@ -7,3 +7,5 @@ Sentry.init({
   enableLogs: true,
   debug: false,
 });
+
+export const onRouterTransitionStart = Sentry.captureRouterTransitionStart;
