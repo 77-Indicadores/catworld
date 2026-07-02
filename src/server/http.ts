@@ -10,10 +10,11 @@ export function fail(status: number, code: string, message: string, details?: un
 export function serialize<T>(value: T): T {
   return JSON.parse(JSON.stringify(value, (_, item) => typeof item === "bigint" ? item.toString() : item));
 }
-export function handleApiError(error: unknown) {
+export async function handleApiError(error: unknown) {
   if (error instanceof ApiError) return fail(error.status, error.code, error.message, error.details);
   console.error("[handleApiError]", error);
   Sentry.captureException(error);
+  await Sentry.flush(2000);
   return fail(500, "INTERNAL_ERROR", "Erro interno inesperado");
 }
 export class ApiError extends Error {
