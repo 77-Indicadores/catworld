@@ -60,7 +60,7 @@ class CatworldClient:
 
     def query(self, sql: str, timeout: int = 30, limit: int = 10000):
         logger.info("Executando query (timeout=%ss, limit=%s)", timeout, limit)
-        result = self._request("POST", "/api/v1/queries", json={"sql": sql, "timeout": timeout, "limit": limit})
+        result = self._request("POST", "/api/v1/queries", json={"sql": sql, "timeout": timeout, "limit": limit}, timeout=None)
         logger.info("Query concluída: %s linhas retornadas", len(result) if isinstance(result, list) else "?")
         return result
 
