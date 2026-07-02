@@ -1,7 +1,7 @@
 import type { NextRequest } from "next/server";
 import { prisma } from "@/server/db";
 import { resolveActor, requireRole } from "@/server/auth/actor";
-import { grantTargets } from "@/server/auth/sync-grants";
+import { grantTargets, invalidateSyncCache } from "@/server/auth/sync-grants";
 import { revokeSchema } from "@/server/azure/sql";
 import { ApiError, handleApiError, ok } from "@/server/http";
 
@@ -20,6 +20,7 @@ export async function DELETE(r: NextRequest, { params }: { params: Promise<{ id:
       const stillGranted = remaining.some((g) => g.scopeType === "GLOBAL" || (g.scopeType === "PROJECT" && g.projectId === dataset.projectId) || (g.scopeType === "DATASET" && g.datasetId === dataset.id));
       if (!stillGranted) await revokeSchema(principal, dataset.schemaName);
     }
+    invalidateSyncCache(principal);
     return ok({ revoked: true });
   } catch (e) {
     return handleApiError(e);
