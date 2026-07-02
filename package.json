@@ -24,6 +24,7 @@
   "dependencies": {
     "@node-rs/argon2": "^2.0.2",
     "@prisma/client": "^6.19.3",
+    "@sentry/nextjs": "^10.63.0",
     "csv-parse": "^6.1.0",
     "exceljs": "^4.4.0",
     "iconv-lite": "^0.7.0",
