@@ -58,9 +58,14 @@ class CatworldClient:
     def rows(self, table_id: str, limit: int = 100):
         return self._request("GET", f"/api/v1/tables/{table_id}/rows", params={"limit": limit})
 
-    def query(self, sql: str, timeout: int = 30, limit: int = 10000):
+    def query(self, sql: str, timeout: int = 30, limit: int = 10000, dataset_id: str | None = None, project_id: str | None = None):
         logger.info("Executando query (timeout=%ss, limit=%s)", timeout, limit)
-        result = self._request("POST", "/api/v1/queries", json={"sql": sql, "timeout": timeout, "limit": limit}, timeout=None)
+        payload: dict = {"sql": sql, "timeout": timeout, "limit": limit}
+        if dataset_id:
+            payload["datasetId"] = dataset_id
+        if project_id:
+            payload["projectId"] = project_id
+        result = self._request("POST", "/api/v1/queries", json=payload, timeout=None)
         logger.info("Query concluída: %s linhas retornadas", len(result) if isinstance(result, list) else "?")
         return result
 

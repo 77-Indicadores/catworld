@@ -74,9 +74,42 @@ export async function revokeSchema(principal: string, schema: string) {
   for (const grant of ["SELECT", "INSERT", "UPDATE", "DELETE"]) await (await sqlPool()).request().query(`IF DATABASE_PRINCIPAL_ID(N'${escapeSqlLiteral(principal)}') IS NOT NULL REVOKE ${grant} ON SCHEMA::${target} FROM ${user}`);
 }
 
-export async function executeReadOnly(principal: string, query: string, timeout = 30, limit = 10_000) {
+export async function executeReadOnly(principal: string, query: string, timeout = 30, limit = 10_000, schemas: string[] = []) {
   const validated = validateReadOnlySql(query);
   if (!validated.safe) throw new ApiError(400, "UNSAFE_SQL", validated.reason);
+
+  let statement = validated.statement;
+
+  if (schemas.length > 0) {
+    const pool = await sqlPool();
+    const unqualified = extractUnqualifiedTableRefs(statement);
+
+    if (unqualified.length > 0) {
+      const schemaList = schemas.map(s => `N'${escapeSqlLiteral(s)}'`).join(", ");
+      const tableList = unqualified.map(t => `N'${escapeSqlLiteral(t)}'`).join(", ");
+      const lookup = await pool.request().query(
+        `SELECT s.name AS schemaName, t.name AS tableName FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name IN (${schemaList}) AND t.name IN (${tableList})`
+      );
+
+      const tableMap = new Map<string, string[]>();
+      for (const row of lookup.recordset as { schemaName: string; tableName: string }[]) {
+        const key = row.tableName.toLowerCase();
+        if (!tableMap.has(key)) tableMap.set(key, []);
+        tableMap.get(key)!.push(row.schemaName);
+      }
+
+      for (const table of unqualified) {
+        const found = tableMap.get(table.toLowerCase()) ?? [];
+        if (found.length > 1) {
+          throw new ApiError(400, "AMBIGUOUS_TABLE", `Tabela '${table}' existe em múltiplos schemas: ${found.join(", ")}. Use schema.tabela para qualificar.`);
+        }
+        if (found.length === 1) {
+          statement = qualifyTable(statement, table, found[0]!);
+        }
+      }
+    }
+  }
+
   const pool = await sqlPool();
   const transaction = new sql.Transaction(pool);
   await transaction.begin();
@@ -85,7 +118,7 @@ export async function executeReadOnly(principal: string, query: string, timeout 
     (request as unknown as { timeout: number }).timeout = Math.min(Math.max(timeout, 1), 120) * 1000;
     await request.query(`EXECUTE AS USER = N'${escapeSqlLiteral(principal)}'`);
     const started = Date.now();
-    const result = await request.query(validated.statement);
+    const result = await request.query(statement);
     const rows = result.recordset?.slice(0, limit) ?? [];
     await request.query("REVERT");
     await transaction.commit();
@@ -94,6 +127,23 @@ export async function executeReadOnly(principal: string, query: string, timeout 
     await transaction.rollback().catch(() => undefined);
     throw error;
   }
+}
+
+function extractUnqualifiedTableRefs(sql: string): string[] {
+  const tableKeywords = /\b(?:FROM|JOIN|INNER\s+JOIN|LEFT\s+JOIN|RIGHT\s+JOIN|FULL\s+JOIN|CROSS\s+JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)\b/gi;
+  const results: string[] = [];
+  let match;
+  while ((match = tableKeywords.exec(sql)) !== null) {
+    const ref = match[1]!;
+    // skip if already qualified (preceded by a dot)
+    const idx = match.index + match[0].lastIndexOf(ref);
+    if (sql[idx - 1] !== ".") results.push(ref);
+  }
+  return [...new Set(results)];
+}
+
+function qualifyTable(sql: string, table: string, schema: string): string {
+  return sql.replace(new RegExp(`(?<!\\.)\\b${table}\\b`, "gi"), `${quoteIdentifier(schema)}.${quoteIdentifier(table)}`);
 }
 
 export async function createExternalDatabaseUser(name: string, password: string) {
