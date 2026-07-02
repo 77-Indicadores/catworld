@@ -91,8 +91,7 @@ export async function executeReadOnly(principal: string, query: string, timeout 
         `SELECT s.name AS schemaName, t.name AS tableName FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name IN (${schemaList}) AND t.name IN (${tableList})`
       );
 
-      console.log("[executeReadOnly] schemas:", schemas, "unqualified:", unqualified, "lookup rows:", lookup.recordset);
-      const tableMap = new Map<string, string[]>();
+const tableMap = new Map<string, string[]>();
       for (const row of lookup.recordset as { schemaName: string; tableName: string }[]) {
         const key = row.tableName.toLowerCase();
         if (!tableMap.has(key)) tableMap.set(key, []);
