@@ -24,3 +24,6 @@ sdk/python/*.egg-info/
 sdk/python/**/__pycache__/
 sdk/python/.pytest_cache/
 sdk/python/pytest-cache-files-*/
+
+# Sentry Config File
+.env.sentry-build-plugin
