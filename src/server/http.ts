@@ -12,6 +12,7 @@ export function serialize<T>(value: T): T {
 }
 export function handleApiError(error: unknown) {
   if (error instanceof ApiError) return fail(error.status, error.code, error.message, error.details);
+  console.error("[handleApiError]", error);
   Sentry.captureException(error);
   return fail(500, "INTERNAL_ERROR", "Erro interno inesperado");
 }
