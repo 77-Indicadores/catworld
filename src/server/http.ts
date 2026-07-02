@@ -1,3 +1,4 @@
+import * as Sentry from "@sentry/nextjs";
 import { NextResponse } from "next/server";
 
 export function ok<T>(data: T, meta?: Record<string, unknown>, status = 200) {
@@ -10,8 +11,8 @@ export function serialize<T>(value: T): T {
   return JSON.parse(JSON.stringify(value, (_, item) => typeof item === "bigint" ? item.toString() : item));
 }
 export function handleApiError(error: unknown) {
-  console.error(error);
   if (error instanceof ApiError) return fail(error.status, error.code, error.message, error.details);
+  Sentry.captureException(error);
   return fail(500, "INTERNAL_ERROR", "Erro interno inesperado");
 }
 export class ApiError extends Error {
