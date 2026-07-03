@@ -39,10 +39,30 @@ async function previewXlsx(path:string){
  return{columns,rows:objects,rowCount:count,encoding:"xlsx",separator:null,sheetNames:workbook.worksheets.map(s=>s.name)};
 }
 const cellValue=(value:ExcelJS.CellValue)=>value==null?"":value instanceof Date?value.toISOString():typeof value==="object"?String((value as {text?:string;result?:unknown}).text??(value as {result?:unknown}).result??""):String(value);
-type ColumnStats={maxLen:number;hasNull:boolean;allInt:boolean;allDecimal:boolean;allDate:boolean;sampleCount:number};
-function newStats():ColumnStats{return{maxLen:0,hasNull:false,allInt:true,allDecimal:true,allDate:true,sampleCount:0}}
-function updateStats(s:ColumnStats,raw:unknown){const v=raw==null?"":String(raw),trimmed=v.trim();if(trimmed===""){s.hasNull=true;return}s.sampleCount++;if(v.length>s.maxLen)s.maxLen=v.length;if(s.allInt&&!(/^-?\d+$/.test(trimmed)&&!/^0\d+/.test(trimmed)))s.allInt=false;if(s.allDecimal&&!(/^-?\d{1,3}(?:\.\d{3})*,\d+$|^-?\d+\.\d+$/.test(trimmed)))s.allDecimal=false;if(s.allDate&&!(/^\d{2}\/\d{2}\/\d{4}$|^\d{4}-\d{2}-\d{2}$/.test(trimmed)))s.allDate=false}
-function columnsFromStats(headers:string[],stats:ColumnStats[]):ParsedColumn[]{const used=new Map<string,number>();return headers.map((header,index)=>{let name=sqlIdentifier(header||`col_${index+1}`);const n=(used.get(name)??0)+1;used.set(name,n);if(n>1)name=`${name}_${n}`;const s=stats[index]??newStats();const sqlType=s.sampleCount===0?"NVARCHAR(255)":s.allInt?"BIGINT":s.allDecimal?"DECIMAL(18,4)":s.allDate?"DATE":s.maxLen>4000?"NVARCHAR(MAX)":`NVARCHAR(${Math.max(s.maxLen,50)})`;return{originalName:header,sqlName:name,sqlType,nullable:s.hasNull}})}
+type ColumnStats={maxLen:number;hasNull:boolean;allInt:boolean;allDecimal:boolean;allDateLike:boolean;hasTimePart:boolean;allTime:boolean;sampleCount:number};
+function newStats():ColumnStats{return{maxLen:0,hasNull:false,allInt:true,allDecimal:true,allDateLike:true,hasTimePart:false,allTime:true,sampleCount:0}}
+const RE_INT=/^-?\d+$/;
+const RE_INT_LEADING_ZERO=/^0\d+/;
+// decimal: aceita com ou sem separador de milhar, vírgula ou ponto como decimal
+const RE_DECIMAL=/^-?\d{1,3}(?:[.,]\d{3})*[,]\d+$|^-?\d+[.,]\d+$/;
+const RE_DATE=/^\d{2}\/\d{2}\/\d{4}$|^\d{4}-\d{2}-\d{2}$/;
+const RE_DATETIME=/^\d{2}\/\d{2}\/\d{4}[T ]\d{2}:\d{2}(:\d{2})?$|^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$/;
+const RE_TIME=/^\d{1,2}:\d{2}(:\d{2})?$/;
+function isInt(t:string){return RE_INT.test(t)&&!RE_INT_LEADING_ZERO.test(t)}
+function updateStats(s:ColumnStats,raw:unknown){
+  const v=raw==null?"":String(raw),trimmed=v.trim();
+  if(trimmed===""){s.hasNull=true;return}
+  s.sampleCount++;
+  if(v.length>s.maxLen)s.maxLen=v.length;
+  if(s.allInt&&!isInt(trimmed))s.allInt=false;
+  // inteiros são decimais válidos — só invalida se não for nem decimal nem inteiro
+  if(s.allDecimal&&!RE_DECIMAL.test(trimmed)&&!isInt(trimmed))s.allDecimal=false;
+  const isDate=RE_DATE.test(trimmed),isDatetime=RE_DATETIME.test(trimmed);
+  if(s.allDateLike&&!isDate&&!isDatetime)s.allDateLike=false;
+  if(isDatetime)s.hasTimePart=true;
+  if(s.allTime&&!RE_TIME.test(trimmed))s.allTime=false;
+}
+function columnsFromStats(headers:string[],stats:ColumnStats[]):ParsedColumn[]{const used=new Map<string,number>();return headers.map((header,index)=>{let name=sqlIdentifier(header||`col_${index+1}`);const n=(used.get(name)??0)+1;used.set(name,n);if(n>1)name=`${name}_${n}`;const s=stats[index]??newStats();const sqlType=s.sampleCount===0?"NVARCHAR(255)":s.allInt?"BIGINT":s.allDecimal?"DECIMAL(18,4)":s.allDateLike&&s.hasTimePart?"DATETIME2":s.allDateLike?"DATE":s.allTime?"TIME":s.maxLen>4000?"NVARCHAR(MAX)":`NVARCHAR(${Math.max(s.maxLen,50)})`;return{originalName:header,sqlName:name,sqlType,nullable:s.hasNull}})}
 async function detectEncoding(path:string){const fd=await import("node:fs/promises");const handle=await fd.open(path,"r");const buffer=Buffer.alloc(65536);const{bytesRead}=await handle.read(buffer,0,buffer.length,0);await handle.close();const sample=buffer.subarray(0,bytesRead);if(sample[0]===0xef&&sample[1]===0xbb&&sample[2]===0xbf)return"utf8";try{new TextDecoder("utf-8",{fatal:true}).decode(sample);return"utf8"}catch{return"win1252"}}
 async function detectSeparator(path:string,encoding:string){const fs=await import("node:fs/promises");const raw=await fs.readFile(path);const text=iconv.decode(raw.subarray(0,65536),encoding);const candidates=[";",",","\t"];return candidates.map(c=>({c,score:text.split(/\r?\n/).slice(0,10).reduce((n,l)=>n+(l.split(c).length-1),0)})).sort((a,b)=>b.score-a.score)[0].c}
 export async function* rowsFromFile(path:string,columns:ParsedColumn[]):AsyncGenerator<Record<string,unknown>>{

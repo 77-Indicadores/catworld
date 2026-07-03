@@ -55,4 +55,49 @@ describe("inferência de schema escaneia o arquivo inteiro, não só a amostra",
     expect(type("decimal_us")).toBe("DECIMAL(18,4)");
     expect(type("data")).toBe("DATE");
   });
+
+  it("infere DECIMAL para números BR sem separador de milhar (ex: 1234,56)", async () => {
+    // separador ; para não confundir a vírgula decimal com delimitador de campo
+    const path = await csv(`valor;texto\n1234,56;a\n99,90;b\n0,50;c\n`);
+    const preview = await previewFile(path);
+    expect(preview.columns[0].sqlType).toBe("DECIMAL(18,4)");
+  });
+
+  it("infere DATETIME2 para colunas com data e hora", async () => {
+    const path = await csv(`criado_em\n2026-01-15T08:30:00\n2026-06-20 14:45:00\n`);
+    const preview = await previewFile(path);
+    expect(preview.columns[0].sqlType).toBe("DATETIME2");
+  });
+
+  it("infere TIME para colunas só com hora", async () => {
+    const path = await csv(`hora\n08:30\n14:45:00\n23:59\n`);
+    const preview = await previewFile(path);
+    expect(preview.columns[0].sqlType).toBe("TIME");
+  });
+
+  it("prefere DATETIME2 sobre DATE quando mistura datas com hora", async () => {
+    const path = await csv(`ts\n2026-01-15T08:30:00\n2026-01-16T09:00:00\n`);
+    const preview = await previewFile(path);
+    expect(preview.columns[0].sqlType).toBe("DATETIME2");
+  });
+
+  it("infere DECIMAL quando coluna tem inteiros e decimais misturados", async () => {
+    // inteiro sozinho não invalida a inferência de decimal
+    const path = await csv(`valor;x\n1;a\n1,5;b\n3;c\n`);
+    const preview = await previewFile(path);
+    expect(preview.columns[0].sqlType).toBe("DECIMAL(18,4)");
+  });
+
+  it("infere DATETIME2 quando coluna tem datas puras e datetimes misturados", async () => {
+    // data sem hora não deve matar a detecção de datetime
+    const path = await csv(`ts\n2026-01-15\n2026-01-16T08:30:00\n`);
+    const preview = await previewFile(path);
+    expect(preview.columns[0].sqlType).toBe("DATETIME2");
+  });
+
+  it("infere DATE quando todas as linhas são datas puras (sem hora)", async () => {
+    const path = await csv(`dt\n2026-01-15\n2026-06-20\n`);
+    const preview = await previewFile(path);
+    expect(preview.columns[0].sqlType).toBe("DATE");
+  });
 });
