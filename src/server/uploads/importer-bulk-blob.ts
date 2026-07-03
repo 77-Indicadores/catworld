@@ -117,7 +117,9 @@ export async function bulkInsertFromBlob(
       CREATE EXTERNAL DATA SOURCE [${tempDs}]
       WITH (TYPE = BLOB_STORAGE, LOCATION = 'https://${account}.blob.core.windows.net', CREDENTIAL = [${tempCred}])
     `);
-    await pool.request().query(`
+    const bulkReq = pool.request();
+    (bulkReq as unknown as { timeout: number }).timeout = 30 * 60_000; // 30 min — arquivo grande
+    await bulkReq.query(`
       BULK INSERT ${quoteIdentifier(schema)}.${quoteIdentifier(stagingTable)}
       FROM '${container}/${cleanBlobName}'
       WITH (
