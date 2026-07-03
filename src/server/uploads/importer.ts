@@ -3,6 +3,8 @@ import { prisma } from "@/server/db";
 import { sqlPool } from "@/server/azure/sql";
 import { quoteIdentifier, sqlIdentifier } from "@/server/security/naming";
 import { previewFile, rowsFromFile, type ParsedColumn } from "./parser";
+import { bulkInsertFromBlob } from "./importer-bulk-blob";
+import { env } from "@/server/env";
 
 export async function importUpload(uploadId:string,path:string){
  const upload=await prisma.upload.findUniqueOrThrow({where:{id:uploadId},include:{dataset:true,table:true}});
@@ -21,39 +23,44 @@ export async function importUpload(uploadId:string,path:string){
  const staging=`${quoteIdentifier(schema)}.${quoteIdentifier(stage)}`;
  const colDefs=mapping.map(c=>`${quoteIdentifier(c.sqlName)} ${c.sqlType} ${c.nullable?"NULL":"NOT NULL"}`).join(",");
 
- // Compila conversor uma vez por coluna — evita checar o tipo em cada célula
- const converters=mapping.map(c=>makeConverter(c.sqlType));
- // Pré-computa definições de coluna para reusar nos bulk tables
- const bulkCols=mapping.map(c=>({name:c.sqlName,type:toSqlType(c.sqlType),opts:{nullable:c.nullable}}));
-
  // Cria staging fora de qualquer transação (autocommit)
- // Se já existir de uma tentativa anterior, descarta primeiro
  await pool.request().query(`IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL DROP TABLE ${staging}; CREATE TABLE ${staging} (${colDefs})`);
 
  let total=0,inserted=0,updated=0,lastProgressMs=Date.now();
+ const useBlob=!!env().CATWORLD_AZURE_BLOB_CONNECTION_STRING;
 
  try{
-  let batch:Record<string,unknown>[]=[];
-
-  const flush=async()=>{
-   if(!batch.length)return;
-   const bulk=new sql.Table(`${schema}.${stage}`);
-   bulk.create=false;
-   for(const col of bulkCols)bulk.columns.add(col.name,col.type,col.opts);
-   for(const row of batch)bulk.rows.add(...(converters.map((fn,i)=>fn(row[mapping[i]!.sqlName])) as Parameters<typeof bulk.rows.add>));
-   await new sql.Request(pool).bulk(bulk, { tableLock: true });
-   total+=batch.length;
-   batch=[];
-   // Atualiza progresso no máximo a cada 10 segundos — evita round-trips desnecessários
-   const now=Date.now();
-   if(now-lastProgressMs>10_000){
-    await prisma.upload.update({where:{id:upload.id},data:{progress:Math.min(90,35+Math.floor(total/Math.max(knownRowCount,1)*55))}});
-    lastProgressMs=now;
-   }
-  };
-
-  for await(const row of rowsFromFile(path,mapping)){batch.push(row);if(batch.length>=50_000)await flush()}
-  await flush();
+  if(useBlob){
+   // BULK INSERT via Azure Blob — SQL Server lê o arquivo diretamente na rede interna Azure
+   total=await bulkInsertFromBlob(upload.id,path,mapping,schema,stage,rows=>{
+    const now=Date.now();
+    if(now-lastProgressMs>10_000){
+     void prisma.upload.update({where:{id:upload.id},data:{progress:Math.min(90,35+Math.floor(rows/Math.max(knownRowCount,1)*55))}});
+     lastProgressMs=now;
+    }
+   });
+  }else{
+   // Fallback: TDS bulk copy (sem Azure Blob)
+   const converters=mapping.map(c=>makeConverter(c.sqlType));
+   const bulkCols=mapping.map(c=>({name:c.sqlName,type:toSqlType(c.sqlType),opts:{nullable:c.nullable}}));
+   let batch:Record<string,unknown>[]=[];
+   const flush=async()=>{
+    if(!batch.length)return;
+    const bulk=new sql.Table(`${schema}.${stage}`);
+    bulk.create=false;
+    for(const col of bulkCols)bulk.columns.add(col.name,col.type,col.opts);
+    for(const row of batch)bulk.rows.add(...(converters.map((fn,i)=>fn(row[mapping[i]!.sqlName])) as Parameters<typeof bulk.rows.add>));
+    await new sql.Request(pool).bulk(bulk,{tableLock:true});
+    total+=batch.length;batch=[];
+    const now=Date.now();
+    if(now-lastProgressMs>10_000){
+     await prisma.upload.update({where:{id:upload.id},data:{progress:Math.min(90,35+Math.floor(total/Math.max(knownRowCount,1)*55))}});
+     lastProgressMs=now;
+    }
+   };
+   for await(const row of rowsFromFile(path,mapping)){batch.push(row);if(batch.length>=50_000)await flush()}
+   await flush();
+  }
 
   // Transação curta apenas para a operação final atômica
   const tx=new sql.Transaction(pool);
