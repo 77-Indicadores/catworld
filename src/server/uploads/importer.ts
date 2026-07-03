@@ -27,5 +27,17 @@ export async function importUpload(uploadId:string,path:string){
 }
 function bulkTable(name:string,columns:ParsedColumn[]){const bulk=new sql.Table(name);bulk.create=false;for(const c of columns)bulk.columns.add(c.sqlName,toSqlType(c.sqlType),{nullable:c.nullable});return bulk}
 async function assertCompatible(request:sql.Request,schema:string,table:string,columns:ParsedColumn[]){const result=await request.input("schema",sql.NVarChar,schema).input("table",sql.NVarChar,table).query("SELECT c.name,t.name type_name,c.max_length,c.precision,c.scale FROM sys.columns c JOIN sys.types t ON c.user_type_id=t.user_type_id WHERE c.object_id=OBJECT_ID(QUOTENAME(@schema)+'.'+QUOTENAME(@table)) ORDER BY c.column_id");const actual=result.recordset.map(r=>String(r.name));const expected=columns.map(c=>c.sqlName);if(JSON.stringify(actual)!==JSON.stringify(expected))throw new Error(`Schema incompatível. Esperado: ${expected.join(", ")}; atual: ${actual.join(", ")}`)}
-function toSqlType(type:string){if(type==="BIGINT")return sql.BigInt;if(type==="DATE")return sql.Date;if(type.startsWith("DECIMAL"))return sql.Decimal(18,4);const m=type.match(/NVARCHAR\((\d+)\)/);return m?sql.NVarChar(Number(m[1])):sql.NVarChar(sql.MAX)}
-export function convert(v:unknown,type:string){if(v==null||String(v).trim()==="")return null;if(type==="BIGINT")return String(v);if(type.startsWith("DECIMAL")){const s=String(v).trim();return Number(s.includes(",")?s.replaceAll(".","").replace(",","."):s)}if(type==="DATE"){const s=String(v),m=s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);return m?new Date(`${m[3]}-${m[2]}-${m[1]}T00:00:00Z`):new Date(s)}return String(v)}
+function toSqlType(type:string){if(type==="BIGINT")return sql.BigInt;if(type==="DATE")return sql.Date;if(type==="DATETIME2")return sql.DateTime2;if(type==="TIME")return sql.Time;if(type.startsWith("DECIMAL"))return sql.Decimal(18,4);const m=type.match(/NVARCHAR\((\d+)\)/);return m?sql.NVarChar(Number(m[1])):sql.NVarChar(sql.MAX)}
+export function convert(v:unknown,type:string){
+  if(v==null||String(v).trim()==="")return null;
+  if(type==="BIGINT")return String(v);
+  if(type.startsWith("DECIMAL")){const s=String(v).trim();return Number(s.includes(",")?s.replaceAll(".","").replace(",","."):s)}
+  if(type==="DATE"||type==="DATETIME2"){
+    const s=String(v).trim();
+    const br=s.match(/^(\d{2})\/(\d{2})\/(\d{4})(.*)$/);
+    const iso=br?`${br[3]}-${br[2]}-${br[1]}${br[4]}`:s;
+    return new Date(type==="DATE"?iso.slice(0,10)+"T00:00:00Z":iso);
+  }
+  if(type==="TIME")return String(v).trim();
+  return String(v);
+}

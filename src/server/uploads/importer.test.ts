@@ -24,4 +24,23 @@ describe("convert() não corrompe decimais (regressão)", () => {
   it("mantém BIGINT como string", () => {
     expect(convert(123, "BIGINT")).toBe("123");
   });
+
+  it("converte DATETIME2 em formato BR com hora", () => {
+    expect(convert("12/02/2024 12:30:01", "DATETIME2")).toEqual(new Date("2024-02-12T12:30:01"));
+    expect(convert("2024-02-12T12:30:01", "DATETIME2")).toEqual(new Date("2024-02-12T12:30:01"));
+  });
+
+  it("converte DATETIME2 em formato BR sem segundos", () => {
+    expect(convert("15/01/2026 08:30", "DATETIME2")).toEqual(new Date("2026-01-15T08:30"));
+  });
+
+  it("mantém TIME como string", () => {
+    expect(convert("08:30:00", "TIME")).toBe("08:30:00");
+    expect(convert("14:45", "TIME")).toBe("14:45");
+  });
+
+  it("trata TIME nulo corretamente", () => {
+    expect(convert("", "TIME")).toBeNull();
+    expect(convert(null, "TIME")).toBeNull();
+  });
 });
