@@ -40,7 +40,7 @@ export async function importUpload(uploadId:string,path:string){
    const bulk=new sql.Table(`${schema}.${stage}`);
    bulk.create=false;
    for(const col of bulkCols)bulk.columns.add(col.name,col.type,col.opts);
-   for(const row of batch)bulk.rows.add(...converters.map((fn,i)=>fn(row[mapping[i]!.sqlName])));
+   for(const row of batch)bulk.rows.add(...(converters.map((fn,i)=>fn(row[mapping[i]!.sqlName])) as Parameters<typeof bulk.rows.add>));
    await new sql.Request(pool).bulk(bulk, { tableLock: true });
    total+=batch.length;
    batch=[];
