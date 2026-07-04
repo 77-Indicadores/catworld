@@ -91,7 +91,11 @@ export async function bulkInsertFromBlob(
   });
 
   for await (const row of rowsFromFile(source, mapping, opts)) {
-    passThrough.write(converters.map((fn, i) => fn(row[mapping[i]!.sqlName])).join("|") + "\n");
+    const converted = converters.map((fn, i) => fn(row[mapping[i]!.sqlName]));
+    const csvLine = converted.join("|");
+    // Hash Diff (Opt3): MD5 of pipe-joined converted values — NULL convention: empty string
+    const rowHash = createHash("md5").update(csvLine).digest("hex");
+    passThrough.write(csvLine + "|" + rowHash + "\n");
     total++;
     if (total % 50_000 === 0) onProgress?.(total);
   }
