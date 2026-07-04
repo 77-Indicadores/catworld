@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import gzip as _gzip
+import io as _io
 import json as _json
 import logging
 import time
@@ -108,15 +110,21 @@ class CatworldClient:
         )
         upload_id = created["upload"]["id"]
 
-        logger.info("Enviando arquivo para storage...")
+        logger.info("Comprimindo e enviando arquivo para storage...")
+        raw_bytes = file.read_bytes()
+        compressed = _gzip.compress(raw_bytes, compresslevel=1)
+        ratio = len(compressed) / len(raw_bytes) if raw_bytes else 1
+        logger.info(
+            "Compressão: %s → %s (%.0f%% do original)",
+            _fmt_bytes(len(raw_bytes)), _fmt_bytes(len(compressed)), ratio * 100,
+        )
         for attempt in range(3):
-            with file.open("rb") as stream:
-                response = self._client.put(
-                    created["sas"]["url"],
-                    content=stream,
-                    headers={"content-type": "application/octet-stream"},
-                    timeout=None,
-                )
+            response = self._client.put(
+                created["sas"]["url"],
+                content=_io.BytesIO(compressed),
+                headers={"content-type": "application/octet-stream", "content-encoding": "gzip"},
+                timeout=None,
+            )
             if response.status_code != 499 or attempt == 2:
                 response.raise_for_status()
                 break

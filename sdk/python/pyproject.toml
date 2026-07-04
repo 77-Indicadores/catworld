@@ -3,7 +3,7 @@ requires = ["hatchling>=1.26"]
 build-backend = "hatchling.build"
 [project]
 name = "catworld-sdk"
-version = "0.1.7"
+version = "0.1.8"
 description = "Cliente oficial Python para a API Catworld"
 readme = "README.md"
 license = "MIT"
