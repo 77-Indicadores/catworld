@@ -1,5 +1,5 @@
 /**
- * BULK INSERT from Azure Blob — substitui o TDS bulk copy para imports CSV.
+ * BULK INSERT from Azure Blob — substitui o TDS bulk copy para imports CSV/XLSX.
  * SQL Server lê o arquivo diretamente na rede interna Azure (sem TDS overhead).
  *
  * Requer ONE-TIME setup no banco (já executado):
@@ -7,15 +7,15 @@
  *
  * Ativo automaticamente quando CATWORLD_AZURE_BLOB_CONNECTION_STRING está configurado.
  *
- * Formato de saída: CSV com pipe (|) como separador de campo e aspas duplas para NVARCHAR.
- * Isso garante que qualquer conteúdo (tabs, quebras de linha, vírgulas) seja tratado corretamente.
+ * P0: Aceita stream diretamente — sem download para disco no worker de import.
+ * Formato de saída: CSV com pipe (|) como separador e aspas duplas para NVARCHAR.
  */
 import { createHash } from "node:crypto";
 import { PassThrough } from "node:stream";
 import { BlobServiceClient, BlobSASPermissions, StorageSharedKeyCredential, generateBlobSASQueryParameters } from "@azure/storage-blob";
 import { sqlPool } from "@/server/azure/sql";
 import { quoteIdentifier } from "@/server/security/naming";
-import { rowsFromFile, type ParsedColumn } from "./parser";
+import { rowsFromFile, type ParsedColumn, type RowsFromFileOpts } from "./parser";
 import { env } from "@/server/env";
 
 function blobEnv() {
@@ -66,12 +66,14 @@ function makeCleanConverter(type: string): (v: unknown) => string {
   };
 }
 
+// P0+P1: source pode ser file path (string) ou stream direto do blob — sem disk download
 export async function bulkInsertFromBlob(
   uploadId: string,
-  filePath: string,
+  source: string | NodeJS.ReadableStream,
   mapping: ParsedColumn[],
   schema: string,
   stagingTable: string,
+  opts?: RowsFromFileOpts,
   onProgress?: (rows: number) => void
 ): Promise<number> {
   const { connStr, account, key, container } = blobEnv();
@@ -81,14 +83,14 @@ export async function bulkInsertFromBlob(
   const blockClient = service.getContainerClient(container).getBlockBlobClient(cleanBlobName);
   const converters = mapping.map(c => makeCleanConverter(c.sqlType));
 
-  // Stream: lê arquivo → converte → CSV com pipe → blob (tudo em memória mínima)
+  // Pipeline: source (file or stream) → convert rows → pipe-delimited CSV → blob
   let total = 0;
   const passThrough = new PassThrough();
   const uploadPromise = blockClient.uploadStream(passThrough, 8 * 1024 * 1024, 4, {
     blobHTTPHeaders: { blobContentType: "text/csv; charset=utf-8" },
   });
 
-  for await (const row of rowsFromFile(filePath, mapping)) {
+  for await (const row of rowsFromFile(source, mapping, opts)) {
     passThrough.write(converters.map((fn, i) => fn(row[mapping[i]!.sqlName])).join("|") + "\n");
     total++;
     if (total % 50_000 === 0) onProgress?.(total);
@@ -96,7 +98,7 @@ export async function bulkInsertFromBlob(
   passThrough.end();
   await uploadPromise;
 
-  // SAS de 30 min para este blob temporário
+  // SAS de 30 min para o blob temporário
   const credential = new StorageSharedKeyCredential(account, key);
   const sas = generateBlobSASQueryParameters(
     { containerName: container, blobName: cleanBlobName, permissions: BlobSASPermissions.parse("r"), expiresOn: new Date(Date.now() + 30 * 60_000) },
@@ -118,7 +120,7 @@ export async function bulkInsertFromBlob(
       WITH (TYPE = BLOB_STORAGE, LOCATION = 'https://${account}.blob.core.windows.net', CREDENTIAL = [${tempCred}])
     `);
     const bulkReq = pool.request();
-    (bulkReq as unknown as { timeout: number }).timeout = 30 * 60_000; // 30 min — arquivo grande
+    (bulkReq as unknown as { timeout: number }).timeout = 30 * 60_000;
     await bulkReq.query(`
       BULK INSERT ${quoteIdentifier(schema)}.${quoteIdentifier(stagingTable)}
       FROM '${container}/${cleanBlobName}'
