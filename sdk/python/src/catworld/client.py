@@ -132,7 +132,9 @@ class CatworldClient:
             mapping = _json.loads(mapping)
 
         cols = mapping.get("columns", [])
-        logger.info("%s coluna(s) detectada(s): %s", len(cols), [c.get("name", c) for c in cols[:5]])
+        if not cols:
+            raise UploadError("Nenhuma coluna detectada no arquivo — verifique se o arquivo possui cabeçalho e dados válidos")
+        logger.info("%s coluna(s) detectada(s): %s", len(cols), [c.get("originalName", c.get("sqlName", c)) for c in cols[:5]])
         logger.info("Confirmando importação...")
 
         self._request(
