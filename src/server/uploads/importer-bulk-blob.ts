@@ -67,6 +67,8 @@ function makeCleanConverter(type: string): (v: unknown) => string {
 }
 
 // P0+P1: source pode ser file path (string) ou stream direto do blob — sem disk download
+// isPreProcessed=true (Phase 2): source is already a clean pipe-delimited CSV with _cw_rh as last col;
+// skip rowsFromFile parsing and stream directly to blob for BULK INSERT.
 export async function bulkInsertFromBlob(
   uploadId: string,
   source: string | NodeJS.ReadableStream,
@@ -74,7 +76,8 @@ export async function bulkInsertFromBlob(
   schema: string,
   stagingTable: string,
   opts?: RowsFromFileOpts,
-  onProgress?: (rows: number) => void
+  onProgress?: (rows: number) => void,
+  isPreProcessed = false
 ): Promise<number> {
   const { connStr, account, key, container } = blobEnv();
   const cleanBlobName = `tmp/bulk-${uploadId}.csv`;
@@ -90,14 +93,33 @@ export async function bulkInsertFromBlob(
     blobHTTPHeaders: { blobContentType: "text/csv; charset=utf-8" },
   });
 
-  for await (const row of rowsFromFile(source, mapping, opts)) {
-    const converted = converters.map((fn, i) => fn(row[mapping[i]!.sqlName]));
-    const csvLine = converted.join("|");
-    // Hash Diff (Opt3): MD5 of pipe-joined converted values — NULL convention: empty string
-    const rowHash = createHash("md5").update(csvLine).digest("hex");
-    passThrough.write(csvLine + "|" + rowHash + "\n");
-    total++;
-    if (total % 50_000 === 0) onProgress?.(total);
+  if (isPreProcessed) {
+    // Phase 2: source is already a clean pipe CSV (converter output + _cw_rh appended by SDK).
+    // Stream directly to blob — no re-conversion needed.
+    let remainder = "";
+    for await (const chunk of source as NodeJS.ReadableStream) {
+      const text = remainder + (chunk as Buffer).toString("utf8");
+      const lines = text.split("\n");
+      remainder = lines.pop() ?? "";
+      for (const line of lines) {
+        if (line) {
+          passThrough.write(line + "\n");
+          total++;
+          if (total % 50_000 === 0) onProgress?.(total);
+        }
+      }
+    }
+    if (remainder.trim()) { passThrough.write(remainder + "\n"); total++; }
+  } else {
+    for await (const row of rowsFromFile(source, mapping, opts)) {
+      const converted = converters.map((fn, i) => fn(row[mapping[i]!.sqlName]));
+      const csvLine = converted.join("|");
+      // Hash Diff (Opt3): MD5 of pipe-joined converted values — NULL convention: empty string
+      const rowHash = createHash("md5").update(csvLine).digest("hex");
+      passThrough.write(csvLine + "|" + rowHash + "\n");
+      total++;
+      if (total % 50_000 === 0) onProgress?.(total);
+    }
   }
   passThrough.end();
   await uploadPromise;

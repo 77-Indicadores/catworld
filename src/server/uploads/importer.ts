@@ -34,19 +34,26 @@ export async function importUpload(uploadId:string, source:string|NodeJS.Readabl
  }
 
  // Option 2 — direct replace (wide tables, no _cw_rh yet): TRUNCATE + BULK INSERT, no staging DDL
- // Option 3 — delta replace (tables with _cw_rh): INSERT new rows + DELETE removed rows in transaction
+ // Option 3 Phase 1 — delta replace (server-side hash diff): full staging, EXCEPT-based delta
+ // Option 3 Phase 2 — client-side delta: SDK uploads only toInsert rows; server deletes toDelete by hash list
  const hasDeltaCol=targetExists&&await checkHasDeltaCol(pool,schema,tableName);
  const schemaOk=targetExists&&await schemaMatchesSilent(pool,schema,tableName,mapping);
  const deltaReplace=upload.mode==="replace"&&hasDeltaCol&&schemaOk;
  const directReplace=upload.mode==="replace"&&!hasDeltaCol&&schemaOk;
+ // Phase 2: SDK pre-computed delta; deltaJson holds JSON array of hashes to delete
+ const phase2=deltaReplace&&upload.deltaJson!=null;
+ const toDelete:string[]=phase2?(JSON.parse(upload.deltaJson!) as string[]):[];
 
  if(directReplace){
   await pool.request().query(`TRUNCATE TABLE ${target}`);
+ }else if(phase2){
+  // Phase 2: SDK uploads only toInsert rows as pre-processed CSV — no staging DDL needed.
+  // toInsert rows BULK INSERT directly into target; toDelete rows removed via hash list in transaction.
  }else if(!deltaReplace){
   // First import or schema change: create staging (includes _cw_rh as last col)
   await pool.request().query(`IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL DROP TABLE ${staging}; CREATE TABLE ${staging} (${colDefs})`);
  }else{
-  // Delta replace: staging still needed to BULK INSERT and compare hashes
+  // Phase 1 delta replace: staging needed for hash comparison
   await pool.request().query(`IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL DROP TABLE ${staging}; CREATE TABLE ${staging} (${colDefs})`);
  }
 
@@ -55,8 +62,8 @@ export async function importUpload(uploadId:string, source:string|NodeJS.Readabl
  try{
   const useBlob=!!env().CATWORLD_AZURE_BLOB_CONNECTION_STRING;
 
-  // directReplace inserts into target directly; delta and staging paths use staging table
-  const destTable=directReplace?tableName:stage;
+  // Phase 2 and directReplace insert into target directly; other paths use staging
+  const destTable=(directReplace||phase2)?tableName:stage;
 
   if(useBlob){
    // P0+P1: Stream source → convert → temp blob → BULK INSERT (no disk, no TDS overhead)
@@ -70,7 +77,7 @@ export async function importUpload(uploadId:string, source:string|NodeJS.Readabl
      void prisma.upload.update({where:{id:upload.id},data:{progress:Math.min(75,35+Math.floor(n/Math.max(knownRowCount,1)*40))}});
      lastProgressMs=now;
     }
-   });
+   },phase2);
   }else{
    // Fallback: TDS bulk copy — used when blob storage is not configured (local dev)
    const batchDelay=env().CATWORLD_IMPORT_BATCH_DELAY_MS;
@@ -113,8 +120,22 @@ export async function importUpload(uploadId:string, source:string|NodeJS.Readabl
    if(directReplace){
     // Option 2: data already in target via direct BULK INSERT — nothing to swap
     inserted=total;
+   }else if(phase2){
+    // Option 3 Phase 2: toInsert rows already in target (BULK INSERT completed above).
+    // Delete toDelete hashes using a temp table — safe because INSERT happened before transaction.
+    inserted=total;
+    if(toDelete.length>0){
+     const BATCH=500;
+     await request.query(`IF OBJECT_ID('tempdb..#cw_del','U') IS NOT NULL DROP TABLE #cw_del; CREATE TABLE #cw_del (rh CHAR(32))`);
+     for(let i=0;i<toDelete.length;i+=BATCH){
+      const vals=toDelete.slice(i,i+BATCH).map(h=>`('${h}')`).join(",");
+      await request.query(`INSERT INTO #cw_del VALUES ${vals}`);
+     }
+     const delRes=await request.query(`DELETE t FROM ${target} t JOIN #cw_del d ON t.[_cw_rh]=d.rh; SELECT @@ROWCOUNT deleted`);
+     updated=Number(delRes.recordset[0]?.deleted??0);
+    }
    }else if(deltaReplace){
-    // Option 3: INSERT new rows first (table never empty), then DELETE removed rows
+    // Option 3 Phase 1: INSERT new rows first (table never empty), then DELETE removed rows
     const colList=mapping.map(c=>quoteIdentifier(c.sqlName)).join(",");
     const deltaStats=await request.query(`
       DECLARE @ins INT,@del INT;

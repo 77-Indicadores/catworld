@@ -175,6 +175,7 @@ model Upload {
   insertedCount    BigInt?       @map("inserted_count")
   updatedCount     BigInt?       @map("updated_count")
   fileHash         String?       @map("file_hash") @db.VarChar(32)
+  deltaJson        String?       @map("delta_json") @db.NVarChar(Max)
   errorMessage     String?       @map("error_message") @db.NVarChar(Max)
   createdAt        DateTime      @default(now()) @map("created_at") @db.DateTime2
   updatedAt        DateTime      @updatedAt @map("updated_at") @db.DateTime2
