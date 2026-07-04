@@ -37,7 +37,7 @@ export async function POST(r: NextRequest, { params }: { params: Promise<{ id: s
           progress: 25,
         },
       }),
-      prisma.job.create({ data: { type: "IMPORT_UPLOAD", uploadId: id } }),
+      prisma.job.create({ data: { type: "IMPORT_UPLOAD", uploadId: id, maxAttempts: 5 } }),
     ]);
     return ok(job, undefined, 202);
   } catch (e) {

@@ -123,6 +123,8 @@ export async function bulkInsertFromBlob(
   }
   passThrough.end();
   await uploadPromise;
+  // Brief wait for blob consistency before Azure SQL reads it via BULK INSERT
+  await new Promise(r => setTimeout(r, 3000));
 
   // SAS de 30 min para o blob temporário
   const credential = new StorageSharedKeyCredential(account, key);
