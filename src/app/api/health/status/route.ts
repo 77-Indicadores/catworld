@@ -11,7 +11,7 @@ export async function GET() {
     blobActive ? testBlob(e.CATWORLD_AZURE_BLOB_CONNECTION_STRING!, e.CATWORLD_AZURE_BLOB_CONTAINER) : Promise.resolve({ ok: false, reason: "não configurado" }),
   ]);
 
-  const commit = process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_SHA ?? process.env.VERCEL_GIT_COMMIT_SHA ?? "local";
+  const commit = process.env.NEXT_PUBLIC_GIT_COMMIT ?? process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_SHA ?? process.env.VERCEL_GIT_COMMIT_SHA ?? "unknown";
 
   return NextResponse.json({
     commit: commit.slice(0, 7),

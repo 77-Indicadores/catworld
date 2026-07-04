@@ -1,7 +1,14 @@
 import type { NextConfig } from "next";
 import { withSentryConfig } from "@sentry/nextjs";
+import { execSync } from "node:child_process";
+
+function gitCommit() {
+  try { return execSync("git rev-parse --short HEAD", { stdio: ["ignore","pipe","ignore"] }).toString().trim(); }
+  catch { return "unknown"; }
+}
 
 const nextConfig: NextConfig = {
+  env: { NEXT_PUBLIC_GIT_COMMIT: gitCommit() },
   reactStrictMode: true,
   output: "standalone",
   experimental: {
