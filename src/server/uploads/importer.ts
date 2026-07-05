@@ -7,8 +7,12 @@ import { previewFile, rowsFromFile, type FilePreview, type ParsedColumn, type Ro
 import { bulkInsertFromBlob } from "./importer-bulk-blob";
 import { env } from "@/server/env";
 
+const SMALL_CSV_TDS_THRESHOLD_BYTES = 1 * 1024 * 1024;
+
 // P0+P1+P2+P5+P6
 export async function importUpload(uploadId:string, source:string|NodeJS.ReadableStream){
+ const importStarted=Date.now();
+ const phaseTimings:Record<string,unknown>={};
  const upload=await prisma.upload.findUniqueOrThrow({where:{id:uploadId},include:{dataset:true,table:true}});
  if(!upload.dataset)throw new Error("Dataset não definido");
 
@@ -39,7 +43,7 @@ export async function importUpload(uploadId:string, source:string|NodeJS.Readabl
  const hasDeltaCol=targetExists&&await checkHasDeltaCol(pool,schema,tableName);
  const schemaOk=targetExists&&await schemaMatchesSilent(pool,schema,tableName,mapping);
  const deltaReplace=upload.mode==="replace"&&hasDeltaCol&&schemaOk;
- const directReplace=upload.mode==="replace"&&!hasDeltaCol&&schemaOk;
+ const directReplace=false;
  // Phase 2: SDK pre-computed delta; deltaJson holds JSON array of hashes to delete
  const phase2=deltaReplace&&upload.deltaJson!=null;
  const toDelete:string[]=phase2?(JSON.parse(upload.deltaJson!) as string[]):[];
@@ -60,7 +64,9 @@ export async function importUpload(uploadId:string, source:string|NodeJS.Readabl
  let total=0,inserted=0,updated=0,lastProgressMs=Date.now();
 
  try{
-  const useBlob=!!env().CATWORLD_AZURE_BLOB_CONNECTION_STRING;
+  const ext=extname(upload.originalFilename).toLowerCase();
+  const smallCsv=!phase2&&ext===".csv"&&Number(upload.sizeBytes)<=SMALL_CSV_TDS_THRESHOLD_BYTES;
+  const useBlob=!!env().CATWORLD_AZURE_BLOB_CONNECTION_STRING&&!smallCsv;
 
   // Phase 2 and directReplace insert into target directly; other paths use staging
   const destTable=(directReplace||phase2)?tableName:stage;
@@ -69,34 +75,36 @@ export async function importUpload(uploadId:string, source:string|NodeJS.Readabl
    // P0+P1: Stream source → convert → temp blob → BULK INSERT (no disk, no TDS overhead)
    // P2: No batch delay needed — SQL Server throttles BULK INSERT internally
    const preview=upload.previewJson?JSON.parse(upload.previewJson) as FilePreview:null;
-   const ext=extname(upload.originalFilename).toLowerCase();
    const opts:RowsFromFileOpts={encoding:preview?.encoding??"utf8",separator:preview?.separator??",",ext};
-   total=await bulkInsertFromBlob(uploadId,source,mapping,schema,destTable,opts,(n)=>{
+   const blobResult=await bulkInsertFromBlob(uploadId,source,mapping,schema,destTable,opts,(n)=>{
     const now=Date.now();
     if(now-lastProgressMs>10_000){
      void prisma.upload.update({where:{id:upload.id},data:{progress:Math.min(75,35+Math.floor(n/Math.max(knownRowCount,1)*40))}});
      lastProgressMs=now;
     }
-   },phase2);
+   },phase2,knownRowCount);
+   total=blobResult.total;
+   phaseTimings.importMethod="blob-bulk";
+   phaseTimings.bulkBlob=blobResult;
   }else{
    // Fallback: TDS bulk copy — used when blob storage is not configured (local dev)
+   phaseTimings.importMethod=smallCsv?"tds-small-csv":"tds-fallback";
    const batchDelay=env().CATWORLD_IMPORT_BATCH_DELAY_MS;
    const converters=mapping.map(c=>makeConverter(c.sqlType));
    const bulkCols=mapping.map(c=>({name:c.sqlName,type:toSqlType(c.sqlType),opts:{nullable:c.nullable}}));
    let batch:Record<string,unknown>[]=[];
+   const tdsStarted=Date.now();
    const flush=async()=>{
     if(!batch.length)return;
     const bulk=new sql.Table(`${schema}.${destTable}`);
     bulk.create=false;
     for(const col of bulkCols)bulk.columns.add(col.name,col.type,col.opts);
-    if(!directReplace)bulk.columns.add("_cw_rh",sql.Char(32),{nullable:true});
+    bulk.columns.add("_cw_rh",sql.Char(32),{nullable:true});
     for(const row of batch){
      const vals=converters.map((fn,i)=>fn(row[mapping[i]!.sqlName]));
-     if(!directReplace){
-      const {createHash:ch}=await import("node:crypto");
-      const rh=ch("md5").update(vals.map(v=>v==null?"":String(v)).join("|")).digest("hex");
-      vals.push(rh);
-     }
+     const {createHash:ch}=await import("node:crypto");
+     const rh=ch("md5").update(vals.map(v=>v==null?"":String(v)).join("|")).digest("hex");
+     vals.push(rh);
      bulk.rows.add(...(vals as Parameters<typeof bulk.rows.add>));
     }
     await new sql.Request(pool).bulk(bulk,{tableLock:true});
@@ -108,8 +116,11 @@ export async function importUpload(uploadId:string, source:string|NodeJS.Readabl
      lastProgressMs=now;
     }
    };
-   for await(const row of rowsFromFile(source as string,mapping,{ext:extname(upload.originalFilename).toLowerCase()})){batch.push(row);if(batch.length>=50_000)await flush()}
+   const preview=upload.previewJson?JSON.parse(upload.previewJson) as FilePreview:null;
+   const opts:RowsFromFileOpts={encoding:preview?.encoding??"utf8",separator:preview?.separator??",",ext};
+   for await(const row of rowsFromFile(source,mapping,opts)){batch.push(row);if(batch.length>=50_000)await flush()}
    await flush();
+   phaseTimings.tdsBulkMs=Date.now()-tdsStarted;
   }
 
   // Short transaction for the atomic final operation
@@ -194,7 +205,9 @@ export async function importUpload(uploadId:string, source:string|NodeJS.Readabl
    const actual=Number((await request.query(`SELECT COUNT_BIG(*) count FROM ${target}`)).recordset[0].count);
    await tx.commit();
    const table=upload.table??await prisma.datasetTable.upsert({where:{datasetId_sqlName:{datasetId:upload.dataset.id,sqlName:tableName}},update:{},create:{datasetId:upload.dataset.id,name:tableName,sqlName:tableName}});
-   await prisma.$transaction([prisma.datasetColumn.deleteMany({where:{tableId:table.id}}),...mapping.map((c,i)=>prisma.datasetColumn.create({data:{tableId:table.id,ordinal:i+1,originalName:c.originalName,sqlName:c.sqlName,sqlType:c.sqlType,nullable:c.nullable}})),prisma.datasetTable.update({where:{id:table.id},data:{rowCount:BigInt(actual)}}),prisma.datasetVersion.create({data:{tableId:table.id,uploadId:upload.id,rowCount:BigInt(actual),schemaJson:JSON.stringify(mapping)}}),prisma.upload.update({where:{id:upload.id},data:{tableId:table.id,status:"COMPLETED",progress:100,rowCount:BigInt(actual),insertedCount:BigInt(inserted),updatedCount:BigInt(updated)}})]);
+   phaseTimings.totalImportMs=Date.now()-importStarted;
+   console.log("[importUpload:perf]",JSON.stringify({uploadId:upload.id,file:upload.originalFilename,rows:actual,...phaseTimings}));
+   await prisma.$transaction([prisma.datasetColumn.deleteMany({where:{tableId:table.id}}),...mapping.map((c,i)=>prisma.datasetColumn.create({data:{tableId:table.id,ordinal:i+1,originalName:c.originalName,sqlName:c.sqlName,sqlType:c.sqlType,nullable:c.nullable}})),prisma.datasetTable.update({where:{id:table.id},data:{rowCount:BigInt(actual)}}),prisma.datasetVersion.create({data:{tableId:table.id,uploadId:upload.id,rowCount:BigInt(actual),schemaJson:JSON.stringify(mapping)}}),prisma.auditEvent.create({data:{eventType:"UPLOAD_IMPORT_PERF",resourceType:"upload",resourceId:upload.id,detailJson:JSON.stringify({file:upload.originalFilename,rows:actual,...phaseTimings}),success:true}}),prisma.upload.update({where:{id:upload.id},data:{tableId:table.id,status:"COMPLETED",progress:100,rowCount:BigInt(actual),insertedCount:BigInt(inserted),updatedCount:BigInt(updated)}})]);
    return{tableId:table.id,inserted,updated,rowCount:actual};
   }catch(e){await tx.rollback().catch(()=>undefined);throw e}
  }catch(e){
@@ -240,6 +253,6 @@ export function convert(v:unknown,type:string){
   const iso=br?`${br[3]}-${br[2]}-${br[1]}${br[4]}`:s;
   return new Date(type==="DATE"?iso.slice(0,10)+"T00:00:00Z":iso);
  }
- if(type==="TIME"){const s=String(v).trim();const p=s.split(":");const h=parseInt(p[0]??"0",10),m=parseInt(p[1]??"0",10),sec=parseFloat(p[2]??"0");if(isNaN(h)||isNaN(m)||h>23)return null;return new Date(1970,0,1,h,m,Math.floor(sec),Math.round((sec%1)*1000))}
+ if(type==="TIME")return String(v).trim();
  return String(v);
 }

@@ -303,13 +303,13 @@ class CatworldClient:
             time.sleep(1)
         logger.info("Arquivo enviado, aguardando processamento...")
 
-        self._request("POST", f"/api/v1/uploads/{upload_id}/uploaded")
-        preview = self._wait_upload(upload_id, "AWAITING_CONFIRMATION", poll_interval)
-
         if delta:
-            # Phase 2: use existing mapping from server (not detected from uploaded file)
+            # Phase 2 uploads a pre-processed pipe CSV without headers, so preview would
+            # parse data as a header. Confirm import directly with the server mapping.
             cols = delta["mapping"]
         else:
+            self._request("POST", f"/api/v1/uploads/{upload_id}?action=uploaded")
+            preview = self._wait_upload(upload_id, "AWAITING_CONFIRMATION", poll_interval)
             mapping = preview["previewJson"]
             if isinstance(mapping, str):
                 mapping = _json.loads(mapping)
@@ -329,7 +329,7 @@ class CatworldClient:
         if delta:
             confirm_body["deltaToDelete"] = delta["to_delete"]
 
-        self._request("POST", f"/api/v1/uploads/{upload_id}/confirm", json=confirm_body)
+        self._request("POST", f"/api/v1/uploads/{upload_id}?action=confirm", json=confirm_body)
 
         result = self._wait_upload(upload_id, "COMPLETED", poll_interval)
         logger.info("Upload concluído: %s linha(s) importada(s)", result.get("rowCount", "?"))

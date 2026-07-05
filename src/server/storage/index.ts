@@ -28,5 +28,5 @@ export async function deleteFile(blobName: string) {
 }
 
 export async function uploadTarget(uploadId: string) {
-  return { url: `/api/v1/uploads/${uploadId}/file`, expiresAt: new Date(Date.now() + 15 * 60_000) };
+  return { url: `/api/v1/uploads/${uploadId}`, expiresAt: new Date(Date.now() + 15 * 60_000) };
 }

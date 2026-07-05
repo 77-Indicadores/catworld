@@ -1,22 +1,23 @@
-/**
- * BULK INSERT from Azure Blob — substitui o TDS bulk copy para imports CSV/XLSX.
- * SQL Server lê o arquivo diretamente na rede interna Azure (sem TDS overhead).
- *
- * Requer ONE-TIME setup no banco (já executado):
- *   CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'CatWorld_Mk2024!';
- *
- * Ativo automaticamente quando CATWORLD_AZURE_BLOB_CONNECTION_STRING está configurado.
- *
- * P0: Aceita stream diretamente — sem download para disco no worker de import.
- * Formato de saída: CSV com pipe (|) como separador e aspas duplas para NVARCHAR.
- */
 import { createHash } from "node:crypto";
 import { PassThrough } from "node:stream";
-import { BlobServiceClient, BlobSASPermissions, StorageSharedKeyCredential, generateBlobSASQueryParameters } from "@azure/storage-blob";
+import {
+  BlobSASPermissions,
+  BlobServiceClient,
+  StorageSharedKeyCredential,
+  generateBlobSASQueryParameters,
+} from "@azure/storage-blob";
 import { sqlPool } from "@/server/azure/sql";
 import { quoteIdentifier } from "@/server/security/naming";
 import { rowsFromFile, type ParsedColumn, type RowsFromFileOpts } from "./parser";
 import { env } from "@/server/env";
+
+export type BulkBlobResult = {
+  total: number;
+  timings: Record<string, number>;
+  cleanBlobName: string;
+  reusedCleanBlob: boolean;
+  bulkAttempts: number;
+};
 
 function blobEnv() {
   const e = env();
@@ -26,11 +27,8 @@ function blobEnv() {
   return { connStr, account: accountMatch[1]!, key: keyMatch[1]!, container: e.CATWORLD_AZURE_BLOB_CONTAINER };
 }
 
-// Conversor que gera CSV seguro: strings entre aspas duplas, numéricos sem aspas
 function makeCleanConverter(type: string): (v: unknown) => string {
-  if (type === "BIGINT") {
-    return v => (v == null || String(v).trim() === "") ? "" : String(v).trim();
-  }
+  if (type === "BIGINT") return v => (v == null || String(v).trim() === "") ? "" : String(v).trim();
   if (type.startsWith("DECIMAL")) {
     return v => {
       if (v == null || String(v).trim() === "") return "";
@@ -56,19 +54,13 @@ function makeCleanConverter(type: string): (v: unknown) => string {
       return new Date(iso).toISOString().replace("T", " ").replace("Z", "");
     };
   }
-  if (type === "TIME") {
-    return v => (v == null || String(v).trim() === "") ? "" : String(v).trim();
-  }
-  // NVARCHAR — com aspas duplas; aspas internas escapadas como ""
+  if (type === "TIME") return v => (v == null || String(v).trim() === "") ? "" : String(v).trim();
   return v => {
     if (v == null || String(v).trim() === "") return '""';
     return '"' + String(v).replace(/"/g, '""') + '"';
   };
 }
 
-// P0+P1: source pode ser file path (string) ou stream direto do blob — sem disk download
-// isPreProcessed=true (Phase 2): source is already a clean pipe-delimited CSV with _cw_rh as last col;
-// skip rowsFromFile parsing and stream directly to blob for BULK INSERT.
 export async function bulkInsertFromBlob(
   uploadId: string,
   source: string | NodeJS.ReadableStream,
@@ -77,56 +69,72 @@ export async function bulkInsertFromBlob(
   stagingTable: string,
   opts?: RowsFromFileOpts,
   onProgress?: (rows: number) => void,
-  isPreProcessed = false
-): Promise<number> {
+  isPreProcessed = false,
+  knownRowCount = 0
+): Promise<BulkBlobResult> {
   const { connStr, account, key, container } = blobEnv();
   const cleanBlobName = `tmp/bulk-${uploadId}.csv`;
+  const timings: Record<string, number> = {};
+  const mark = async <T>(name: string, fn: () => Promise<T>): Promise<T> => {
+    const started = Date.now();
+    try {
+      return await fn();
+    } finally {
+      timings[name] = (timings[name] ?? 0) + Date.now() - started;
+    }
+  };
 
   const service = BlobServiceClient.fromConnectionString(connStr);
   const blockClient = service.getContainerClient(container).getBlockBlobClient(cleanBlobName);
   const converters = mapping.map(c => makeCleanConverter(c.sqlType));
 
-  // Pipeline: source (file or stream) → convert rows → pipe-delimited CSV → blob
   let total = 0;
-  const passThrough = new PassThrough();
-  const uploadPromise = blockClient.uploadStream(passThrough, 8 * 1024 * 1024, 4, {
-    blobHTTPHeaders: { blobContentType: "text/csv; charset=utf-8" },
-  });
+  const reusedCleanBlob = await mark("cleanBlobExistsMs", () => blockClient.exists());
+  if (reusedCleanBlob) {
+    total = knownRowCount;
+  } else {
+    await mark("convertUploadCleanBlobMs", async () => {
+      const passThrough = new PassThrough();
+      const uploadPromise = blockClient.uploadStream(passThrough, 8 * 1024 * 1024, 4, {
+        blobHTTPHeaders: { blobContentType: "text/csv; charset=utf-8" },
+      });
 
-  if (isPreProcessed) {
-    // Phase 2: source is already a clean pipe CSV (converter output + _cw_rh appended by SDK).
-    // Stream directly to blob — no re-conversion needed.
-    let remainder = "";
-    for await (const chunk of source as NodeJS.ReadableStream) {
-      const text = remainder + (chunk as Buffer).toString("utf8");
-      const lines = text.split("\n");
-      remainder = lines.pop() ?? "";
-      for (const line of lines) {
-        if (line) {
-          passThrough.write(line + "\n");
+      if (isPreProcessed) {
+        let remainder = "";
+        for await (const chunk of source as NodeJS.ReadableStream) {
+          const text = remainder + (chunk as Buffer).toString("utf8");
+          const lines = text.split("\n");
+          remainder = lines.pop() ?? "";
+          for (const line of lines) {
+            if (line) {
+              passThrough.write(line + "\n");
+              total++;
+              if (total % 50_000 === 0) onProgress?.(total);
+            }
+          }
+        }
+        if (remainder.trim()) {
+          passThrough.write(remainder + "\n");
+          total++;
+        }
+      } else {
+        for await (const row of rowsFromFile(source, mapping, opts)) {
+          const converted = converters.map((fn, i) => fn(row[mapping[i]!.sqlName]));
+          const csvLine = converted.join("|");
+          const rowHash = createHash("md5").update(csvLine).digest("hex");
+          passThrough.write(csvLine + "|" + rowHash + "\n");
           total++;
           if (total % 50_000 === 0) onProgress?.(total);
         }
       }
-    }
-    if (remainder.trim()) { passThrough.write(remainder + "\n"); total++; }
-  } else {
-    for await (const row of rowsFromFile(source, mapping, opts)) {
-      const converted = converters.map((fn, i) => fn(row[mapping[i]!.sqlName]));
-      const csvLine = converted.join("|");
-      // Hash Diff (Opt3): MD5 of pipe-joined converted values — NULL convention: empty string
-      const rowHash = createHash("md5").update(csvLine).digest("hex");
-      passThrough.write(csvLine + "|" + rowHash + "\n");
-      total++;
-      if (total % 50_000 === 0) onProgress?.(total);
-    }
-  }
-  passThrough.end();
-  await uploadPromise;
-  // Brief wait for blob consistency before Azure SQL reads it via BULK INSERT
-  await new Promise(r => setTimeout(r, 3000));
 
-  // SAS de 30 min para o blob temporário
+      passThrough.end();
+      await uploadPromise;
+    });
+  }
+
+  await mark("blobConsistencyWaitMs", () => new Promise(r => setTimeout(r, 3000)));
+
   const credential = new StorageSharedKeyCredential(account, key);
   const sas = generateBlobSASQueryParameters(
     { containerName: container, blobName: cleanBlobName, permissions: BlobSASPermissions.parse("r"), expiresOn: new Date(Date.now() + 30 * 60_000) },
@@ -137,19 +145,22 @@ export async function bulkInsertFromBlob(
   const hash = createHash("md5").update(uploadId).digest("hex").slice(0, 8);
   const tempCred = `CatworldBulkCred_${hash}`;
   const tempDs = `CatworldBulkDS_${hash}`;
+  let bulkAttempts = 0;
+  let keepCleanBlobForRetry = false;
 
   try {
-    await pool.request().query(`
+    await mark("createScopedCredentialMs", () => pool.request().query(`
       CREATE DATABASE SCOPED CREDENTIAL [${tempCred}]
       WITH IDENTITY = 'SHARED ACCESS SIGNATURE', SECRET = '${sas}'
-    `);
-    await pool.request().query(`
+    `));
+    await mark("createExternalDataSourceMs", () => pool.request().query(`
       CREATE EXTERNAL DATA SOURCE [${tempDs}]
       WITH (TYPE = BLOB_STORAGE, LOCATION = 'https://${account}.blob.core.windows.net', CREDENTIAL = [${tempCred}])
-    `);
+    `));
+
     const bulkReq = pool.request();
     (bulkReq as unknown as { timeout: number }).timeout = 30 * 60_000;
-    await bulkReq.query(`
+    const bulkSql = `
       BULK INSERT ${quoteIdentifier(schema)}.${quoteIdentifier(stagingTable)}
       FROM '${container}/${cleanBlobName}'
       WITH (
@@ -162,12 +173,29 @@ export async function bulkInsertFromBlob(
         TABLOCK,
         CODEPAGE = '65001'
       )
-    `);
+    `;
+
+    for (let attempt = 1; ; attempt++) {
+      bulkAttempts = attempt;
+      try {
+        await mark("bulkInsertMs", () => bulkReq.query(bulkSql));
+        break;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (attempt >= 5 || !message.includes('OLE DB provider "BULK"')) {
+          keepCleanBlobForRetry = message.includes('OLE DB provider "BULK"');
+          throw error;
+        }
+        const waitMs = 5_000 * attempt;
+        console.warn(`[bulkInsert] transient BULK provider error, retry ${attempt}/5 in ${waitMs}ms: ${message}`);
+        await mark("bulkRetryWaitMs", () => new Promise(r => setTimeout(r, waitMs)));
+      }
+    }
   } finally {
     await pool.request().query(`IF EXISTS (SELECT * FROM sys.external_data_sources WHERE name='${tempDs}') DROP EXTERNAL DATA SOURCE [${tempDs}]`).catch(() => {});
     await pool.request().query(`IF EXISTS (SELECT * FROM sys.database_scoped_credentials WHERE name='${tempCred}') DROP DATABASE SCOPED CREDENTIAL [${tempCred}]`).catch(() => {});
-    await blockClient.delete().catch(() => {});
+    if (!keepCleanBlobForRetry) await blockClient.delete().catch(() => {});
   }
 
-  return total;
+  return { total, timings, cleanBlobName, reusedCleanBlob, bulkAttempts };
 }

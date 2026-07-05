@@ -26,7 +26,7 @@ export function UploadFlow({ datasetId, targetTable, onComplete }: { datasetId: 
       setUploadId(b.data.upload.id);
       const r = await fetch(b.data.sas.url, { method: "PUT", headers: { "content-type": picked.type || "application/octet-stream" }, body: picked });
       if (!r.ok) throw new Error("Falha ao enviar arquivo");
-      await fetch(`/api/v1/uploads/${b.data.upload.id}/uploaded`, { method: "POST" });
+      await fetch(`/api/v1/uploads/${b.data.upload.id}?action=uploaded`, { method: "POST" });
       await poll(b.data.upload.id, "AWAITING_CONFIRMATION");
     } catch (e) { setError(e instanceof Error ? e.message : "Falha no upload"); }
   }
@@ -44,7 +44,7 @@ export function UploadFlow({ datasetId, targetTable, onComplete }: { datasetId: 
     if (!preview || !uploadId) return;
     setStatus("QUEUED_IMPORT");
     try {
-      const r = await fetch(`/api/v1/uploads/${uploadId}/confirm`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ datasetId, tableId: targetTable?.id ?? null, mode, keyColumn: mode === "upsert" ? keyColumn : null, mapping: preview.columns }) });
+      const r = await fetch(`/api/v1/uploads/${uploadId}?action=confirm`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ datasetId, tableId: targetTable?.id ?? null, mode, keyColumn: mode === "upsert" ? keyColumn : null, mapping: preview.columns }) });
       const b = await r.json();
       if (!r.ok) throw new Error(b.error?.message);
       await poll(uploadId, "COMPLETED");
