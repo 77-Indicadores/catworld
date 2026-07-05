@@ -30,7 +30,7 @@ describe("inferência de schema escaneia o arquivo inteiro, não só a amostra",
     const path = await csv(`id,texto\n${rows}\n`);
     const preview = await previewFile(path);
     const col = preview.columns.find((c) => c.sqlName === "texto");
-    expect(col?.sqlType).toBe("NVARCHAR(500)");
+    expect(col?.sqlType).toBe("NVARCHAR(625)");
   });
 
   it("trata campo só com espaço em branco como nulo", async () => {

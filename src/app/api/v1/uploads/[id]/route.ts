@@ -61,7 +61,8 @@ export async function POST(r: NextRequest, { params }: { params: Promise<{ id: s
         deltaToDelete: z.array(z.string().regex(/^[0-9a-f]{32}$/, "Hash inv?lido")).optional(),
       }).parse(await r.json());
 
-      const dataset = await prisma.dataset.findUniqueOrThrow({ where: { id: input.datasetId } });
+      const dataset = await prisma.dataset.findUnique({ where: { id: input.datasetId } });
+      if (!dataset) throw new ApiError(404, "DATASET_NOT_FOUND", "Dataset não encontrado");
       if (!await canAccess(actor, "WRITE", dataset.projectId, dataset.id)) {
         throw new ApiError(403, "FORBIDDEN", "Permiss?o insuficiente para este dataset");
       }

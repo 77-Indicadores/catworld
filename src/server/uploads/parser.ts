@@ -91,7 +91,11 @@ function updateStats(s:ColumnStats,raw:unknown){
   if(isDatetime)s.hasTimePart=true;
   if(s.allTime&&!RE_TIME.test(trimmed))s.allTime=false;
 }
-function columnsFromStats(headers:string[],stats:ColumnStats[]):ParsedColumn[]{const used=new Map<string,number>();return headers.map((header,index)=>{let name=sqlIdentifier(header||`col_${index+1}`);const n=(used.get(name)??0)+1;used.set(name,n);if(n>1)name=`${name}_${n}`;const s=stats[index]??newStats();const sqlType=s.sampleCount===0?"NVARCHAR(255)":s.allInt?"BIGINT":s.allDecimal?"DECIMAL(18,4)":s.allDateLike&&s.hasTimePart?"DATETIME2":s.allDateLike?"DATE":s.allTime?"TIME":s.maxLen>4000?"NVARCHAR(MAX)":`NVARCHAR(${Math.max(s.maxLen,50)})`;return{originalName:header,sqlName:name,sqlType,nullable:s.hasNull}})}
+function textSqlType(maxLen:number){
+ const padded=Math.max(50,Math.ceil(maxLen*1.25),maxLen+32);
+ return padded>4000?"NVARCHAR(MAX)":`NVARCHAR(${padded})`;
+}
+function columnsFromStats(headers:string[],stats:ColumnStats[]):ParsedColumn[]{const used=new Map<string,number>();return headers.map((header,index)=>{let name=sqlIdentifier(header||`col_${index+1}`);const n=(used.get(name)??0)+1;used.set(name,n);if(n>1)name=`${name}_${n}`;const s=stats[index]??newStats();const sqlType=s.sampleCount===0?"NVARCHAR(255)":s.allInt?"BIGINT":s.allDecimal?"DECIMAL(18,4)":s.allDateLike&&s.hasTimePart?"DATETIME2":s.allDateLike?"DATE":s.allTime?"TIME":textSqlType(s.maxLen);return{originalName:header,sqlName:name,sqlType,nullable:s.hasNull}})}
 
 // P0: Accept stream in addition to file path — avoids re-downloading blob for import step.
 // When source is a stream, opts.encoding + opts.separator + opts.ext are required for CSV.

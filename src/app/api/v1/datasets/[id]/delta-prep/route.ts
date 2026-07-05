@@ -6,7 +6,7 @@ import { sqlPool } from "@/server/azure/sql";
 import { resolveActor } from "@/server/auth/actor";
 import { canAccess } from "@/server/auth/permissions";
 import { sqlIdentifier, quoteIdentifier } from "@/server/security/naming";
-import { handleApiError } from "@/server/http";
+import { ApiError, handleApiError } from "@/server/http";
 import { env } from "@/server/env";
 
 // Streams current _cw_rh hash values for a table so the SDK can compute delta client-side.
@@ -25,7 +25,8 @@ export async function POST(r: NextRequest, { params }: { params: Promise<{ id: s
     // Phase 2 only works with blob storage (direct BULK INSERT path)
     if (!env().CATWORLD_AZURE_BLOB_CONNECTION_STRING) return notCapable("no-blob");
 
-    const dataset = await prisma.dataset.findUniqueOrThrow({ where: { id: datasetId } });
+    const dataset = await prisma.dataset.findUnique({ where: { id: datasetId } });
+    if (!dataset) throw new ApiError(404, "DATASET_NOT_FOUND", "Dataset não encontrado");
     if (!await canAccess(a, "READ", dataset.projectId, dataset.id))
       return new Response("Forbidden", { status: 403 });
 
