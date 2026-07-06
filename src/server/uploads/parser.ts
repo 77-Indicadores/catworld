@@ -1,5 +1,6 @@
 import { createReadStream } from "node:fs";
 import { extname } from "node:path";
+import type { Stream } from "node:stream";
 import { parse } from "csv-parse";
 import iconv from "iconv-lite";
 import ExcelJS from "exceljs";
@@ -9,9 +10,6 @@ import { hasDateTimePart, isDateLike } from "./date-normalize";
 export type ParsedColumn={originalName:string;sqlName:string;sqlType:string;nullable:boolean};
 export type FilePreview={columns:ParsedColumn[];rows:Record<string,unknown>[];rowCount:number;encoding:string;separator:string|null;sheetNames:string[]};
 export type RowsFromFileOpts={encoding?:string;separator?:string;ext?:string};
-
-// P3: Sample only first 50k rows for type inference — rowCount stays exact
-const STATS_SAMPLE_LIMIT=50_000;
 
 export async function previewFile(path:string):Promise<FilePreview>{
  const ext=extname(path).toLowerCase(); if(ext===".csv")return previewCsv(path); if(ext===".xlsx")return previewXlsx(path); if(ext===".xls")throw new Error("XLS legado deve ser convertido pelo worker antes da leitura"); throw new Error("Formato não suportado. Use CSV, XLSX ou XLS");
@@ -48,8 +46,7 @@ async function previewCsv(path:string){
   if(!headers.length){headers=row.map(String);stats=headers.map(newStats);continue}
   count++;
   if(sampleRows.length<20)sampleRows.push(row.map(v=>v??""));
-  // P3: collect stats only for first STATS_SAMPLE_LIMIT rows
-  if(count<=STATS_SAMPLE_LIMIT)headers.forEach((_,i)=>{stats[i]??=newStats();updateStats(stats[i],row[i])});
+  headers.forEach((_,i)=>{stats[i]??=newStats();updateStats(stats[i],row[i])});
  }
  const columns=columnsFromStats(headers,stats),objects=sampleRows.map(row=>Object.fromEntries(columns.map((c,i)=>[c.sqlName,row[i]??null])));
  return{columns,rows:objects,rowCount:count,encoding,separator,sheetNames:[]};
@@ -63,7 +60,7 @@ async function previewXlsx(path:string){
   if(rowNumber===1){headers=values;stats=headers.map(newStats);return}
   count++;
   if(sampleRows.length<20)sampleRows.push(values);
-  if(count<=STATS_SAMPLE_LIMIT)headers.forEach((_,i)=>{stats[i]??=newStats();updateStats(stats[i],values[i])});
+  headers.forEach((_,i)=>{stats[i]??=newStats();updateStats(stats[i],values[i])});
  });
  // Filter out empty headers so Object.fromEntries never sees undefined keys
  const validIndices=headers.map((h,i)=>h&&h.trim()?i:-1).filter(i=>i>=0);
@@ -100,6 +97,16 @@ function textSqlType(maxLen:number){
 }
 function columnsFromStats(headers:string[],stats:ColumnStats[]):ParsedColumn[]{const used=new Map<string,number>();return headers.map((header,index)=>{let name=sqlIdentifier(header||`col_${index+1}`);const n=(used.get(name)??0)+1;used.set(name,n);if(n>1)name=`${name}_${n}`;const s=stats[index]??newStats();const sqlType=s.sampleCount===0?"NVARCHAR(255)":s.allInt?"BIGINT":s.allDecimal?"DECIMAL(18,4)":s.allDateLike&&s.hasTimePart?"DATETIME2":s.allDateLike?"DATE":s.allTime?"TIME":textSqlType(s.maxLen);return{originalName:header,sqlName:name,sqlType,nullable:s.hasNull}})}
 
+function xlsxColumnIndices(headers:string[],columns:ParsedColumn[]){
+ let cursor=0;
+ return columns.map((column,index)=>{
+  for(let i=cursor;i<headers.length;i++){
+   if((headers[i]??"")===column.originalName){cursor=i+1;return i}
+  }
+  return index;
+ });
+}
+
 // P0: Accept stream in addition to file path — avoids re-downloading blob for import step.
 // When source is a stream, opts.encoding + opts.separator + opts.ext are required for CSV.
 export async function* rowsFromFile(
@@ -123,9 +130,19 @@ export async function* rowsFromFile(
  }
 
  if(ext===".xlsx"){
+  if(typeof source==="string"){
+   const workbook=new ExcelJS.Workbook();await workbook.xlsx.readFile(source);const sheet=workbook.worksheets[0];if(!sheet)return;
+   let header=true,columnIndices:number[]=columns.map((_,i)=>i);
+   for(const row of sheet.getRows(1,sheet.rowCount)??[]){
+    const values=(Array.isArray(row.values)?row.values.slice(1):[]).map(cellValue);
+    if(header){header=false;columnIndices=xlsxColumnIndices(values,columns);continue}
+    yield Object.fromEntries(columns.map((c,i)=>[c.sqlName,values[columnIndices[i]!]??null]));
+   }
+   return;
+  }
   // ExcelJS WorkbookReader accepts both file path and Readable stream
-  const reader=new ExcelJS.stream.xlsx.WorkbookReader(source as string,{worksheets:"emit",sharedStrings:"cache",styles:"ignore",hyperlinks:"ignore"});
-  for await(const worksheet of reader){let header=true;for await(const row of worksheet){if(header){header=false;continue}const values=(Array.isArray(row.values)?row.values.slice(1):[]).map(cellValue);yield Object.fromEntries(columns.map((c,i)=>[c.sqlName,values[i]??null]))}break}
+  const reader=new ExcelJS.stream.xlsx.WorkbookReader(source as unknown as Stream,{worksheets:"emit",sharedStrings:"cache",styles:"ignore",hyperlinks:"ignore"});
+  for await(const worksheet of reader){let header=true,columnIndices:number[]=columns.map((_,i)=>i);for await(const row of worksheet){const values=(Array.isArray(row.values)?row.values.slice(1):[]).map(cellValue);if(header){header=false;columnIndices=xlsxColumnIndices(values,columns);continue}yield Object.fromEntries(columns.map((c,i)=>[c.sqlName,values[columnIndices[i]!]??null]))}break}
   return;
  }
 
