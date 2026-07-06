@@ -39,7 +39,12 @@ async function work(job:Claimed){
 }
 
 async function fail(job:Claimed,error:unknown){const message=error instanceof Error?error.message:String(error),retry=job.attempts<job.max_attempts;await prisma.$transaction([prisma.job.update({where:{id:job.id},data:{status:retry?"QUEUED":"FAILED",lastError:message,availableAt:new Date(Date.now()+Math.min(job.attempts*30000,120000)),lockedAt:null,lockedBy:null}}),...(job.upload_id?[prisma.upload.update({where:{id:job.upload_id},data:{status:retry?"RETRYING":"FAILED",errorMessage:message}})]:[])]);console.error("[FAIL] upload=%s attempt=%d/%d error=%s",job.upload_id,job.attempts,job.max_attempts,message);const sqlError=error as Error&{number?:number;state?:string};if(error instanceof Error&&sqlError.number)console.error("[FAIL] sqlNumber=%d sqlState=%s",sqlError.number,sqlError.state??"");}
-async function recoverStale(){await prisma.job.updateMany({where:{status:"RUNNING",heartbeatAt:{lt:new Date(Date.now()-120000)}},data:{status:"QUEUED",lockedAt:null,lockedBy:null,heartbeatAt:null,availableAt:new Date()}})}
+async function recoverStale(){
+ // P5: Mark stale jobs that exceeded max attempts as FAILED (don't re-queue)
+ await prisma.$executeRawUnsafe(`UPDATE dbo.cw_jobs SET status='FAILED',locked_at=NULL,locked_by=NULL,heartbeat_at=NULL,last_error='Worker crashed (stale heartbeat, max attempts reached)' WHERE status='RUNNING' AND heartbeat_at<DATEADD(SECOND,-120,SYSUTCDATETIME()) AND attempts>=max_attempts`);
+ // Reset only jobs that still have retries left
+ await prisma.job.updateMany({where:{status:"RUNNING",heartbeatAt:{lt:new Date(Date.now()-120000)}},data:{status:"QUEUED",lockedAt:null,lockedBy:null,heartbeatAt:null,availableAt:new Date()}});
+}
 async function loop(concurrencyId:number){const workerLabel=`${env().CATWORLD_WORKER_ID}-${concurrencyId}`;console.log(`[worker] ${workerLabel} iniciado`);while(!stopping){const job=await claim(workerLabel);if(!job){await new Promise(r=>setTimeout(r,env().CATWORLD_JOB_POLL_MS));continue}try{await work(job)}catch(e){await fail(job,e)}}}
 async function main(){const concurrency=env().CATWORLD_WORKER_CONCURRENCY;console.log(`Catworld worker ${env().CATWORLD_WORKER_ID} iniciado (concorrência: ${concurrency})`);let lastRecovery=0;const recoveryLoop=async()=>{while(!stopping){if(Date.now()-lastRecovery>60000){await recoverStale();lastRecovery=Date.now()}await new Promise(r=>setTimeout(r,1000))}};const workers=Array.from({length:concurrency},(_,i)=>loop(i+1));await Promise.all([recoveryLoop(),...workers]);await prisma.$disconnect()}
 void main().catch(e=>{console.error(e);process.exitCode=1});

@@ -95,7 +95,9 @@ function updateStats(s:ColumnStats,raw:unknown){
 function textSqlType(maxLen:number){
  return "NVARCHAR(MAX)";
 }
-function columnsFromStats(headers:string[],stats:ColumnStats[]):ParsedColumn[]{const used=new Map<string,number>();return headers.map((header,index)=>{let name=sqlIdentifier(header||`col_${index+1}`);const n=(used.get(name)??0)+1;used.set(name,n);if(n>1)name=`${name}_${n}`;const s=stats[index]??newStats();const sqlType=s.sampleCount===0?"NVARCHAR(255)":s.allInt?"BIGINT":s.allDecimal?"DECIMAL(18,4)":s.allDateLike&&s.hasTimePart?"DATETIME2":s.allDateLike?"DATE":s.allTime?"TIME":textSqlType(s.maxLen);return{originalName:header,sqlName:name,sqlType,nullable:s.hasNull}})}
+// P5: All columns are always nullable — BULK INSERT treats empty CSV fields as NULL.
+//     Even columns that appear NOT NULL in sample rows can have empty/invalid values later in the file.
+function columnsFromStats(headers:string[],stats:ColumnStats[]):ParsedColumn[]{const used=new Map<string,number>();return headers.map((header,index)=>{let name=sqlIdentifier(header||`col_${index+1}`);const n=(used.get(name)??0)+1;used.set(name,n);if(n>1)name=`${name}_${n}`;const s=stats[index]??newStats();const sqlType=s.sampleCount===0?"NVARCHAR(255)":s.allInt?"BIGINT":s.allDecimal?"DECIMAL(18,4)":s.allDateLike&&s.hasTimePart?"DATETIME2":s.allDateLike?"DATE":s.allTime?"TIME":textSqlType(s.maxLen);return{originalName:header,sqlName:name,sqlType,nullable:true}})}
 
 function xlsxColumnIndices(headers:string[],columns:ParsedColumn[]){
  let cursor=0;
