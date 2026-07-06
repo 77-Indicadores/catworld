@@ -169,10 +169,10 @@ export async function bulkInsertFromBlob(
     for (let attempt = 1; ; attempt++) {
       bulkAttempts = attempt;
       try {
-        // Drop stale credential/datasource and truncate staging on retry
+        // Drop stale credential/datasource before every attempt (survives failed cleanup from prior runs)
+        await pool.request().query(`IF EXISTS (SELECT * FROM sys.external_data_sources WHERE name='${tempDs}') DROP EXTERNAL DATA SOURCE [${tempDs}]`);
+        await pool.request().query(`IF EXISTS (SELECT * FROM sys.database_scoped_credentials WHERE name='${tempCred}') DROP DATABASE SCOPED CREDENTIAL [${tempCred}]`);
         if (attempt > 1) {
-          await pool.request().query(`IF EXISTS (SELECT * FROM sys.external_data_sources WHERE name='${tempDs}') DROP EXTERNAL DATA SOURCE [${tempDs}]`);
-          await pool.request().query(`IF EXISTS (SELECT * FROM sys.database_scoped_credentials WHERE name='${tempCred}') DROP DATABASE SCOPED CREDENTIAL [${tempCred}]`);
           await pool.request().query(`TRUNCATE TABLE ${quoteIdentifier(schema)}.${quoteIdentifier(stagingTable)}`);
         }
 

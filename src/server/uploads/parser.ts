@@ -57,7 +57,7 @@ async function previewCsv(path:string){
 
 async function previewXlsx(path:string){
  const workbook=new ExcelJS.Workbook();await workbook.xlsx.readFile(path);const sheet=workbook.worksheets[0];if(!sheet)throw new Error("Planilha sem abas");
- let headers:string[]=[],stats:ColumnStats[]=[];const sampleRows:string[][]=[];let count=0;
+ let headers:string[]=[],stats:ColumnStats[]=[];let sampleRows:string[][]=[];let count=0;
  sheet.eachRow({includeEmpty:true},(row,rowNumber)=>{
   const values=(Array.isArray(row.values)?row.values.slice(1):[]).map(cellValue);
   if(rowNumber===1){headers=values;stats=headers.map(newStats);return}
@@ -65,6 +65,11 @@ async function previewXlsx(path:string){
   if(sampleRows.length<20)sampleRows.push(values);
   if(count<=STATS_SAMPLE_LIMIT)headers.forEach((_,i)=>{stats[i]??=newStats();updateStats(stats[i],values[i])});
  });
+ // Filter out empty headers so Object.fromEntries never sees undefined keys
+ const validIndices=headers.map((h,i)=>h&&h.trim()?i:-1).filter(i=>i>=0);
+ headers=validIndices.map(i=>headers[i]);
+ stats=validIndices.map(i=>stats[i]);
+ sampleRows=sampleRows.map(row=>validIndices.map(i=>row[i]));
  const columns=columnsFromStats(headers,stats),objects=sampleRows.map(row=>Object.fromEntries(columns.map((c,i)=>[c.sqlName,row[i]??null])));
  return{columns,rows:objects,rowCount:count,encoding:"xlsx",separator:null,sheetNames:workbook.worksheets.map(s=>s.name)};
 }
