@@ -30,7 +30,7 @@ describe("inferência de schema escaneia o arquivo inteiro, não só a amostra",
     const path = await csv(`id,texto\n${rows}\n`);
     const preview = await previewFile(path);
     const col = preview.columns.find((c) => c.sqlName === "texto");
-    expect(col?.sqlType).toBe("NVARCHAR(625)");
+    expect(col?.sqlType).toBe("NVARCHAR(MAX)");
   });
 
   it("trata campo só com espaço em branco como nulo", async () => {
@@ -109,12 +109,12 @@ describe("inferência de schema escaneia o arquivo inteiro, não só a amostra",
   it("nao infere DATE para datas impossiveis", async () => {
     const path = await csv(`dt\n31/31/2024\n31/31/2025\n`);
     const preview = await previewFile(path);
-    expect(preview.columns[0].sqlType).toBe("NVARCHAR(50)");
+    expect(preview.columns[0].sqlType).toBe("NVARCHAR(MAX)");
   });
 
   it("nao infere DATETIME2 para texto que apenas comeca com data", async () => {
     const path = await csv(`status\n2026-04-10 17:20:56.3870 - USER - Aprovado\n2026-01-21 09:53:30.1730 - USER - Nao Concluido\n`);
     const preview = await previewFile(path);
-    expect(preview.columns[0].sqlType).toMatch(/^NVARCHAR\(\d+\)$/);
+    expect(preview.columns[0].sqlType).toMatch(/^NVARCHAR\((MAX|\d+)\)$/);
   });
 });

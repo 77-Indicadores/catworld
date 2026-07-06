@@ -1,6 +1,5 @@
 import { extname } from "node:path";
 import sql from "mssql";
-import { Prisma } from "@prisma/client";
 import { prisma } from "@/server/db";
 import { sqlPool } from "@/server/azure/sql";
 import { quoteIdentifier, sqlIdentifier } from "@/server/security/naming";
@@ -209,16 +208,34 @@ export async function importUpload(uploadId:string, source:string|NodeJS.Readabl
    const table=upload.table??await prisma.datasetTable.upsert({where:{datasetId_sqlName:{datasetId:upload.dataset.id,sqlName:tableName}},update:{},create:{datasetId:upload.dataset.id,name:tableName,sqlName:tableName}});
    phaseTimings.totalImportMs=Date.now()-importStarted;
    console.log("[importUpload:perf]",JSON.stringify({uploadId:upload.id,file:upload.originalFilename,rows:actual,...phaseTimings}));
-    await prisma.$transaction(async (tx)=>{
-     await tx.datasetColumn.deleteMany({where:{tableId:table.id}});
-     for(const[i,c]of mapping.entries()){
-      await tx.datasetColumn.create({data:{tableId:table.id,ordinal:i+1,originalName:c.originalName,sqlName:c.sqlName,sqlType:c.sqlType,nullable:c.nullable}});
-     }
-     await tx.datasetTable.update({where:{id:table.id},data:{rowCount:BigInt(actual)}});
-     await tx.datasetVersion.create({data:{tableId:table.id,uploadId:upload.id,rowCount:BigInt(actual),schemaJson:JSON.stringify(mapping)}});
-     await tx.auditEvent.create({data:{eventType:"UPLOAD_IMPORT_PERF",resourceType:"upload",resourceId:upload.id,detailJson:JSON.stringify({file:upload.originalFilename,rows:actual,...phaseTimings}),success:true}});
-     await tx.upload.update({where:{id:upload.id},data:{tableId:table.id,status:"COMPLETED",progress:100,rowCount:BigInt(actual),insertedCount:BigInt(inserted),updatedCount:BigInt(updated)}});
-    },{isolationLevel:Prisma.TransactionIsolationLevel.Serializable,maxWait:10000,timeout:30000});
+    const colReq=pool.request();
+    colReq.input("tableId",sql.UniqueIdentifier,table.id);
+    colReq.input("uploadId",sql.UniqueIdentifier,upload.id);
+    colReq.input("actual",sql.BigInt,actual);
+    colReq.input("inserted",sql.BigInt,inserted);
+    colReq.input("updated",sql.BigInt,updated);
+    colReq.input("schemaJson",sql.NVarChar(sql.MAX),JSON.stringify(mapping));
+    colReq.input("detailJson",sql.NVarChar(sql.MAX),JSON.stringify({file:upload.originalFilename,rows:actual,...phaseTimings}));
+    const colValues=mapping.map((c,i)=>{
+     colReq.input(`orig${i}`,sql.NVarChar(255),c.originalName);
+     colReq.input(`sqlName${i}`,sql.VarChar(128),c.sqlName);
+     colReq.input(`sqlType${i}`,sql.VarChar(100),c.sqlType);
+     colReq.input(`nullable${i}`,sql.Bit,c.nullable);
+     return `(NEWID(),@tableId,${i+1},@orig${i},@sqlName${i},@sqlType${i},@nullable${i})`;
+    }).join(",");
+    await colReq.query(`
+      BEGIN TRANSACTION
+      DECLARE @lk INT
+      EXEC @lk=sp_getapplock @Resource='ColUpd_${table.id}',@LockMode='Exclusive',@LockTimeout=120000
+      IF @lk<0 THROW 50000,'lock timeout',1
+      DELETE FROM dbo.cw_columns WHERE table_id=@tableId
+      INSERT INTO dbo.cw_columns(id,table_id,ordinal,original_name,sql_name,sql_type,nullable)VALUES${colValues}
+      UPDATE dbo.cw_tables SET row_count=@actual,updated_at=SYSUTCDATETIME()WHERE id=@tableId
+      INSERT INTO dbo.cw_dataset_versions(id,table_id,upload_id,row_count,schema_json)VALUES(NEWID(),@tableId,@uploadId,@actual,@schemaJson)
+      INSERT INTO dbo.cw_audit_events(id,event_type,resource_type,resource_id,detail_json,success)VALUES(NEWID(),'UPLOAD_IMPORT_PERF','upload',@uploadId,@detailJson,1)
+      UPDATE dbo.cw_uploads SET table_id=@tableId,status='COMPLETED',progress=100,row_count=@actual,inserted_count=@inserted,updated_count=@updated,updated_at=SYSUTCDATETIME()WHERE id=@uploadId
+      COMMIT
+    `);
     return{tableId:table.id,inserted,updated,rowCount:actual};
   }catch(e){await tx.rollback().catch(()=>undefined);throw e}
  }catch(e){
