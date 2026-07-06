@@ -56,7 +56,12 @@ function makeCleanConverter(type: string): (v: unknown) => string {
   if (type === "TIME") return v => (v == null || String(v).trim() === "") ? "" : String(v).trim();
   return v => {
     if (v == null || String(v).trim() === "") return '""';
-    return '"' + String(v).replace(/"/g, '""') + '"';
+    // Sanitize control characters and field delimiter to prevent BULK INSERT misalignment
+    const sanitized = String(v)
+      .replace(/"/g, '""')   // escape double quotes for CSV
+      .replace(/[\n\r\t]/g, " ")  // replace newlines/tabs with space
+      .replace(/\|/g, " ");       // replace pipe delimiter with space
+    return '"' + sanitized + '"';
   };
 }
 
@@ -135,10 +140,6 @@ export async function bulkInsertFromBlob(
   await mark("blobConsistencyWaitMs", () => new Promise(r => setTimeout(r, 3000)));
 
   const credential = new StorageSharedKeyCredential(account, key);
-  const sas = generateBlobSASQueryParameters(
-    { containerName: container, blobName: cleanBlobName, permissions: BlobSASPermissions.parse("r"), expiresOn: new Date(Date.now() + 30 * 60_000) },
-    credential
-  ).toString();
 
   const pool = await sqlPool();
   const hash = createHash("md5").update(uploadId).digest("hex").slice(0, 8);
@@ -147,15 +148,6 @@ export async function bulkInsertFromBlob(
   let bulkAttempts = 0;
 
   try {
-    await mark("createScopedCredentialMs", () => pool.request().query(`
-      CREATE DATABASE SCOPED CREDENTIAL [${tempCred}]
-      WITH IDENTITY = 'SHARED ACCESS SIGNATURE', SECRET = '${sas}'
-    `));
-    await mark("createExternalDataSourceMs", () => pool.request().query(`
-      CREATE EXTERNAL DATA SOURCE [${tempDs}]
-      WITH (TYPE = BLOB_STORAGE, LOCATION = 'https://${account}.blob.core.windows.net', CREDENTIAL = [${tempCred}])
-    `));
-
     const bulkReq = pool.request();
     (bulkReq as unknown as { timeout: number }).timeout = 30 * 60_000;
     const bulkSql = `
@@ -169,13 +161,36 @@ export async function bulkInsertFromBlob(
         FIELDQUOTE = '"',
         FIRSTROW = 1,
         TABLOCK,
-        CODEPAGE = '65001'
+        CODEPAGE = '65001',
+        ROWS_PER_BATCH = 50000
       )
     `;
 
     for (let attempt = 1; ; attempt++) {
       bulkAttempts = attempt;
       try {
+        // Drop stale credential/datasource and truncate staging on retry
+        if (attempt > 1) {
+          await pool.request().query(`IF EXISTS (SELECT * FROM sys.external_data_sources WHERE name='${tempDs}') DROP EXTERNAL DATA SOURCE [${tempDs}]`);
+          await pool.request().query(`IF EXISTS (SELECT * FROM sys.database_scoped_credentials WHERE name='${tempCred}') DROP DATABASE SCOPED CREDENTIAL [${tempCred}]`);
+          await pool.request().query(`TRUNCATE TABLE ${quoteIdentifier(schema)}.${quoteIdentifier(stagingTable)}`);
+        }
+
+        // Fresh SAS + credential/datasource each attempt so expired tokens don't block retries
+        const sas = generateBlobSASQueryParameters(
+          { containerName: container, blobName: cleanBlobName, permissions: BlobSASPermissions.parse("r"), expiresOn: new Date(Date.now() + 60 * 60_000) },
+          credential
+        ).toString();
+
+        await pool.request().query(`
+          CREATE DATABASE SCOPED CREDENTIAL [${tempCred}]
+          WITH IDENTITY = 'SHARED ACCESS SIGNATURE', SECRET = '${sas}'
+        `);
+        await pool.request().query(`
+          CREATE EXTERNAL DATA SOURCE [${tempDs}]
+          WITH (TYPE = BLOB_STORAGE, LOCATION = 'https://${account}.blob.core.windows.net', CREDENTIAL = [${tempCred}])
+        `);
+
         await mark("bulkInsertMs", () => bulkReq.query(bulkSql));
         break;
       } catch (error) {
