@@ -69,12 +69,16 @@ async function work(job: Claimed) {
       const file = await localFile(upload);
       try {
         await prisma.upload.update({ where: { id: upload.id }, data: { status: "PREVIEWING", progress: 10 } });
+        // Blob is provably alive (just downloaded). Copy to originals/ so IMPORT_UPLOAD is guaranteed a source.
+        const ext = extname(upload.originalFilename).toLowerCase();
+        await copyFile(upload.blobName, `originals/${upload.id}${ext}`).catch((e) => {
+          console.error("[PREVIEW] originals/ copy failed for", upload.id, e instanceof Error ? e.message : e);
+        });
         const preview = await previewFile(file.path);
         await prisma.upload.update({
           where: { id: upload.id },
           data: { status: "AWAITING_CONFIRMATION", progress: 20, previewJson: JSON.stringify(preview), rowCount: BigInt(preview.rowCount) },
         });
-        // originals/ copy was already made at upload time (PUT route) — skip redundant copy here
       } finally {
         await rm(file.dir, { recursive: true, force: true });
       }

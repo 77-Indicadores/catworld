@@ -35,7 +35,9 @@ export async function PUT(r: NextRequest, { params }: { params: Promise<{ id: st
     await writeFile(upload.blobName, body);
     // Immediately copy to originals/ so the blob survives any lifecycle policy on uploads/ prefix
     const ext = extname(upload.originalFilename).toLowerCase();
-    await copyFile(upload.blobName, `originals/${upload.id}${ext}`).catch(() => {});
+    await copyFile(upload.blobName, `originals/${upload.id}${ext}`).catch((e) => {
+      console.error("[PUT upload] originals/ copy failed for", upload.id, e instanceof Error ? e.message : e);
+    });
     return ok({ stored: true });
   } catch (e) {
     return handleApiError(e);
