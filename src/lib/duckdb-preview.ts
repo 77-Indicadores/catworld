@@ -120,11 +120,12 @@ export async function previewFileInBrowser(file: File): Promise<FilePreviewResul
         ]);
 
         const rawRows = sampleResult.toArray().map((r) => r.toJSON() as Record<string, unknown>);
-        // Remap original column names → sqlNames
+        // Remap original column names → sqlNames; coerce BigInt → Number (JSON can't serialize BigInt)
         const rows = rawRows.map((raw) => {
           const out: Record<string, unknown> = {};
           descRows.forEach((d, i) => {
-            out[columns[i]!.sqlName] = raw[d.column_name] ?? null;
+            const val = raw[d.column_name] ?? null;
+            out[columns[i]!.sqlName] = typeof val === "bigint" ? Number(val) : val;
           });
           return out;
         });
