@@ -51,7 +51,7 @@ export function sanitizeCsvField(v: unknown): string {
  */
 export function typedCsvField(v: unknown, sqlType: string): string {
   const raw = v == null ? "" : String(v).trim();
-  if (!raw) return sqlType.startsWith("NVARCHAR") ? '""' : "";
+  if (!raw) return ""; // unquoted empty → NULL via KEEPNULLS for all types
 
   if (sqlType === "BIGINT") {
     // Only accept pure integers — mirrors TRY_CONVERT(BIGINT) which rejects thousands-separator formats
@@ -247,4 +247,140 @@ export async function bulkInsertFromBlob(
   }
 
   return { total, timings, cleanBlobName, reusedCleanBlob, bulkAttempts };
+}
+
+/**
+ * Write clean blob then INSERT directly into target via OPENROWSET.
+ * Eliminates the staging table entirely for full-replace operations —
+ * one log write pass instead of two (BULK INSERT staging + INSERT SELECT target).
+ */
+export async function openrowsetInsertFromBlob(
+  uploadId: string,
+  source: string | NodeJS.ReadableStream,
+  mapping: ParsedColumn[],
+  schema: string,
+  targetTable: string,
+  opts?: RowsFromFileOpts,
+  onProgress?: (rows: number) => void,
+): Promise<BulkBlobResult> {
+  const { connStr, account, key, container } = blobEnv();
+  const cleanBlobName = `bulkimport/${uploadId}.csv`;
+  const timings: Record<string, number> = {};
+  const mark = async <T>(name: string, fn: () => Promise<T>): Promise<T> => {
+    const started = Date.now();
+    try { return await fn(); }
+    finally { timings[name] = (timings[name] ?? 0) + Date.now() - started; }
+  };
+
+  const service = BlobServiceClient.fromConnectionString(connStr);
+  const blockClient = service.getContainerClient(container).getBlockBlobClient(cleanBlobName);
+
+  let total = 0;
+
+  // Write clean blob (same format as bulkInsertFromBlob: typed values + hash column)
+  await mark("convertUploadCleanBlobMs", async () => {
+    if (await blockClient.exists()) await blockClient.delete().catch(() => {});
+    const passThrough = new PassThrough({ highWaterMark: 65536 });
+    const uploadPromise = blockClient.uploadStream(passThrough, 8 * 1024 * 1024, 4, {
+      blobHTTPHeaders: { blobContentType: "text/csv; charset=utf-8" },
+    });
+    for await (const row of rowsFromFile(source, mapping, opts)) {
+      const hashLine = mapping.map(c => sanitizeCsvField(row[c.sqlName])).join("|");
+      const rowHash  = createHash("md5").update(hashLine).digest("hex");
+      const csvLine  = mapping.map(c => typedCsvField(row[c.sqlName], c.sqlType)).join("|");
+      passThrough.write(csvLine + "|" + rowHash + "\n");
+      total++;
+      if (total % 50_000 === 0) onProgress?.(total);
+    }
+    passThrough.end();
+    await uploadPromise;
+  });
+
+  const credential = new StorageSharedKeyCredential(account, key);
+  const pool = await sqlPool();
+  const hash = createHash("md5").update(uploadId).digest("hex").slice(0, 8);
+  const tempCred = `CatworldBulkCred_${hash}`;
+  const tempDs   = `CatworldBulkDS_${hash}`;
+
+  // WITH clause: typed columns matching typedCsvField output.
+  // NVARCHAR uses MAX (target column is NVARCHAR(MAX)) to avoid truncation.
+  const withCols = [
+    ...mapping.map(c => {
+      const t = c.sqlType === "BIGINT" ? "BIGINT"
+        : c.sqlType.startsWith("DECIMAL") ? "DECIMAL(18,4)"
+        : c.sqlType === "DATE" ? "DATE"
+        : c.sqlType === "DATETIME2" ? "DATETIME2"
+        : c.sqlType === "TIME" ? "TIME"
+        : "NVARCHAR(MAX)";
+      return `${quoteIdentifier(c.sqlName)} ${t} NULL`;
+    }),
+    `[_cw_rh] CHAR(32) NULL`,
+  ].join(",\n    ");
+  const colList = [...mapping.map(c => quoteIdentifier(c.sqlName)), "[_cw_rh]"].join(",");
+
+  async function ensureCredentialAndDataSource(sas: string) {
+    await pool.request().query(`
+      IF NOT EXISTS (SELECT 1 FROM sys.database_scoped_credentials WHERE name='${tempCred}')
+        CREATE DATABASE SCOPED CREDENTIAL [${tempCred}]
+          WITH IDENTITY = 'SHARED ACCESS SIGNATURE', SECRET = '${sas}';
+      ELSE
+        ALTER DATABASE SCOPED CREDENTIAL [${tempCred}]
+          WITH IDENTITY = 'SHARED ACCESS SIGNATURE', SECRET = '${sas}';
+      IF NOT EXISTS (SELECT 1 FROM sys.external_data_sources WHERE name='${tempDs}')
+        CREATE EXTERNAL DATA SOURCE [${tempDs}]
+          WITH (TYPE = BLOB_STORAGE, LOCATION = 'https://${account}.blob.core.windows.net/${container}', CREDENTIAL = [${tempCred}]);
+    `);
+  }
+
+  const insertSql = `
+    INSERT INTO ${quoteIdentifier(schema)}.${quoteIdentifier(targetTable)} WITH (TABLOCK) (${colList})
+    SELECT ${colList}
+    FROM OPENROWSET(
+      BULK '${cleanBlobName}',
+      DATA_SOURCE = '${tempDs}',
+      FORMAT = 'CSV',
+      FIELDTERMINATOR = '|',
+      ROWTERMINATOR = '\\n',
+      FIELDQUOTE = '"',
+      FIRSTROW = 1,
+      KEEPNULLS
+    ) WITH (
+      ${withCols}
+    ) AS t
+    OPTION (MAXDOP 1)
+  `;
+
+  let bulkAttempts = 0;
+  try {
+    for (let attempt = 1; ; attempt++) {
+      bulkAttempts = attempt;
+      try {
+        if (attempt > 1) {
+          await pool.request().query(
+            `TRUNCATE TABLE ${quoteIdentifier(schema)}.${quoteIdentifier(targetTable)}`
+          );
+        }
+        const sas = generateBlobSASQueryParameters(
+          { containerName: container, blobName: cleanBlobName, permissions: BlobSASPermissions.parse("r"), expiresOn: new Date(Date.now() + 60 * 60_000) },
+          credential
+        ).toString();
+        await ensureCredentialAndDataSource(sas);
+        const req = pool.request();
+        (req as unknown as { timeout: number }).timeout = 30 * 60_000;
+        await mark("openrowsetInsertMs", () => req.query(insertSql));
+        break;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (attempt >= 5 || !message.includes('OLE DB provider "BULK"')) throw error;
+        const waitMs = 5_000 * attempt;
+        console.warn(`[openrowsetInsert] transient error, retry ${attempt}/5 in ${waitMs}ms`);
+        await mark("openrowsetRetryWaitMs", () => new Promise(r => setTimeout(r, waitMs)));
+      }
+    }
+  } finally {
+    await pool.request().query(`DROP EXTERNAL DATA SOURCE IF EXISTS [${tempDs}]`).catch(() => {});
+    await pool.request().query(`DROP DATABASE SCOPED CREDENTIAL IF EXISTS [${tempCred}]`).catch(() => {});
+  }
+
+  return { total, timings, cleanBlobName, reusedCleanBlob: false, bulkAttempts };
 }
