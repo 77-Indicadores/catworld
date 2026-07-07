@@ -31,6 +31,19 @@ export async function queuePreviewUpload(id: string) {
   return job;
 }
 
+export async function queueImportUploadAuto(uploadId: string, mapping: z.infer<typeof confirmUploadSchema>["mapping"]) {
+  const upload = await prisma.upload.findUniqueOrThrow({ where: { id: uploadId }, select: { datasetId: true, tableId: true, mode: true, keyColumn: true } });
+  if (!upload.datasetId) throw new Error("Upload sem dataset definido — não é possível auto-confirmar");
+  const [, job] = await prisma.$transaction([
+    prisma.upload.update({
+      where: { id: uploadId },
+      data: { mappingJson: JSON.stringify(mapping), status: "QUEUED_IMPORT", progress: 25, errorMessage: null },
+    }),
+    prisma.job.create({ data: { type: "IMPORT_UPLOAD", uploadId, maxAttempts: 5 } }),
+  ]);
+  return job;
+}
+
 export async function queueImportUpload(actor: Actor, id: string, input: z.infer<typeof confirmUploadSchema>) {
   const dataset = await prisma.dataset.findUnique({ where: { id: input.datasetId } });
   if (!dataset) throw new ApiError(404, "DATASET_NOT_FOUND", "Dataset não encontrado");

@@ -109,11 +109,12 @@ class CatworldClient:
         file_hash = _hashlib.md5(raw_bytes).hexdigest()
         logger.debug("Hash MD5: %s", file_hash)
 
-        created = self._request(
-            "POST",
-            "/api/v1/uploads",
-            json={"filename": file.name, "sizeBytes": size, "fileHash": file_hash, "datasetId": dataset_id},
-        )
+        body: dict = {"filename": file.name, "sizeBytes": size, "fileHash": file_hash, "datasetId": dataset_id, "mode": mode}
+        if table_id:
+            body["tableId"] = table_id
+        if key_column:
+            body["keyColumn"] = key_column
+        created = self._request("POST", "/api/v1/uploads", json=body)
 
         if created.get("skip"):
             logger.info("[SKIP] Arquivo inalterado, importação ignorada: %s", file.name)
@@ -142,31 +143,8 @@ class CatworldClient:
             logger.warning("Conexão encerrada pelo servidor (499), tentativa %s/3...", attempt + 1)
             time.sleep(1)
 
-        logger.info("Arquivo enviado, aguardando análise do servidor...")
+        logger.info("Arquivo enviado, aguardando processamento...")
         self._request("POST", f"/api/v1/uploads/{upload_id}?action=uploaded")
-
-        preview = self._wait_upload(upload_id, "AWAITING_CONFIRMATION", poll_interval)
-        mapping = preview.get("previewJson") or preview.get("mappingJson")
-        if isinstance(mapping, str):
-            mapping = _json.loads(mapping)
-        cols = (mapping or {}).get("columns", [])
-
-        if not cols:
-            raise UploadError("Nenhuma coluna detectada no arquivo — verifique se o arquivo possui cabeçalho e dados válidos")
-        logger.info("%s coluna(s): %s", len(cols), [c.get("originalName", c.get("sqlName", c)) for c in cols[:5]])
-        logger.info("Confirmando importação...")
-
-        self._request(
-            "POST",
-            f"/api/v1/uploads/{upload_id}?action=confirm",
-            json={
-                "datasetId": dataset_id,
-                "tableId": table_id,
-                "mode": mode,
-                "keyColumn": key_column,
-                "mapping": cols,
-            },
-        )
 
         result = self._wait_upload(upload_id, "COMPLETED", poll_interval)
         logger.info("Upload concluído: %s linha(s) importada(s)", result.get("insertedCount", "?"))

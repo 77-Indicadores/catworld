@@ -9,6 +9,7 @@ import { downloadFile, deleteFile, copyFile } from "@/server/storage";
 import { env } from "@/server/env";
 import { previewFile, type FilePreview } from "@/server/uploads/parser";
 import { importUpload } from "@/server/uploads/importer";
+import { queueImportUploadAuto } from "@/server/uploads/actions";
 
 type Claimed = { id: string; type: string; upload_id: string | null; attempts: number; max_attempts: number };
 
@@ -77,8 +78,9 @@ async function work(job: Claimed) {
         const preview = await previewFile(file.path);
         await prisma.upload.update({
           where: { id: upload.id },
-          data: { status: "AWAITING_CONFIRMATION", progress: 20, previewJson: JSON.stringify(preview), rowCount: BigInt(preview.rowCount) },
+          data: { previewJson: JSON.stringify(preview), rowCount: BigInt(preview.rowCount) },
         });
+        await queueImportUploadAuto(upload.id, preview.columns);
       } finally {
         await rm(file.dir, { recursive: true, force: true });
       }
