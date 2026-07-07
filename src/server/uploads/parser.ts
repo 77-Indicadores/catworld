@@ -133,12 +133,34 @@ export async function* rowsFromFile(
  const ext=typeof source==="string"?extname(source).toLowerCase():(opts?.ext??".csv");
 
  if(ext===".csv"){
-  let encoding:string,separator:string;
-  if(typeof source==="string"){const hints=await detectFileHints(source);encoding=hints.encoding;separator=hints.separator}
-  else{encoding=opts?.encoding??"utf8";separator=opts?.separator??","}
-  const readable=typeof source==="string"?createReadStream(source):source;
+  // Fast path: file on disk + UTF-8 encoding → use DuckDB (11× faster than csv-parse).
+  // DuckDB CSV reader only supports UTF-8/UTF-16 — non-UTF-8 files go directly to csv-parse.
+  if(typeof source==="string"){
+   const fileEncoding=opts?.encoding??((await detectFileHints(source)).encoding);
+   if(fileEncoding==="utf8"){
+    try{
+     const{rowsFromCsvDuckDB}=await import("./parser-duckdb");
+     yield* rowsFromCsvDuckDB(source,columns);
+     return;
+    }catch(e){
+     console.warn("[parser] DuckDB falhou, usando csv-parse como fallback:",e instanceof Error?e.message:e);
+    }
+   }
+   // Non-UTF-8 or DuckDB error: use csv-parse with the already-detected hints
+   const {separator} = await detectFileHints(source);
+   const readable=createReadStream(source);
+   let header=true;
+   for await(const row of csvPipeStream(readable,fileEncoding,separator)){
+    if(header){header=false;continue}
+    yield Object.fromEntries(columns.map((c,i)=>[c.sqlName,row[i]??null]));
+   }
+   return;
+  }
+  // Stream source: requires opts.encoding + opts.separator
+  const encoding=opts?.encoding??"utf8";
+  const separator=opts?.separator??",";
   let header=true;
-  for await(const row of csvPipeStream(readable,encoding,separator)){
+  for await(const row of csvPipeStream(source,encoding,separator)){
    if(header){header=false;continue}
    yield Object.fromEntries(columns.map((c,i)=>[c.sqlName,row[i]??null]));
   }

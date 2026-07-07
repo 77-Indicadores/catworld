@@ -25,6 +25,7 @@
   "dependencies": {
     "@azure/storage-blob": "^12.33.0",
     "@duckdb/duckdb-wasm": "^1.33.1-dev57.0",
+    "@duckdb/node-api": "^1.5.4-r.1",
     "@node-rs/argon2": "^2.0.2",
     "@prisma/client": "^6.19.3",
     "@sentry/nextjs": "^10.63.0",
