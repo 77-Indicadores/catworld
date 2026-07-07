@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib as _hashlib
 import json as _json
 import logging
-import time
 import zlib as _zlib
 from pathlib import Path
 from typing import Any, Iterator
@@ -13,7 +12,6 @@ import httpx
 from .exceptions import (
     ConnectionError,
     QueryTimeoutError,
-    UploadError,
     ValidationError,
     from_api_error,
 )
@@ -92,7 +90,6 @@ class CatworldClient:
         mode: str = "replace",
         key_column: str | None = None,
         table_id: str | None = None,
-        poll_interval: float = 2,
     ):
         file = Path(path)
         if not file.exists():
@@ -139,12 +136,9 @@ class CatworldClient:
             logger.warning("Conexão encerrada pelo servidor (499), tentativa %s/3...", attempt + 1)
             time.sleep(1)
 
-        logger.info("Arquivo enviado, aguardando processamento...")
         self._request("POST", f"/api/v1/uploads/{upload_id}?action=uploaded")
-
-        result = self._wait_upload(upload_id, "COMPLETED", poll_interval)
-        logger.info("Upload concluído: %s linha(s) importada(s)", result.get("insertedCount", "?"))
-        return result
+        logger.info("Arquivo enviado. Processamento ocorre em background (upload_id=%s)", upload_id)
+        return created["upload"]
 
     @staticmethod
     def _stream_md5(file: Path, chunk_size: int = 1024 * 1024) -> str:
@@ -166,22 +160,6 @@ class CatworldClient:
         tail = compressor.flush()
         if tail:
             yield tail
-
-    def _wait_upload(self, upload_id: str, target: str, interval: float):
-        last_status = None
-        for _ in range(1800):
-            upload = self._request("GET", f"/api/v1/uploads/{upload_id}", timeout=None)
-            status = upload["status"]
-            if status != last_status:
-                logger.info("  → %s", status)
-                last_status = status
-            if status == target:
-                return upload
-            if status == "FAILED":
-                msg = upload.get("errorMessage") or "Falha no processamento do arquivo"
-                raise UploadError(msg)
-            time.sleep(interval)
-        raise QueryTimeoutError("Tempo de processamento do upload excedido")
 
     def _request(self, method: str, path: str, **kwargs) -> Any:
         try:
