@@ -50,18 +50,27 @@ export async function deleteBlob(blobName: string) {
 }
 
 export async function copyBlob(sourceBlobName: string, destBlobName: string) {
-  const e = env();
   const container = containerClient();
   const sourceClient = container.getBlockBlobClient(sourceBlobName);
   const destClient = container.getBlockBlobClient(destBlobName);
-  // Must use a SAS URL so SQL Server / Azure Copy API can auth against a private container
-  const credential = sharedKeyCredential();
-  const sas = generateBlobSASQueryParameters(
-    { containerName: e.CATWORLD_AZURE_BLOB_CONTAINER, blobName: sourceBlobName, permissions: BlobSASPermissions.parse("r"), expiresOn: new Date(Date.now() + 60 * 60_000) },
-    credential
-  );
-  const sasUrl = `${sourceClient.url}?${sas}`;
-  await destClient.syncCopyFromURL(sasUrl);
+  // Download + re-upload: avoids SAS URL generation and works with any credential format
+  let response;
+  try {
+    response = await sourceClient.download();
+  } catch (e) {
+    console.error("[copyBlob] download failed src=%s err=%s", sourceBlobName, e instanceof Error ? e.message : e);
+    throw e;
+  }
+  if (!response.readableStreamBody) throw new Error(`Blob source not found: ${sourceBlobName}`);
+  try {
+    await destClient.uploadStream(response.readableStreamBody, 8 * 1024 * 1024, 4, {
+      blobHTTPHeaders: { blobContentType: response.contentType ?? "application/octet-stream" },
+    });
+    console.log("[copyBlob] OK %s → %s", sourceBlobName, destBlobName);
+  } catch (e) {
+    console.error("[copyBlob] upload failed dst=%s err=%s", destBlobName, e instanceof Error ? e.message : e);
+    throw e;
+  }
 }
 
 export async function ensureContainer() {
