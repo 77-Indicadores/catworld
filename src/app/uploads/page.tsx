@@ -7,6 +7,7 @@ import { UploadFilters } from "@/components/uploads/upload-filters";
 import { UploadCard } from "@/components/uploads/upload-card";
 import { UploadPagination } from "@/components/uploads/upload-pagination";
 import { UploadPoller } from "@/components/uploads/upload-poller";
+import { UploadFunnel, countFunnelGroups } from "@/components/uploads/upload-funnel";
 
 export const dynamic = "force-dynamic";
 
@@ -39,7 +40,7 @@ export default async function UploadsPage({
     ...(projectId ? { dataset: { projectId } } : {}),
   };
 
-  const [uploads, total, projects, queued] = await Promise.all([
+  const [uploads, total, projects, queued, funnelRaw] = await Promise.all([
     prisma.upload.findMany({
       where,
       orderBy: { createdAt: "desc" },
@@ -50,7 +51,12 @@ export default async function UploadsPage({
     prisma.upload.count({ where }),
     prisma.project.findMany({ where: { active: true }, select: { id: true, name: true }, orderBy: { name: "asc" } }),
     prisma.upload.count({ where: { status: { in: CANCELLABLE } } }),
+    prisma.upload.groupBy({ by: ["status"], where, _count: true }),
   ]);
+
+  const funnelCounts = countFunnelGroups(
+    funnelRaw.flatMap((r) => Array(r._count).fill(r.status) as string[]),
+  );
 
   const totalPages = Math.ceil(total / PAGE_SIZE);
 
@@ -64,6 +70,7 @@ export default async function UploadsPage({
       />
 
       <UploadPoller statuses={uploads.map((u) => u.status)} />
+      <UploadFunnel counts={funnelCounts} />
       <Panel>
         <div className="flex flex-col gap-4 border-b border-base-300 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
           <Suspense fallback={<div className="flex gap-2"><div className="skeleton h-8 w-32 rounded-lg" /><div className="skeleton h-8 w-36 rounded-lg" /></div>}>

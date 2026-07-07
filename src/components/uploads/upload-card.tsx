@@ -25,6 +25,15 @@ function fmtRelative(date: Date) {
   return `há ${Math.floor(hours / 24)}d`;
 }
 
+function fmtDuration(ms: number) {
+  if (ms < 1000) return `${ms}ms`;
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
 const STATUS_CONFIG: Record<string, { cls: string; icon: React.ElementType; label: string }> = {
   COMPLETED:              { cls: "badge-success",  icon: CheckCircle2, label: "Concluído" },
   FAILED:                 { cls: "badge-error",    icon: CircleX,      label: "Falhou" },
@@ -101,6 +110,12 @@ export function UploadCard({ upload }: { upload: UploadWithDataset }) {
           )}
           <span>·</span>
           <span>{fmtRelative(upload.createdAt)}</span>
+          {(upload.status === "COMPLETED" || upload.status === "FAILED") && (
+            <>
+              <span>·</span>
+              <span title="Duração total">⏱ {fmtDuration(upload.updatedAt.getTime() - upload.createdAt.getTime())}</span>
+            </>
+          )}
         </div>
 
         {upload.status === "FAILED" && upload.errorMessage && (
