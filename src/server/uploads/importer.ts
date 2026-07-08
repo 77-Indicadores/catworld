@@ -4,7 +4,7 @@ import { prisma } from "@/server/db";
 import { sqlPool } from "@/server/azure/sql";
 import { quoteIdentifier, sqlIdentifier } from "@/server/security/naming";
 import { previewFile, rowsFromFile, type FilePreview, type ParsedColumn, type RowsFromFileOpts } from "./parser";
-import { bulkInsertFromBlob, openrowsetInsertFromBlob, sanitizeCsvField } from "./importer-bulk-blob";
+import { bulkInsertFromBlob, sanitizeCsvField } from "./importer-bulk-blob";
 import { env } from "@/server/env";
 import { normalizeDateLike } from "./date-normalize";
 
@@ -238,8 +238,8 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
     };
 
     if (canUseOpenrowset) {
-      // ── OPENROWSET direct path ─────────────────────────────────────────────────
-      // Write clean blob → INSERT INTO target directly via OPENROWSET (no staging).
+      // ── Direct BULK INSERT to target ───────────────────────────────────────────
+      // Write clean blob → BULK INSERT directly into target (no staging, no INSERT SELECT).
       // IX__cw_rh index on target acts as completion sentinel for retry idempotency
       // (created AFTER INSERT succeeds, so its presence = INSERT completed).
       const idxRes = await pool.request().query(
@@ -252,7 +252,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
         total = Number(cntRes.recordset[0].n);
         inserted = total;
         actual = BigInt(total);
-        phaseTimings.importMethod = "openrowset-idempotent";
+        phaseTimings.importMethod = "direct-bulk-idempotent";
       } else {
         // Prepare target: DROP if exists (handles schema mismatch and partial prior attempt)
         const targetNowExists = Number(
@@ -269,12 +269,12 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
 
         const cleanBlobName = `bulkimport/${uploadId}.csv`;
         try {
-          const orResult = await openrowsetInsertFromBlob(
-            uploadId, source, mapping, schema, tableName, opts, onProgress,
+          const orResult = await bulkInsertFromBlob(
+            uploadId, source, mapping, schema, tableName, opts, onProgress, false, knownRowCount,
           );
           total = orResult.total;
           inserted = total;
-          phaseTimings.importMethod = "openrowset-direct";
+          phaseTimings.importMethod = "direct-bulk";
           phaseTimings.bulkBlob = orResult;
           let cleanBlobDeleted = false;
           deleteCleanBlob = async () => {
@@ -407,8 +407,8 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
       await tx.begin();
       try {
         const request = new sql.Request(tx);
-        // No timeout for import transactions — file size is unbounded
-        (request as unknown as { timeout: number }).timeout = 0;
+        // Import transactions can be large — 2 h explicit; 0 in mssql maps to pool default (600 s)
+        (request as unknown as { timeout: number }).timeout = 7_200_000;
         const targetColDefs = typedColumnDefs(mapping);
         const colList = mapping.map(c => quoteIdentifier(c.sqlName)).join(",");
         // Typed staging: staging already has correct types — direct column copy, no TRY_CONVERT.
