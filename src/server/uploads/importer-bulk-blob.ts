@@ -180,7 +180,7 @@ export async function bulkInsertFromBlob(
 
   try {
     const bulkReq = pool.request();
-    (bulkReq as unknown as { timeout: number }).timeout = 30 * 60_000;
+    (bulkReq as unknown as { overrides: { requestTimeout: number } }).overrides.requestTimeout = 30 * 60_000;
     const bulkSql = `
       BULK INSERT ${quoteIdentifier(schema)}.${quoteIdentifier(stagingTable)}
       FROM '${cleanBlobName}'
@@ -366,7 +366,7 @@ export async function openrowsetInsertFromBlob(
         ).toString();
         await ensureCredentialAndDataSource(sas);
         const req = pool.request();
-        (req as unknown as { timeout: number }).timeout = 30 * 60_000;
+        (req as unknown as { overrides: { requestTimeout: number } }).overrides.requestTimeout = 30 * 60_000;
         await mark("openrowsetInsertMs", () => req.query(insertSql));
         break;
       } catch (error) {

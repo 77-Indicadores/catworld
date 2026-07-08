@@ -407,8 +407,8 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
       await tx.begin();
       try {
         const request = new sql.Request(tx);
-        // Import transactions can be large — 2 h explicit; 0 in mssql maps to pool default (600 s)
-        (request as unknown as { timeout: number }).timeout = 7_200_000;
+        // overrides.requestTimeout is the correct mssql v12 field (not .timeout which is a no-op)
+        (request as unknown as { overrides: { requestTimeout: number } }).overrides.requestTimeout = 7_200_000;
         const targetColDefs = typedColumnDefs(mapping);
         const colList = mapping.map(c => quoteIdentifier(c.sqlName)).join(",");
         // Typed staging: staging already has correct types — direct column copy, no TRY_CONVERT.
