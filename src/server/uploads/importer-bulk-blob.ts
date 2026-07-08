@@ -55,9 +55,12 @@ export function typedCsvField(v: unknown, sqlType: string): string {
   if (!raw) return ""; // unquoted empty → NULL via KEEPNULLS for all types
 
   if (sqlType === "BIGINT") {
-    // Only accept pure integers — mirrors TRY_CONVERT(BIGINT) which rejects thousands-separator formats
     if (!/^-?\d+$/.test(raw)) return "";
-    return raw;
+    try {
+      const b = BigInt(raw);
+      if (b < -9223372036854775808n || b > 9223372036854775807n) return ""; // out of SQL BIGINT range → NULL
+      return raw;
+    } catch { return ""; }
   }
   if (sqlType.startsWith("DECIMAL")) {
     // Detect separator by which comes last: comma → BR (1.234,56), dot → US/neutral (1,234.56)

@@ -71,11 +71,17 @@ function convertForTds(v: unknown, sqlType: string): unknown {
   if (!s) return null;
   if (sqlType === "BIGINT") {
     if (!/^-?\d+$/.test(s)) return null;
-    return Number.parseInt(s, 10);
+    try {
+      const b = BigInt(s);
+      // SQL Server BIGINT is signed 64-bit: -(2^63) to 2^63-1
+      if (b < -9223372036854775808n || b > 9223372036854775807n) return null;
+      return Number(b); // mssql BigInt type accepts JS number within safe range
+    } catch { return null; }
   }
   if (sqlType.startsWith("DECIMAL")) {
-    const n = Number.parseFloat(s.includes(",") ? s.replaceAll(".", "").replace(",", ".") : s);
-    return isNaN(n) ? null : n;
+    const raw = s.includes(",") ? s.replaceAll(".", "").replace(",", ".") : s;
+    const n = Number.parseFloat(raw);
+    return Number.isFinite(n) ? n : null;
   }
   if (sqlType === "DATE" || sqlType === "DATETIME2") {
     const d = normalizeDateLike(s);
