@@ -81,7 +81,16 @@ function convertForTds(v: unknown, sqlType: string): unknown {
     const d = normalizeDateLike(s);
     return d ? new Date(d) : null;
   }
-  if (sqlType === "TIME") return /^\d{1,2}:\d{2}(:\d{2})?$/.test(s) ? s : null;
+  if (sqlType === "TIME") {
+    // mssql sql.Time requires a Date object — passing a string throws "Invalid time."
+    if (!/^\d{1,2}:\d{2}(:\d{2})?(\.\d+)?$/.test(s)) return null;
+    const [hh, mm, ss = "0"] = s.split(":");
+    const [sec, frac = "0"] = ss.split(".");
+    const h = Number(hh), m = Number(mm), se = Number(sec), ms = Math.round(Number("0." + frac) * 1000);
+    if (h > 23 || m > 59 || se > 59) return null;
+    const d = new Date(1970, 0, 1, h, m, se, ms);
+    return isNaN(d.getTime()) ? null : d;
+  }
   return s || null;
 }
 
