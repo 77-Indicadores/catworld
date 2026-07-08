@@ -244,6 +244,7 @@ model Job {
   lockedAt    DateTime? @map("locked_at") @db.DateTime2
   lockedBy    String?   @map("locked_by") @db.VarChar(120)
   heartbeatAt DateTime? @map("heartbeat_at") @db.DateTime2
+  weight      Int       @default(0) @db.TinyInt
   lastError   String?   @map("last_error") @db.NVarChar(Max)
   createdAt   DateTime  @default(now()) @map("created_at") @db.DateTime2
   updatedAt   DateTime  @updatedAt @map("updated_at") @db.DateTime2

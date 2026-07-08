@@ -11,21 +11,27 @@ import { previewFile, type FilePreview } from "@/server/uploads/parser";
 import { importUpload } from "@/server/uploads/importer";
 import { queueImportUploadAuto } from "@/server/uploads/actions";
 
-type Claimed = { id: string; type: string; upload_id: string | null; attempts: number; max_attempts: number };
+type Claimed = { id: string; type: string; upload_id: string | null; attempts: number; max_attempts: number; weight: number };
 
 let stopping = false;
 process.on("SIGTERM", () => { stopping = true; });
 process.on("SIGINT", () => { stopping = true; });
 
-async function claim(lockedBy: string): Promise<Claimed | null> {
+async function claim(lockedBy: string, maxHeavy: number): Promise<Claimed | null> {
   const rows = await prisma.$queryRawUnsafe<Claimed[]>(
-    `DECLARE @job TABLE(id uniqueidentifier,type varchar(50),upload_id uniqueidentifier,attempts int,max_attempts int);
-     UPDATE TOP(1) dbo.cw_jobs WITH (UPDLOCK,READPAST,ROWLOCK)
+    `DECLARE @job TABLE(id uniqueidentifier,type varchar(50),upload_id uniqueidentifier,attempts int,max_attempts int,weight tinyint);
+     UPDATE dbo.cw_jobs WITH (UPDLOCK,READPAST,ROWLOCK)
        SET status='RUNNING',locked_at=SYSUTCDATETIME(),heartbeat_at=SYSUTCDATETIME(),locked_by=@P1,attempts=attempts+1
-       OUTPUT inserted.id,inserted.type,inserted.upload_id,inserted.attempts,inserted.max_attempts INTO @job
-     WHERE status='QUEUED' AND available_at<=SYSUTCDATETIME();
+       OUTPUT inserted.id,inserted.type,inserted.upload_id,inserted.attempts,inserted.max_attempts,inserted.weight INTO @job
+     WHERE id=(
+       SELECT TOP(1) id FROM dbo.cw_jobs WITH (UPDLOCK,READPAST)
+       WHERE status='QUEUED' AND available_at<=SYSUTCDATETIME()
+         AND (weight<2 OR (SELECT COUNT(*) FROM dbo.cw_jobs WHERE status='RUNNING' AND weight=2)<@P2)
+       ORDER BY weight ASC,available_at ASC
+     );
      SELECT * FROM @job`,
     lockedBy,
+    maxHeavy,
   );
   return rows[0] ?? null;
 }
@@ -214,8 +220,9 @@ async function recoverStale() {
 async function loop(concurrencyId: number) {
   const workerLabel = `${env().CATWORLD_WORKER_ID}-${concurrencyId}`;
   console.log(`[worker] ${workerLabel} iniciado`);
+  const maxHeavy = env().CATWORLD_MAX_HEAVY_JOBS;
   while (!stopping) {
-    const job = await claim(workerLabel);
+    const job = await claim(workerLabel, maxHeavy);
     if (!job) {
       await new Promise(r => setTimeout(r, env().CATWORLD_JOB_POLL_MS));
       continue;

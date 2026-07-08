@@ -14,6 +14,7 @@ const schema = z.object({
   // Pausa entre batches de import (ms). Reduz pico de DTU sem mudar throughput médio.
   // 0 = máxima velocidade; 200-500 = modo gentil (recomendado para S0/S1)
   CATWORLD_IMPORT_BATCH_DELAY_MS: z.coerce.number().int().min(0).default(200),
+  CATWORLD_MAX_HEAVY_JOBS: z.coerce.number().int().min(1).max(20).default(2),
 });
 
 export function env() {
