@@ -73,7 +73,8 @@ export function typedCsvField(v: unknown, sqlType: string): string {
       s = raw.replaceAll(",", ""); // US/neutral: strip commas, dot is decimal
     }
     const n = Number.parseFloat(s);
-    if (!Number.isFinite(n)) return ""; // NaN or Infinity → NULL
+    // DECIMAL(18,4) max integer part is 14 digits; reject values that would overflow
+    if (!Number.isFinite(n) || Math.abs(n) >= 1e14) return ""; // out of range → NULL
     return n.toFixed(4);
   }
   if (sqlType === "DATE") {
@@ -85,7 +86,11 @@ export function typedCsvField(v: unknown, sqlType: string): string {
     return d ? d.replace("T", " ").replace("Z", "").slice(0, 23) : "";
   }
   if (sqlType === "TIME") {
-    return /^\d{1,2}:\d{2}(:\d{2})?$/.test(raw) ? raw : "";
+    const m = /^(\d{1,2}):(\d{2})(:\d{2})?$/.exec(raw);
+    if (!m) return "";
+    // SQL Server TIME range: 00:00 to 23:59 — bank-hour values like "24:30" are invalid
+    if (Number(m[1]) > 23 || Number(m[2]) > 59) return "";
+    return raw;
   }
   return sanitizeCsvField(v);
 }

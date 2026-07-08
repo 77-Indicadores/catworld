@@ -79,9 +79,15 @@ function convertForTds(v: unknown, sqlType: string): unknown {
     } catch { return null; }
   }
   if (sqlType.startsWith("DECIMAL")) {
-    const raw = s.includes(",") ? s.replaceAll(".", "").replace(",", ".") : s;
-    const n = Number.parseFloat(raw);
-    return Number.isFinite(n) ? n : null;
+    const lastDot = s.lastIndexOf(".");
+    const lastComma = s.lastIndexOf(",");
+    const cleaned = lastComma > lastDot
+      ? s.replaceAll(".", "").replace(",", ".") // BR: "1.234,56"
+      : s.replaceAll(",", "");                  // US/neutral: "1,234.56"
+    const n = Number.parseFloat(cleaned);
+    // DECIMAL(18,4) max integer part is 14 digits; reject larger values
+    if (!Number.isFinite(n) || Math.abs(n) >= 1e14) return null;
+    return n;
   }
   if (sqlType === "DATE" || sqlType === "DATETIME2") {
     const d = normalizeDateLike(s);
