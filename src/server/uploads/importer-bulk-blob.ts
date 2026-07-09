@@ -34,7 +34,7 @@ function blobEnv() {
 export function sanitizeCsvField(v: unknown): string {
   if (v == null || String(v).trim() === "") return '""';
   const sanitized = String(v)
-    .replace(/\x00/g, "")   // null bytes → invalid for BULK INSERT CODEPAGE=65001
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "") // C0/DEL control chars → invalid for BULK INSERT CODEPAGE=65001
     .replace(/"/g, '""')
     .replace(/[\n\r\t]/g, " ")
     .replace(/\|/g, " ");
