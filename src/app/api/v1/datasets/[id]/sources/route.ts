@@ -3,7 +3,7 @@ import { z } from "zod";
 import { resolveActor } from "@/server/auth/actor";
 import { canAccess } from "@/server/auth/permissions";
 import { ApiError, handleApiError, ok } from "@/server/http";
-import { createDatasetSource } from "@/server/connections/sources";
+import { createDatasetSource, createDatasetSources } from "@/server/connections/sources";
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -17,9 +17,20 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       sourceKind: z.enum(["table", "query"]),
       sourceSchema: z.string().optional().nullable(),
       sourceTable: z.string().optional().nullable(),
+      sourceTables: z.array(z.string().min(1)).optional(),
       sourceSql: z.string().optional().nullable(),
       refreshPolicy: z.enum(["manual", "hourly", "daily", "weekly"]).default("manual"),
     }).parse(await request.json());
+    if (input.sourceKind === "table" && input.sourceTables?.length) {
+      return ok(await createDatasetSources({
+        datasetId,
+        connectionId: input.connectionId,
+        mode: input.mode,
+        sourceSchema: input.sourceSchema ?? "",
+        sourceTables: input.sourceTables,
+        refreshPolicy: input.refreshPolicy,
+      }), undefined, 201);
+    }
     return ok(await createDatasetSource({ datasetId, ...input }), undefined, 201);
   } catch (e) {
     return handleApiError(e);

@@ -66,11 +66,12 @@ export async function createDatasetSource(input: {
     : await queryColumns(connection, input.sourceSql!);
   if (!columns.length) throw new ApiError(400, "EMPTY_SOURCE", "Fonte nao retornou colunas");
 
-  const tableName = sqlIdentifier(input.name ?? input.sourceTable ?? "consulta");
+  const displayName = input.sourceKind === "table" ? input.sourceTable! : input.name!;
+  const tableName = sqlIdentifier(displayName);
   const table = await prisma.datasetTable.upsert({
     where: { datasetId_sqlName: { datasetId: dataset.id, sqlName: tableName } },
-    update: { name: input.name ?? input.sourceTable ?? tableName },
-    create: { datasetId: dataset.id, name: input.name ?? input.sourceTable ?? tableName, sqlName: tableName },
+    update: { name: displayName },
+    create: { datasetId: dataset.id, name: displayName, sqlName: tableName },
   });
   await replaceColumnCatalog(table.id, columns, 0n);
 
@@ -79,7 +80,7 @@ export async function createDatasetSource(input: {
       datasetId: dataset.id,
       connectionId: connection.id,
       targetTableId: table.id,
-      name: input.name ?? input.sourceTable ?? tableName,
+      name: displayName,
       mode: input.mode,
       sourceKind: input.sourceKind,
       sourceSchema: input.sourceSchema ?? null,
@@ -93,6 +94,29 @@ export async function createDatasetSource(input: {
   });
   if (input.mode === "extract") await queueSourceRefresh(source.id);
   return source;
+}
+
+export async function createDatasetSources(input: {
+  datasetId: string;
+  connectionId: string;
+  mode: "extract" | "live";
+  sourceSchema: string;
+  sourceTables: string[];
+  refreshPolicy: RefreshPolicy;
+}) {
+  const sources = [];
+  for (const table of input.sourceTables) {
+    sources.push(await createDatasetSource({
+      datasetId: input.datasetId,
+      connectionId: input.connectionId,
+      mode: input.mode,
+      sourceKind: "table",
+      sourceSchema: input.sourceSchema,
+      sourceTable: table,
+      refreshPolicy: input.refreshPolicy,
+    }));
+  }
+  return sources;
 }
 
 export async function refreshDatasetSource(datasetSourceId: string) {
