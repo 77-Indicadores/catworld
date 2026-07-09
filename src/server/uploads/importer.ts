@@ -52,6 +52,7 @@ function stagingColType(sqlType: string): string {
   if (sqlType === "DATE") return "DATE";
   if (sqlType === "DATETIME2") return "DATETIME2";
   if (sqlType === "TIME") return "TIME";
+  if (sqlType === "NVARCHAR(MAX)") return "NVARCHAR(MAX)";
   return "NVARCHAR(4000)";
 }
 
@@ -350,9 +351,10 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
 
             const message = bulkError instanceof Error ? bulkError.message : String(bulkError);
             const isOleDb      = message.includes('OLE DB provider "BULK"') || message.includes("blob does not exist");
-            // NVARCHAR(4000) staging: if a field value exceeds 4000 chars, BULK INSERT throws truncation.
-            // Recreate staging with NVARCHAR(MAX) so TDS fallback can handle arbitrarily long values.
-            const isTruncation = message.includes("String or binary data would be truncated") || message.includes("8152");
+            // NVARCHAR(4000) staging: if a field value exceeds 4000 chars, BULK INSERT throws 8152
+            // (truncation) or 4864 (type mismatch — BULK INSERT uses 4864 instead of 8152 for overflow).
+            // Recreate staging with NVARCHAR(MAX) and retry via TDS fallback.
+            const isTruncation = message.includes("String or binary data would be truncated") || message.includes("8152") || message.includes("4864");
 
             if (!isOleDb && !isTruncation) throw bulkError;
 
