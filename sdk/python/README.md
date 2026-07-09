@@ -15,7 +15,8 @@ from catworld import CatworldClient
 
 with CatworldClient("https://seu-catworld.exemplo.com", "cw_live_...") as client:
     result = client.query("SELECT * FROM banco_horas", dataset_id="<dataset-id>")
-    print(result["rows"])
+    df = result.dataframe
+    print(df.head())
 ```
 
 ## Autenticação
@@ -55,14 +56,20 @@ Se a mesma tabela existir em mais de um schema do contexto informado, o servidor
 
 **Retorno:**
 
+`query` retorna um `QueryResult`: ele funciona como `dict` para compatibilidade, mas tambem expoe `.rows`, `.columns` e `.dataframe`.
+
 ```python
-{
-    "columns": ["col1", "col2", ...],
-    "rows": [{"col1": ..., "col2": ...}, ...],
-    "rowCount": 4923,
-    "truncated": False,       # True se o resultado foi cortado pelo limit
-    "executionTimeMs": 312,
-}
+result = client.query("SELECT * FROM banco_horas", dataset_id="<dataset-id>")
+
+rows = result.rows
+columns = result.columns
+df = result.dataframe
+```
+
+Para usar `.dataframe`, instale o extra com pandas:
+
+```bash
+pip install "catworld-sdk[dataframe]"
 ```
 
 **Parâmetros:**
@@ -136,7 +143,20 @@ Lista as tabelas de um dataset com colunas e tipos.
 ```python
 tables = client.tables("<dataset-id>")
 for t in tables:
-    print(t["name"], [c["sqlName"] for c in t["columns"]])
+    origem = t.get("source")
+    print(t["name"], origem["mode"] if origem else "catworld")
+```
+
+---
+
+### `sources(dataset_id)`
+
+Lista as fontes conectadas de um dataset.
+
+```python
+sources = client.sources("<dataset-id>")
+for s in sources:
+    print(s["id"], s["name"], s["mode"], s["connection"]["name"])
 ```
 
 ---
@@ -144,10 +164,48 @@ for t in tables:
 ### `rows(table_id, limit=100)`
 
 Retorna as primeiras linhas de uma tabela pelo ID.
+Funciona tanto para tabelas materializadas no Catworld quanto para tabelas live; se a tabela for live, o servidor consulta o Postgres da fonte.
 
 ```python
 rows = client.rows("<table-id>", limit=50)
 print(rows)
+```
+
+---
+
+### Tabelas live em `query`
+
+Quando voce passa `dataset_id`, o SDK trata tabelas live como tabelas do dataset. Se a SQL referencia uma tabela live conhecida, `query` chama a fonte Postgres correta por baixo.
+
+```python
+result = client.query("SELECT * FROM clientes", dataset_id="<dataset-id>")
+df = result.dataframe
+print(df.head())
+```
+
+Queries que misturam uma tabela live com tabela interna/extract nao sao roteadas automaticamente, porque elas precisariam cruzar bancos diferentes. Nesses casos, materialize a fonte como extract ou consulte a fonte live separadamente.
+
+---
+
+### `live_query(source_id, sql=None, timeout=30, limit=10000)`
+
+Executa uma consulta diretamente na fonte live Postgres. Normalmente prefira `query(..., dataset_id=...)`; este metodo fica disponivel para casos em que voce ja tem o ID da fonte.
+Se `sql` for omitido, o servidor usa a consulta/tabela configurada na fonte.
+
+```python
+result = client.live_query("<source-id>", "SELECT * FROM clientes LIMIT 100")
+print(result.dataframe.head())
+```
+
+---
+
+### `refresh_source(source_id)`
+
+Enfileira uma atualização de uma fonte do tipo cópia no Catworld.
+
+```python
+job = client.refresh_source("<source-id>")
+print(job["id"])
 ```
 
 ## Exceções

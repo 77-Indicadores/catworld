@@ -1,4 +1,4 @@
-from .client import CatworldClient
+from .client import CatworldClient, QueryResult
 from .exceptions import (
     AmbiguousTableError,
     AuthenticationError,
@@ -15,6 +15,7 @@ from .exceptions import (
 
 __all__ = [
     "CatworldClient",
+    "QueryResult",
     "CatworldError",
     "AuthenticationError",
     "PermissionDeniedError",

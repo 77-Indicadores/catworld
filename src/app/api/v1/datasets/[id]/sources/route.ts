@@ -1,9 +1,25 @@
 import type { NextRequest } from "next/server";
 import { z } from "zod";
+import { prisma } from "@/server/db";
 import { resolveActor } from "@/server/auth/actor";
 import { canAccess } from "@/server/auth/permissions";
 import { ApiError, handleApiError, ok } from "@/server/http";
 import { createDatasetSource, createDatasetSources } from "@/server/connections/sources";
+
+export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  try {
+    const actor = await resolveActor(request);
+    const datasetId = (await params).id;
+    if (!await canAccess(actor, "READ", undefined, datasetId) && actor.role !== "ADMIN") throw new ApiError(403, "FORBIDDEN", "Sem permissao para ler o dataset");
+    return ok(await prisma.datasetSource.findMany({
+      where: { datasetId, active: true },
+      include: { connection: { select: { id: true, name: true, provider: true } }, targetTable: { include: { columns: { orderBy: { ordinal: "asc" } } } } },
+      orderBy: { name: "asc" },
+    }));
+  } catch (e) {
+    return handleApiError(e);
+  }
+}
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {

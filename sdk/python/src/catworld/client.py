@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib as _hashlib
 import json as _json
 import logging
+import re
 import zlib as _zlib
 from pathlib import Path
 from typing import Any, Iterator
@@ -26,6 +27,35 @@ def _fmt_bytes(n: int) -> str:
             return f"{n:.1f} {unit}"
         n /= 1024
     return f"{n:.1f} TB"
+
+
+def _table_refs(sql: str) -> list[str]:
+    refs: list[str] = []
+    for match in re.finditer(r'\b(?:from|join)\s+((?:"[^"]+"|\[[^\]]+\]|[A-Za-z_][\w$]*)(?:\s*\.\s*(?:"[^"]+"|\[[^\]]+\]|[A-Za-z_][\w$]*))?)', sql, re.IGNORECASE):
+        ref = match.group(1).strip()
+        parts = [p.strip() for p in ref.split(".")]
+        name = parts[-1].strip('"[]')
+        if name and name.lower() not in {"select"}:
+            refs.append(name)
+    return refs
+
+
+class QueryResult(dict):
+    @property
+    def rows(self) -> list[dict[str, Any]]:
+        return self.get("rows", [])
+
+    @property
+    def columns(self) -> list[str]:
+        return self.get("columns", [])
+
+    @property
+    def dataframe(self):
+        try:
+            import pandas as pd
+        except ImportError as exc:
+            raise ImportError("Instale pandas para usar result.dataframe: pip install 'catworld-sdk[dataframe]'") from exc
+        return pd.DataFrame(self.rows, columns=self.columns or None)
 
 
 class CatworldClient:
@@ -55,8 +85,26 @@ class CatworldClient:
     def tables(self, dataset_id: str):
         return self._request("GET", f"/api/v1/datasets/{dataset_id}/tables")
 
+    def sources(self, dataset_id: str):
+        return self._request("GET", f"/api/v1/datasets/{dataset_id}/sources")
+
     def rows(self, table_id: str, limit: int = 100):
         return self._request("GET", f"/api/v1/tables/{table_id}/rows", params={"limit": limit})
+
+    def refresh_source(self, source_id: str):
+        return self._request("POST", f"/api/v1/dataset-sources/{source_id}/refresh")
+
+    def live_query(
+        self,
+        source_id: str,
+        sql: str | None = None,
+        timeout: int = 30,
+        limit: int = 10000,
+    ):
+        payload: dict = {"timeout": timeout, "limit": limit}
+        if sql is not None:
+            payload["sql"] = sql
+        return QueryResult(self._request("POST", f"/api/v1/dataset-sources/{source_id}/query", json=payload, timeout=None))
 
     def query(
         self,
@@ -66,6 +114,10 @@ class CatworldClient:
         dataset_id: str | None = None,
         project_id: str | None = None,
     ):
+        live_source_id = self._resolve_live_source_for_query(sql, dataset_id, project_id)
+        if live_source_id:
+            return self.live_query(live_source_id, sql=sql, timeout=timeout, limit=limit)
+
         context = f"dataset={dataset_id}" if dataset_id else f"project={project_id}" if project_id else "sem contexto"
         logger.info("Executando query [%s, timeout=%ss, limit=%s]", context, timeout, limit)
 
@@ -81,7 +133,48 @@ class CatworldClient:
             result.get("rowCount", "?"),
             result.get("executionTimeMs", "?"),
         )
-        return result
+        return QueryResult(result)
+
+    def _resolve_live_source_for_query(
+        self,
+        sql: str,
+        dataset_id: str | None,
+        project_id: str | None,
+    ) -> str | None:
+        if not dataset_id or project_id:
+            return None
+
+        refs = _table_refs(sql)
+        if not refs:
+            return None
+
+        tables = self.tables(dataset_id)
+        by_name: dict[str, dict] = {}
+        for table in tables:
+            names = {
+                str(table.get("name") or "").lower(),
+                str(table.get("sqlName") or "").lower(),
+            }
+            source = table.get("source") or {}
+            if source.get("sourceTable"):
+                names.add(str(source["sourceTable"]).lower())
+            for name in names:
+                if name:
+                    by_name[name] = table
+
+        matched = [by_name[ref.lower()] for ref in refs if ref.lower() in by_name]
+        live = [table for table in matched if (table.get("source") or {}).get("mode") == "live"]
+        if not live:
+            return None
+
+        live_source_ids = {table["source"]["id"] for table in live}
+        internal = [table for table in matched if (table.get("source") or {}).get("mode") != "live"]
+        if internal or len(live_source_ids) > 1:
+            raise ValidationError(
+                "Query mistura tabelas live com outras origens. Materialize a fonte como extract ou consulte uma fonte live por vez.",
+                code="MIXED_QUERY_ENGINES",
+            )
+        return next(iter(live_source_ids))
 
     def upload(
         self,
