@@ -52,6 +52,7 @@ model Dataset {
   tables      DatasetTable[]
   grants      AccessGrant[]
   uploads     Upload[]
+  sources     DatasetSource[]
 
   @@unique([projectId, slug])
   @@index([projectId, active])
@@ -71,6 +72,7 @@ model DatasetTable {
   columns   DatasetColumn[]
   versions  DatasetVersion[]
   uploads   Upload[]
+  source    DatasetSource?
 
   @@unique([datasetId, sqlName])
   @@map("cw_tables")
@@ -143,19 +145,54 @@ model AccessGrant {
 model Connection {
   id                   String    @id @default(uuid()) @db.UniqueIdentifier
   name                 String    @db.NVarChar(120)
+  provider             String    @default("postgres") @db.VarChar(32)
   environment          String    @db.VarChar(32)
   server               String    @db.NVarChar(255)
+  port                 Int?
   databaseName         String    @map("database_name") @db.NVarChar(128)
+  sslMode              String    @default("require") @map("ssl_mode") @db.VarChar(32)
   username             String    @db.NVarChar(255)
   encryptedCredentials String    @map("encrypted_credentials") @db.NVarChar(2000)
+  metadataJson         String?   @map("metadata_json") @db.NVarChar(Max)
   active               Boolean   @default(true)
   lastStatus           String?   @map("last_status") @db.VarChar(32)
   lastLatencyMs        Int?      @map("last_latency_ms")
   lastCheckedAt        DateTime? @map("last_checked_at") @db.DateTime2
   createdAt            DateTime  @default(now()) @map("created_at") @db.DateTime2
   updatedAt            DateTime  @updatedAt @map("updated_at") @db.DateTime2
+  sources              DatasetSource[]
 
   @@map("cw_connections")
+}
+
+model DatasetSource {
+  id              String        @id @default(uuid()) @db.UniqueIdentifier
+  datasetId       String        @map("dataset_id") @db.UniqueIdentifier
+  connectionId    String        @map("connection_id") @db.UniqueIdentifier
+  targetTableId   String?       @unique @map("target_table_id") @db.UniqueIdentifier
+  name            String        @db.NVarChar(255)
+  mode            String        @db.VarChar(20)
+  sourceKind      String        @map("source_kind") @db.VarChar(20)
+  sourceSchema    String?       @map("source_schema") @db.NVarChar(128)
+  sourceTable     String?       @map("source_table") @db.NVarChar(128)
+  sourceSql       String?       @map("source_sql") @db.NVarChar(Max)
+  refreshPolicy   String        @default("manual") @map("refresh_policy") @db.VarChar(20)
+  lastStatus      String?       @map("last_status") @db.VarChar(32)
+  lastRowCount    BigInt?       @map("last_row_count")
+  lastError       String?       @map("last_error") @db.NVarChar(Max)
+  lastRefreshedAt DateTime?     @map("last_refreshed_at") @db.DateTime2
+  nextRefreshAt   DateTime?     @map("next_refresh_at") @db.DateTime2
+  active          Boolean       @default(true)
+  createdAt       DateTime      @default(now()) @map("created_at") @db.DateTime2
+  updatedAt       DateTime      @updatedAt @map("updated_at") @db.DateTime2
+  dataset         Dataset       @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+  connection      Connection    @relation(fields: [connectionId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  targetTable     DatasetTable? @relation(fields: [targetTableId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([datasetId, active])
+  @@index([connectionId])
+  @@index([mode, refreshPolicy, nextRefreshAt])
+  @@map("cw_dataset_sources")
 }
 
 model Upload {

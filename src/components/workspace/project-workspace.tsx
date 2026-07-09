@@ -10,7 +10,8 @@ import { TablePanel } from "./table-panel";
 import { QueryPanel } from "./query-panel";
 
 type Column = { id: string; sqlName: string; originalName: string; sqlType: string; nullable: boolean };
-type Table = { id: string; name: string; sqlName: string; rowCount: string; columns: Column[] };
+type TableSource = { id: string; name: string; mode: string; sourceKind: string; sourceSchema: string | null; sourceTable: string | null; refreshPolicy: string; lastStatus: string | null; lastRowCount: string | null; lastError: string | null; lastRefreshedAt: string | null; nextRefreshAt: string | null; connection: { id: string; name: string } };
+type Table = { id: string; name: string; sqlName: string; rowCount: string; source: TableSource | null; columns: Column[] };
 type Dataset = { id: string; name: string; description: string | null; active: boolean; schemaName: string; tables: Table[] };
 type Project = { id: string; name: string; description: string | null; active: boolean; datasets: Dataset[] };
 

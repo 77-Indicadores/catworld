@@ -10,8 +10,9 @@ import { env } from "@/server/env";
 import { previewFile, type FilePreview } from "@/server/uploads/parser";
 import { importUpload } from "@/server/uploads/importer";
 import { queueImportUploadAuto } from "@/server/uploads/actions";
+import { enqueueDueSourceRefreshes, refreshDatasetSource } from "@/server/connections/sources";
 
-type Claimed = { id: string; type: string; upload_id: string | null; attempts: number; max_attempts: number; weight: number };
+type Claimed = { id: string; type: string; upload_id: string | null; payload_json: string | null; attempts: number; max_attempts: number; weight: number };
 
 let stopping = false;
 process.on("SIGTERM", () => { stopping = true; });
@@ -19,10 +20,10 @@ process.on("SIGINT", () => { stopping = true; });
 
 async function claim(lockedBy: string, maxHeavy: number): Promise<Claimed | null> {
   const rows = await prisma.$queryRawUnsafe<Claimed[]>(
-    `DECLARE @job TABLE(id uniqueidentifier,type varchar(50),upload_id uniqueidentifier,attempts int,max_attempts int,weight tinyint);
+    `DECLARE @job TABLE(id uniqueidentifier,type varchar(50),upload_id uniqueidentifier,payload_json nvarchar(max),attempts int,max_attempts int,weight tinyint);
      UPDATE dbo.cw_jobs WITH (UPDLOCK,READPAST,ROWLOCK)
        SET status='RUNNING',locked_at=SYSUTCDATETIME(),heartbeat_at=SYSUTCDATETIME(),locked_by=@P1,attempts=attempts+1
-       OUTPUT inserted.id,inserted.type,inserted.upload_id,inserted.attempts,inserted.max_attempts,inserted.weight INTO @job
+       OUTPUT inserted.id,inserted.type,inserted.upload_id,inserted.payload_json,inserted.attempts,inserted.max_attempts,inserted.weight INTO @job
      WHERE id=(
        SELECT TOP(1) id FROM dbo.cw_jobs WITH (UPDLOCK,READPAST)
        WHERE status='QUEUED' AND available_at<=SYSUTCDATETIME()
@@ -55,6 +56,14 @@ async function convertLegacy(path: string, dir: string) {
 }
 
 async function work(job: Claimed) {
+  if (job.type === "SOURCE_REFRESH") {
+    const payload = JSON.parse(job.payload_json ?? "{}") as { datasetSourceId?: string };
+    if (!payload.datasetSourceId) throw new Error("SOURCE_REFRESH sem datasetSourceId");
+    await refreshDatasetSource(payload.datasetSourceId);
+    await prisma.job.update({ where: { id: job.id }, data: { status: "COMPLETED", lockedAt: null, lockedBy: null, heartbeatAt: null, lastError: null } });
+    return;
+  }
+
   if (!job.upload_id) throw new Error("Job sem upload");
 
   const upload = await prisma.upload.findUniqueOrThrow({ where: { id: job.upload_id } });
@@ -256,6 +265,7 @@ async function main() {
     while (!stopping) {
       if (Date.now() - lastRecovery > 60000) {
         await recoverStale();
+        await enqueueDueSourceRefreshes();
         lastRecovery = Date.now();
       }
       await new Promise(r => setTimeout(r, 1000));

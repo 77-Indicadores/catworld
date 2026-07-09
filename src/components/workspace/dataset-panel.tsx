@@ -3,6 +3,7 @@ import { Database, UploadCloud } from "lucide-react";
 import { CopyableId } from "@/components/ui/copyable-id";
 import { EditCatalogDialog } from "@/components/management/edit-catalog-dialog";
 import { UploadFlow } from "./upload-flow";
+import { SourceDialog } from "./source-dialog";
 
 type Dataset = { id: string; name: string; description: string | null; active: boolean; tables: { id: string; name: string }[] };
 
@@ -30,8 +31,11 @@ export function DatasetPanel({ dataset, onSelectTable, onChanged }: { dataset: D
         </div>
       )}
 
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2 text-sm font-medium"><UploadCloud size={15} />Entrada de dados</div>
+        <SourceDialog datasetId={dataset.id} onComplete={onChanged} />
+      </div>
       <div>
-        <div className="mb-2 flex items-center gap-2 text-sm font-medium"><UploadCloud size={15} />Novo upload</div>
         <UploadFlow datasetId={dataset.id} onComplete={onChanged} />
       </div>
     </div>
