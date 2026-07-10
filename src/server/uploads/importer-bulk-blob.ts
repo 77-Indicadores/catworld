@@ -45,17 +45,17 @@ export function sanitizeCsvField(v: unknown): string {
 /**
  * Encode an NVARCHAR value for the clean blob using tilde (~) as the FIELDQUOTE character.
  * JSON values contain many '"' chars which, when doubled for FIELDQUOTE='"', can hit SQL Server's
- * CSV parser buffer limit (error 4864). Tilde never appears in JSON, so no escaping is needed
- * for typical text/JSON data, and the field stays compact.
- * FIELDQUOTE in the BULK INSERT statement must be '~' to match.
+ * CSV parser buffer limit (error 4864). Using '~' avoids that — only '~' itself needs escaping.
+ * FIELDQUOTE in both the BULK INSERT and OPENROWSET statements must be '~' to match.
+ * Note: | inside ~...~ is treated as literal data by SQL Server, so no | replacement needed.
  */
 function nvarcharForBulk(v: unknown): string {
   if (v == null || String(v).trim() === "") return ""; // unquoted empty → NULL via KEEPNULLS
-  const sanitized = String(v)
+  const s = String(v);
+  const sanitized = s
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "") // C0/DEL control chars
-    .replace(/~/g, "~~")          // escape tilde for FIELDQUOTE='~'
-    .replace(/[\n\r\t]/g, " ")   // newlines/tabs → space (preserve row structure)
-    .replace(/\|/g, " ");        // field delimiter → space
+    .replace(/~/g, "~~")          // escape tilde — the only char that needs escaping with FIELDQUOTE='~'
+    .replace(/[\n\r\t]/g, " ");  // newlines/tabs → space (preserve row structure)
   return "~" + sanitized + "~";
 }
 
@@ -381,7 +381,7 @@ export async function openrowsetInsertFromBlob(
       FORMAT = 'CSV',
       FIELDTERMINATOR = '|',
       ROWTERMINATOR = '\\n',
-      FIELDQUOTE = '"',
+      FIELDQUOTE = '~',
       FIRSTROW = 1,
       KEEPNULLS
     ) WITH (

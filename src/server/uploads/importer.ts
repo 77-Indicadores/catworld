@@ -63,6 +63,7 @@ function tdsColType(sqlType: string): sql.ISqlType | (() => sql.ISqlType) {
   if (sqlType === "DATE") return sql.Date;
   if (sqlType === "DATETIME2") return sql.DateTime2;
   if (sqlType === "TIME") return sql.Time;
+  if (sqlType === "NVARCHAR(MAX)") return sql.NVarChar(sql.MAX);
   return sql.NVarChar(4000);
 }
 
@@ -351,10 +352,13 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
 
             const message = bulkError instanceof Error ? bulkError.message : String(bulkError);
             const isOleDb      = message.includes('OLE DB provider "BULK"') || message.includes("blob does not exist");
-            // NVARCHAR(4000) staging: if a field value exceeds 4000 chars, BULK INSERT throws 8152
-            // (truncation) or 4864 (type mismatch — BULK INSERT uses 4864 instead of 8152 for overflow).
-            // Recreate staging with NVARCHAR(MAX) and retry via TDS fallback.
-            const isTruncation = message.includes("String or binary data would be truncated") || message.includes("8152") || message.includes("4864");
+            // NVARCHAR(4000) staging: if a field value exceeds 4000 chars, BULK INSERT throws
+            // error 8152 ("String or binary data would be truncated") or error number 4864
+            // ("type mismatch" — BULK INSERT uses 4864 for column overflow, not 8152).
+            // Use error.number for 4864 (not message text, which contains row numbers that
+            // can contain "4864" as a substring and produce false positives).
+            const sqlErrNum = (bulkError as Error & { number?: number }).number;
+            const isTruncation = message.includes("String or binary data would be truncated") || sqlErrNum === 8152 || sqlErrNum === 4864;
 
             if (!isOleDb && !isTruncation) throw bulkError;
 
