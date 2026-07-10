@@ -229,7 +229,7 @@ function convert(value: unknown, type: string) {
 async function replaceColumnCatalog(tableId: string, columns: SourceColumn[], rowCount: bigint) {
   await prisma.$transaction([
     prisma.datasetColumn.deleteMany({ where: { tableId } }),
-    prisma.datasetTable.update({ where: { id: tableId }, data: { rowCount } }),
+    prisma.datasetTable.update({ where: { id: tableId }, data: { rowCount, lastDataAt: new Date() } }),
     prisma.datasetColumn.createMany({
       data: columns.map((column, index) => ({
         tableId,

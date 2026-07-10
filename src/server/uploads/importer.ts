@@ -614,7 +614,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
         DELETE FROM dbo.cw_columns WHERE table_id=@tableId` : ""}
         INSERT INTO dbo.cw_columns(id,table_id,ordinal,original_name,sql_name,sql_type,nullable)
           VALUES${colValues}
-        ${isFirst ? `UPDATE dbo.cw_tables SET row_count=@actual,updated_at=SYSUTCDATETIME() WHERE id=@tableId
+        ${isFirst ? `UPDATE dbo.cw_tables SET row_count=@actual,last_data_at=SYSUTCDATETIME(),updated_at=SYSUTCDATETIME() WHERE id=@tableId
         INSERT INTO dbo.cw_dataset_versions(id,table_id,upload_id,row_count,schema_json)
           VALUES(NEWID(),@tableId,@uploadId,@actual,@schemaJson)
         INSERT INTO dbo.cw_audit_events(id,event_type,resource_type,resource_id,detail_json,success)

@@ -10,7 +10,7 @@ import { SourceEditDialog } from "./source-edit-dialog";
 import { PowerBIDialog } from "./powerbi-dialog";
 
 type Source = { id: string; name: string; mode: string; sourceKind: string; sourceSchema: string | null; sourceTable: string | null; refreshPolicy: string; active: boolean; lastStatus: string | null; lastRowCount: string | null; lastError: string | null; lastRefreshedAt: string | null; nextRefreshAt: string | null; connection: { id: string; name: string } };
-type Table = { id: string; name: string; source: Source | null };
+type Table = { id: string; name: string; lastDataAt: string | null; source: Source | null };
 type Dataset = { id: string; slug: string; name: string; description: string | null; active: boolean; tables: Table[] };
 
 function modeText(mode: string) {
@@ -106,7 +106,7 @@ export function DatasetPanel({ dataset, projectSlug, publicOrigin, onSelectTable
                     <div><dt className="font-medium text-base-content">Origem</dt><dd>{s.sourceKind === "table" ? `${s.sourceSchema}.${s.sourceTable}` : "Consulta personalizada"}</dd></div>
                     <div><dt className="font-medium text-base-content">Atualização</dt><dd>{s.mode === "live" ? "Sempre ao consultar" : refreshText(s.refreshPolicy)}</dd></div>
                     {rowsLabel && <div><dt className="font-medium text-base-content">Dados</dt><dd>{rowsLabel}</dd></div>}
-                    {s.lastRefreshedAt && <div><dt className="font-medium text-base-content">Última atualização</dt><dd>{new Date(s.lastRefreshedAt).toLocaleString("pt-BR")}</dd></div>}
+                    {t.lastDataAt && <div><dt className="font-medium text-base-content">Última atualização</dt><dd>{new Date(t.lastDataAt).toLocaleString("pt-BR")}</dd></div>}
                     {s.nextRefreshAt && <div><dt className="font-medium text-base-content">Próxima atualização</dt><dd>{new Date(s.nextRefreshAt).toLocaleString("pt-BR")}</dd></div>}
                   </dl>
 
@@ -156,7 +156,7 @@ export function DatasetPanel({ dataset, projectSlug, publicOrigin, onSelectTable
 
       <Panel title="Tabelas de upload">
         {uploadTables.length > 0
-          ? <div className="divide-y divide-base-300">{uploadTables.map((t) => <button key={t.id} onClick={() => onSelectTable(t.id)} className="flex w-full items-center gap-3 px-5 py-3 text-left text-sm hover:bg-base-200"><Database size={15} className="text-primary" /><span>{t.name}</span></button>)}</div>
+          ? <div className="divide-y divide-base-300">{uploadTables.map((t) => <button key={t.id} onClick={() => onSelectTable(t.id)} className="flex w-full items-center gap-3 px-5 py-3 text-left text-sm hover:bg-base-200"><Database size={15} className="text-primary" /><span className="flex-1">{t.name}</span>{t.lastDataAt && <span className="text-xs text-base-content/40">{new Date(t.lastDataAt).toLocaleString("pt-BR")}</span>}</button>)}</div>
           : <div className="px-5 py-4 text-sm text-base-content/50">Nenhuma tabela criada por upload neste dataset.</div>}
       </Panel>
 

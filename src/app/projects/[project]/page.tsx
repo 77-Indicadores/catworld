@@ -31,6 +31,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ projec
         name: t.name,
         sqlName: t.sqlName,
         rowCount: String(t.rowCount),
+        lastDataAt: t.lastDataAt?.toISOString() ?? null,
         source: t.source ? {
           id: t.source.id,
           name: t.source.name,

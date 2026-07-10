@@ -64,10 +64,11 @@ model DatasetTable {
   datasetId String           @map("dataset_id") @db.UniqueIdentifier
   name      String           @db.NVarChar(255)
   sqlName   String           @map("sql_name") @db.VarChar(128)
-  rowCount  BigInt           @default(0) @map("row_count")
-  sizeBytes BigInt           @default(0) @map("size_bytes")
-  createdAt DateTime         @default(now()) @map("created_at") @db.DateTime2
-  updatedAt DateTime         @updatedAt @map("updated_at") @db.DateTime2
+  rowCount   BigInt           @default(0) @map("row_count")
+  sizeBytes  BigInt           @default(0) @map("size_bytes")
+  lastDataAt DateTime?        @map("last_data_at") @db.DateTime2
+  createdAt  DateTime         @default(now()) @map("created_at") @db.DateTime2
+  updatedAt  DateTime         @updatedAt @map("updated_at") @db.DateTime2
   dataset   Dataset          @relation(fields: [datasetId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   columns   DatasetColumn[]
   versions  DatasetVersion[]
