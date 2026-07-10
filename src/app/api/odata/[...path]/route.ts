@@ -141,18 +141,37 @@ async function queryLiveTable(
     const dataResult = await client.query<Record<string, unknown>>(
       `SELECT ${colList} FROM ${baseExpr} LIMIT ${top} OFFSET ${skip}`,
     );
-    // Normaliza tipos para compatibilidade OData/Power BI:
-    // - boolean → "true"/"false" (catalog mapeia bool PG → NVARCHAR → Edm.String)
-    // - object/array (JSON, JSONB, arrays PG) → JSON string (Edm.String)
-    // - Date → passa; JSON.stringify serializa como ISO 8601 (Edm.DateTimeOffset/Date)
-    // - null → null; primitivos → passam direto
+    // Normaliza valores para compatibilidade com OData v4 / Power BI por tipo declarado no metadata.
+    // Referência: OData JSON Format v4.0 §7 + comportamento Power BI OData connector.
+    const typeMap = new Map(cols.map((c) => [c.sqlName, c.sqlType.toUpperCase().replace(/\(.*\)/, "").trim()]));
     const rows = dataResult.rows.map((row) => {
       const out: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(row)) {
-        if (v === null || v === undefined) out[k] = null;
-        else if (typeof v === "boolean") out[k] = String(v);
-        else if (typeof v === "object" && !(v instanceof Date)) out[k] = JSON.stringify(v);
-        else out[k] = v;
+        if (v === null || v === undefined) { out[k] = null; continue; }
+        const t = typeMap.get(k) ?? "NVARCHAR";
+        if (["DATETIME2", "DATETIME", "SMALLDATETIME", "DATETIMEOFFSET"].includes(t)) {
+          // Edm.DateTimeOffset → ISO 8601 com Z
+          out[k] = v instanceof Date ? v.toISOString() : v;
+        } else if (t === "DATE") {
+          // Edm.Date → "YYYY-MM-DD" (sem hora)
+          out[k] = v instanceof Date ? v.toISOString().slice(0, 10) : String(v).slice(0, 10);
+        } else if (t === "TIME") {
+          // Edm.TimeOfDay → "HH:MM:SS[.fff]"
+          out[k] = String(v);
+        } else if (["FLOAT", "REAL"].includes(t)) {
+          // Edm.Double → NaN/Inf como strings (spec OData §7.1)
+          if (typeof v === "number" && isNaN(v)) out[k] = "NaN";
+          else if (typeof v === "number" && !isFinite(v)) out[k] = v > 0 ? "INF" : "-INF";
+          else out[k] = v;
+        } else if (["BIGINT", "DECIMAL", "NUMERIC"].includes(t)) {
+          // Edm.Int64 / Edm.Decimal → string obrigatório com IEEE754Compatible=true
+          out[k] = typeof v === "number" ? String(v) : v;
+        } else {
+          // Edm.String (NVARCHAR etc.) — bool e objetos viram string
+          if (typeof v === "boolean") out[k] = String(v);
+          else if (typeof v === "object" && !(v instanceof Date)) out[k] = JSON.stringify(v);
+          else out[k] = v;
+        }
       }
       return out;
     });
