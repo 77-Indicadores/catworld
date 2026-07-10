@@ -101,7 +101,12 @@ export function typedCsvField(v: unknown, sqlType: string): string {
   }
   if (sqlType === "DATETIME2") {
     const d = normalizeDateLike(raw);
-    return d ? d.replace("T", " ").replace("Z", "").slice(0, 23) : "";
+    if (!d) return "";
+    // Strip T-separator and timezone, keep at most 23 chars (YYYY-MM-DD HH:MM:SS.mmm)
+    let s = d.replace("T", " ").replace("Z", "").slice(0, 23);
+    // SQL Server BULK INSERT requires at least HH:MM:SS — pad if only HH:MM
+    if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(s)) s += ":00";
+    return s;
   }
   if (sqlType === "TIME") {
     const m = /^(\d{1,2}):(\d{2})(:\d{2})?$/.exec(raw);
