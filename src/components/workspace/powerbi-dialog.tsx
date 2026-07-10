@@ -104,44 +104,17 @@ export function PowerBIDialog({ projectSlug, datasetSlug, datasetName, publicOri
 
               {tab === "service" && (
                 <>
-                  <div className="rounded-lg border border-info/30 bg-info/5 px-4 py-3 text-xs text-base-content/70">
-                    <strong className="text-base-content">Duas formas de autenticar no Service</strong><br />
-                    <strong>Opção A — Básica:</strong> use a URL base (sem token) e configure usuário/senha nas credenciais do dataset no Service. Senha = seu token de API.<br />
-                    <strong>Opção B — Token na URL:</strong> gere a URL abaixo com <code>?api_key=TOKEN</code> e use <strong>Autenticação Anônima</strong> no Service. Ambas funcionam sem gateway.
-                  </div>
-
-                  <div>
-                    <label className="mb-1 block text-xs font-medium text-base-content/60">
-                      Cole seu token de API para gerar a URL
-                    </label>
-                    <input
-                      type="password"
-                      value={token}
-                      onChange={(e) => setToken(e.target.value)}
-                      placeholder="cw_live_..."
-                      className="input input-sm input-bordered w-full font-mono text-xs"
-                    />
-                  </div>
-
-                  <CopyField
-                    label="URL OData com token embutido — use esta no Power BI Service"
-                    value={serviceUrl}
-                  />
-
                   <div className="rounded-lg border border-base-300 p-4 text-xs space-y-2.5 text-base-content/70 leading-relaxed">
                     <p className="font-semibold text-base-content text-sm">Passos no Power BI Service</p>
                     <ol className="list-decimal list-inside space-y-2">
-                      <li>Abra o Power BI Desktop, use a URL acima no <strong className="text-base-content">Feed OData</strong></li>
-                      <li>Em autenticação, escolha <strong className="text-base-content">Anônima</strong> (não Básica)</li>
+                      <li>Copie a <strong className="text-base-content">URL base</strong> da aba Desktop acima</li>
+                      <li>No Power BI Desktop, vá em <strong className="text-base-content">Obter dados → Feed OData</strong> e cole a URL</li>
+                      <li>Em autenticação, escolha <strong className="text-base-content">Básica</strong> — usuário: qualquer texto, senha: seu token de API</li>
                       <li>Monte o relatório e publique no Power BI Service</li>
                       <li>No Service, vá em <strong className="text-base-content">Configurações do dataset → Credenciais da fonte de dados</strong></li>
-                      <li>Edite a credencial e confirme como <strong className="text-base-content">Anônima</strong></li>
+                      <li>Edite a credencial, selecione <strong className="text-base-content">Básica</strong> e informe novamente usuário e token</li>
                       <li>Ative a <strong className="text-base-content">Atualização agendada</strong> — funciona sem gateway</li>
                     </ol>
-                  </div>
-
-                  <div className="rounded-lg border border-error/30 bg-error/5 px-4 py-3 text-xs text-base-content/70">
-                    <strong className="text-base-content">Segurança:</strong> o token fica visível na URL. Crie um token dedicado exclusivo para este relatório e com permissão mínima necessária. Se houver comprometimento, revogue e gere outro.
                   </div>
                 </>
               )}

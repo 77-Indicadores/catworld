@@ -231,47 +231,22 @@ export const articles: Article[] = [
     category: "conectividade",
     icon: "Cloud",
     sections: [
-      { kind: "heading", text: "Duas formas de autenticar no Service" },
       {
         kind: "text",
-        text: "O Power BI Service aceita duas formas de autenticação com o Catworld — ambas funcionam para refresh agendado sem gateway:",
+        text: "O Power BI Service suporta autenticação Básica com o Catworld — funciona para refresh agendado sem necessidade de gateway.",
       },
-      {
-        kind: "list",
-        items: [
-          "Autenticação Básica: use a URL base (sem ?api_key=) e configure usuário/senha no Service. Usuário pode ser qualquer texto, senha é o token de API.",
-          "Autenticação Anônima com token na URL: cole ?api_key=TOKEN na URL e selecione Anônima. Útil quando a ferramenta não suporta Basic auth.",
-        ],
-      },
-      { kind: "heading", text: "Opção A — Autenticação Básica (recomendada)" },
+      { kind: "heading", text: "Passo a passo" },
       {
         kind: "steps",
         items: [
           "No Power BI Desktop, vá em Obter dados → Feed OData",
-          "Cole a URL base: https://catworld.77indicadores.com.br/api/odata/{projeto}/{dataset}",
+          "Cole a URL base do dataset (sem token): https://catworld.77indicadores.com.br/api/odata/{projeto}/{dataset}",
           "Na autenticação, selecione Básica. Usuário: qualquer texto (ex: token). Senha: seu token de API",
-          "Importe as tabelas e monte o relatório",
-          "Publique no Power BI Service",
-          "No Service: Configurações do dataset → Credenciais da fonte de dados → Editar credenciais → Básica → informe novamente usuário e token",
+          "Importe as tabelas, monte o relatório e publique no Power BI Service",
+          "No Service: Configurações do dataset → Credenciais da fonte de dados → Editar credenciais",
+          "Selecione Básica e informe novamente usuário e token",
           "Ative Atualização agendada — funciona sem gateway",
         ],
-      },
-      { kind: "heading", text: "Opção B — Token na URL + Autenticação Anônima" },
-      {
-        kind: "steps",
-        items: [
-          "No Catworld, abra o dataset e clique em 'Conectar ao Power BI' → aba 'Power BI Service'",
-          "Cole seu token para gerar a URL com ?api_key=TOKEN",
-          "No Power BI Desktop, use essa URL no Feed OData e selecione Anônima",
-          "Publique no Service",
-          "No Service: Credenciais da fonte de dados → Editar → Anônima → Entrar",
-          "Ative Atualização agendada — funciona sem gateway",
-        ],
-      },
-      {
-        kind: "note",
-        variant: "warning",
-        text: "Na Opção B o token fica visível na URL. Crie um token dedicado para este relatório. Se for comprometido, revogue e gere outro — só precisará atualizar a URL no relatório.",
       },
       { kind: "heading", text: "Preciso de um gateway?" },
       {
@@ -308,7 +283,7 @@ export const articles: Article[] = [
         rows: [
           ["Bearer token", "Authorization: Bearer cw_live_xxx", "API, scripts, Power BI Desktop"],
           ["Basic auth", "Usuário: qualquer / Senha: token", "Power BI Desktop e Service"],
-          ["Query param", "?api_key=cw_live_xxx na URL", "Power BI Desktop e Service (auth Anônima)"],
+          ["Query param", "?api_key=cw_live_xxx na URL", "Scripts e integrações HTTP"],
         ],
       },
       { kind: "heading", text: "Query options suportadas" },
