@@ -14,6 +14,7 @@ export async function POST(request: NextRequest) {
       sql: z.string().min(1).max(50000),
       timeout: z.number().int().min(1).max(120).default(30),
       limit: z.number().int().min(1).max(10000).default(10000),
+      offset: z.number().int().min(0).default(0),
       datasetId: z.string().uuid().optional(),
       projectId: z.string().uuid().optional(),
     }).parse(await request.json());
@@ -31,7 +32,7 @@ export async function POST(request: NextRequest) {
       schemas = datasets.map((d) => d.schemaName);
     }
 
-    const result = await executeReadOnly(actor.principal, input.sql, input.timeout, input.limit, schemas);
+    const result = await executeReadOnly(actor.principal, input.sql, input.timeout, input.limit, schemas, input.offset);
     await audit(actor, "QUERY_EXECUTED", "query", undefined, { rowCount: result.rowCount, executionTimeMs: result.executionTimeMs });
     return ok(result);
   } catch (e) {

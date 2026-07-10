@@ -75,7 +75,7 @@ export async function revokeSchema(principal: string, schema: string) {
   for (const grant of ["SELECT", "INSERT", "UPDATE", "DELETE"]) await (await sqlPool()).request().query(`IF DATABASE_PRINCIPAL_ID(N'${escapeSqlLiteral(principal)}') IS NOT NULL REVOKE ${grant} ON SCHEMA::${target} FROM ${user}`);
 }
 
-export async function executeReadOnly(principal: string, query: string, timeout = 30, limit = 10_000, schemas: string[] = []) {
+export async function executeReadOnly(principal: string, query: string, timeout = 30, limit = 10_000, schemas: string[] = [], offset = 0) {
   const validated = validateReadOnlySql(query);
   if (!validated.safe) throw new ApiError(400, "UNSAFE_SQL", validated.reason);
 
@@ -122,7 +122,10 @@ const tableMap = new Map<string, string[]>();
     (request as unknown as { timeout: number }).timeout = Math.min(Math.max(timeout, 1), 120) * 1000;
     await request.query(`EXECUTE AS USER = N'${escapeSqlLiteral(principal)}'`);
     const started = Date.now();
-    const result = await request.query(statement);
+    const paged = offset > 0 || limit < 10_000
+      ? `SELECT * FROM (${statement}) AS _cw_q ORDER BY (SELECT NULL) OFFSET ${offset} ROWS FETCH NEXT ${limit} ROWS ONLY`
+      : statement;
+    const result = await request.query(paged);
     const rows = result.recordset?.slice(0, limit) ?? [];
     await request.query("REVERT");
     await transaction.commit();

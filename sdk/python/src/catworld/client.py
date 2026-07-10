@@ -20,6 +20,8 @@ from .exceptions import (
 logger = logging.getLogger("catworld")
 logger.addHandler(logging.NullHandler())
 
+_PAGE_SIZE = 10_000
+
 
 def _fmt_bytes(n: int) -> str:
     for unit in ("B", "KB", "MB", "GB"):
@@ -99,41 +101,144 @@ class CatworldClient:
         source_id: str,
         sql: str | None = None,
         timeout: int = 30,
-        limit: int = 10000,
-    ):
-        payload: dict = {"timeout": timeout, "limit": limit}
+        limit: int | None = None,
+    ) -> QueryResult:
+        """Executa uma query em uma fonte live (Postgres direto).
+
+        Args:
+            source_id: ID da fonte live.
+            sql: SQL opcional. Se omitido, retorna todos os dados da fonte.
+            timeout: Timeout em segundos (máx 120).
+            limit: Número máximo de linhas. ``None`` (padrão) retorna todas as linhas
+                   paginando automaticamente em blocos de 10.000.
+        """
+        if limit is None:
+            all_rows: list[dict[str, Any]] = []
+            columns: list[str] = []
+            for page in self._iter_live_query(source_id, sql=sql, timeout=timeout):
+                if not columns and page.columns:
+                    columns = page.columns
+                all_rows.extend(page.rows)
+            return QueryResult({"rows": all_rows, "columns": columns, "rowCount": len(all_rows)})
+
+        payload: dict[str, Any] = {"timeout": timeout, "limit": limit}
         if sql is not None:
             payload["sql"] = sql
         return QueryResult(self._request("POST", f"/api/v1/dataset-sources/{source_id}/query", json=payload, timeout=None))
+
+    def iter_live_query(
+        self,
+        source_id: str,
+        sql: str | None = None,
+        timeout: int = 30,
+    ) -> Iterator[QueryResult]:
+        """Itera sobre os resultados de uma fonte live página a página (10.000 linhas por página).
+
+        Útil para processar grandes volumes sem carregar tudo na memória.
+        """
+        yield from self._iter_live_query(source_id, sql=sql, timeout=timeout)
+
+    def _iter_live_query(
+        self,
+        source_id: str,
+        sql: str | None = None,
+        timeout: int = 30,
+    ) -> Iterator[QueryResult]:
+        offset = 0
+        while True:
+            payload: dict[str, Any] = {"timeout": timeout, "limit": _PAGE_SIZE, "offset": offset}
+            if sql is not None:
+                payload["sql"] = sql
+            page = QueryResult(self._request("POST", f"/api/v1/dataset-sources/{source_id}/query", json=payload, timeout=None))
+            yield page
+            if len(page.rows) < _PAGE_SIZE:
+                break
+            offset += _PAGE_SIZE
 
     def query(
         self,
         sql: str,
         timeout: int = 30,
-        limit: int = 10000,
+        limit: int | None = None,
         dataset_id: str | None = None,
         project_id: str | None = None,
-    ):
+    ) -> QueryResult:
+        """Executa uma query SQL no dataset.
+
+        Args:
+            sql: SQL a executar (somente leitura).
+            timeout: Timeout em segundos por página (máx 120).
+            limit: Número máximo de linhas. ``None`` (padrão) retorna todas as linhas
+                   paginando automaticamente em blocos de 10.000.
+            dataset_id: Restringe ao schema do dataset informado.
+            project_id: Restringe aos schemas do projeto informado.
+        """
+        if limit is None:
+            all_rows: list[dict[str, Any]] = []
+            columns: list[str] = []
+            for page in self._iter_query(sql, timeout=timeout, dataset_id=dataset_id, project_id=project_id):
+                if not columns and page.columns:
+                    columns = page.columns
+                all_rows.extend(page.rows)
+            return QueryResult({"rows": all_rows, "columns": columns, "rowCount": len(all_rows)})
+
         live_source_id = self._resolve_live_source_for_query(sql, dataset_id, project_id)
         if live_source_id:
             return self.live_query(live_source_id, sql=sql, timeout=timeout, limit=limit)
 
-        context = f"dataset={dataset_id}" if dataset_id else f"project={project_id}" if project_id else "sem contexto"
-        logger.info("Executando query [%s, timeout=%ss, limit=%s]", context, timeout, limit)
+        return self._query_page(sql, timeout=timeout, limit=limit, offset=0, dataset_id=dataset_id, project_id=project_id)
 
-        payload: dict = {"sql": sql, "timeout": timeout, "limit": limit}
+    def iter_query(
+        self,
+        sql: str,
+        timeout: int = 30,
+        dataset_id: str | None = None,
+        project_id: str | None = None,
+    ) -> Iterator[QueryResult]:
+        """Itera sobre os resultados de uma query página a página (10.000 linhas por página).
+
+        Útil para processar grandes volumes sem carregar tudo na memória.
+        """
+        yield from self._iter_query(sql, timeout=timeout, dataset_id=dataset_id, project_id=project_id)
+
+    def _iter_query(
+        self,
+        sql: str,
+        timeout: int = 30,
+        dataset_id: str | None = None,
+        project_id: str | None = None,
+    ) -> Iterator[QueryResult]:
+        live_source_id = self._resolve_live_source_for_query(sql, dataset_id, project_id)
+        if live_source_id:
+            yield from self._iter_live_query(live_source_id, sql=sql, timeout=timeout)
+            return
+
+        context = f"dataset={dataset_id}" if dataset_id else f"project={project_id}" if project_id else "sem contexto"
+        offset = 0
+        while True:
+            logger.info("Executando query [%s, timeout=%ss, offset=%s]", context, timeout, offset)
+            page = self._query_page(sql, timeout=timeout, limit=_PAGE_SIZE, offset=offset, dataset_id=dataset_id, project_id=project_id)
+            logger.info("Página: %s linha(s) em %sms", page.get("rowCount", "?"), page.get("executionTimeMs", "?"))
+            yield page
+            if len(page.rows) < _PAGE_SIZE:
+                break
+            offset += _PAGE_SIZE
+
+    def _query_page(
+        self,
+        sql: str,
+        timeout: int,
+        limit: int,
+        offset: int,
+        dataset_id: str | None,
+        project_id: str | None,
+    ) -> QueryResult:
+        payload: dict[str, Any] = {"sql": sql, "timeout": timeout, "limit": limit, "offset": offset}
         if dataset_id:
             payload["datasetId"] = dataset_id
         if project_id:
             payload["projectId"] = project_id
-
-        result = self._request("POST", "/api/v1/queries", json=payload, timeout=None)
-        logger.info(
-            "Query concluída: %s linha(s) em %sms",
-            result.get("rowCount", "?"),
-            result.get("executionTimeMs", "?"),
-        )
-        return QueryResult(result)
+        return QueryResult(self._request("POST", "/api/v1/queries", json=payload, timeout=None))
 
     def _resolve_live_source_for_query(
         self,
@@ -194,7 +299,6 @@ class CatworldClient:
             file.name, _fmt_bytes(size), dataset_id, mode,
         )
 
-        # Compute MD5 hash streaming (no full-file RAM peak)
         file_hash = self._stream_md5(file)
         logger.debug("Hash MD5: %s", file_hash)
 
@@ -213,9 +317,6 @@ class CatworldClient:
 
         logger.info("Comprimindo e enviando arquivo para storage...")
 
-        # Stream-compress and upload without loading full file into RAM.
-        # Each retry creates a fresh generator from the file. httpx sends via
-        # chunked transfer encoding, which Azure Blob Storage supports.
         for attempt in range(3):
             response = self._client.put(
                 created["sas"]["url"],
@@ -227,7 +328,6 @@ class CatworldClient:
                 response.raise_for_status()
                 break
             logger.warning("Conexão encerrada pelo servidor (499), tentativa %s/3...", attempt + 1)
-            time.sleep(1)
 
         self._request("POST", f"/api/v1/uploads/{upload_id}?action=uploaded")
         logger.info("Arquivo enviado. Processamento ocorre em background (upload_id=%s)", upload_id)
