@@ -248,7 +248,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       // Tabela extract ou upload — query no Azure SQL com controle de permissões
       await syncActorGrants(actor);
       const colList = cols.map((c) => `[${c.sqlName}]`).join(", ");
-      const sql = `SELECT ${colList}, ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) + ${skip} AS [_row_number] FROM [${dataset.schemaName}].[${table.sqlName}] ORDER BY (SELECT NULL) OFFSET ${skip} ROWS FETCH NEXT ${top} ROWS ONLY`;
+      const sql = `SELECT ${colList}, ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS [_row_number] FROM [${dataset.schemaName}].[${table.sqlName}] ORDER BY (SELECT NULL) OFFSET ${skip} ROWS FETCH NEXT ${top} ROWS ONLY`;
       const result = await executeReadOnly(actor.principal, sql, 120, top, [dataset.schemaName]);
       response["value"] = result.rows;
       if (countParam === "true") {
