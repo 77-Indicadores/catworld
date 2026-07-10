@@ -74,7 +74,7 @@ function escXml(s: string) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-type Column = { sqlName: string; sqlType: string; nullable: boolean };
+type Column = { originalName: string; sqlName: string; sqlType: string; nullable: boolean };
 type LiveSource = { mode: "live"; connection: PgConnection; sourceKind: string; sourceSchema: string | null; sourceTable: string | null; sourceSql: string | null };
 type Table = { sqlName: string; columns: Column[]; live: LiveSource | null };
 type Dataset = { schemaName: string; tables: Table[] };
@@ -124,7 +124,12 @@ async function queryLiveTable(
   top: number,
   skip: number,
 ): Promise<{ rows: Record<string, unknown>[]; totalCount: number | null }> {
-  const colList = cols.map((c) => `"${c.sqlName.replaceAll('"', '""')}"`).join(", ");
+  // Postgres usa originalName; alias para sqlName para manter consistência com tabelas extract
+  const colList = cols.map((c) => {
+    const orig = `"${c.originalName.replaceAll('"', '""')}"`;
+    const alias = `"${c.sqlName.replaceAll('"', '""')}"`;
+    return orig === alias ? orig : `${orig} AS ${alias}`;
+  }).join(", ");
   const baseExpr = live.sourceKind === "table"
     ? quotedPgTable(live.sourceSchema!, live.sourceTable!)
     : `(${live.sourceSql!}) cw_live_src`;
