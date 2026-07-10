@@ -118,6 +118,37 @@ async function loadDataset(projectSlug: string, datasetSlug: string): Promise<Da
   return { schemaName: dataset.schemaName, tables };
 }
 
+// Normaliza um row para OData v4 / Power BI por tipo declarado no metadata.
+// Referência: OData JSON Format v4.0 §7 + comportamento Power BI OData connector.
+function normalizeRow(row: Record<string, unknown>, typeMap: Map<string, string>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(row)) {
+    if (v === null || v === undefined) { out[k] = null; continue; }
+    const t = typeMap.get(k) ?? "NVARCHAR";
+    if (["DATETIME2", "DATETIME", "SMALLDATETIME", "DATETIMEOFFSET"].includes(t)) {
+      out[k] = v instanceof Date ? v.toISOString() : v;
+    } else if (t === "DATE") {
+      // Edm.Date → "YYYY-MM-DD" sem hora
+      out[k] = v instanceof Date ? v.toISOString().slice(0, 10) : String(v).slice(0, 10);
+    } else if (t === "TIME") {
+      out[k] = String(v);
+    } else if (["FLOAT", "REAL"].includes(t)) {
+      if (typeof v === "number" && isNaN(v)) out[k] = "NaN";
+      else if (typeof v === "number" && !isFinite(v)) out[k] = v > 0 ? "INF" : "-INF";
+      else out[k] = v;
+    } else if (["BIGINT", "DECIMAL", "NUMERIC"].includes(t)) {
+      // IEEE754Compatible=true → Edm.Int64/Edm.Decimal obrigatoriamente como string
+      out[k] = typeof v === "number" ? String(v) : v;
+    } else {
+      // Edm.String — bool e objetos (JSON/array PG) viram string
+      if (typeof v === "boolean") out[k] = String(v);
+      else if (typeof v === "object" && !(v instanceof Date)) out[k] = JSON.stringify(v);
+      else out[k] = v;
+    }
+  }
+  return out;
+}
+
 async function queryLiveTable(
   live: LiveSource,
   cols: Column[],
@@ -141,40 +172,8 @@ async function queryLiveTable(
     const dataResult = await client.query<Record<string, unknown>>(
       `SELECT ${colList} FROM ${baseExpr} LIMIT ${top} OFFSET ${skip}`,
     );
-    // Normaliza valores para compatibilidade com OData v4 / Power BI por tipo declarado no metadata.
-    // Referência: OData JSON Format v4.0 §7 + comportamento Power BI OData connector.
     const typeMap = new Map(cols.map((c) => [c.sqlName, c.sqlType.toUpperCase().replace(/\(.*\)/, "").trim()]));
-    const rows = dataResult.rows.map((row) => {
-      const out: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(row)) {
-        if (v === null || v === undefined) { out[k] = null; continue; }
-        const t = typeMap.get(k) ?? "NVARCHAR";
-        if (["DATETIME2", "DATETIME", "SMALLDATETIME", "DATETIMEOFFSET"].includes(t)) {
-          // Edm.DateTimeOffset → ISO 8601 com Z
-          out[k] = v instanceof Date ? v.toISOString() : v;
-        } else if (t === "DATE") {
-          // Edm.Date → "YYYY-MM-DD" (sem hora)
-          out[k] = v instanceof Date ? v.toISOString().slice(0, 10) : String(v).slice(0, 10);
-        } else if (t === "TIME") {
-          // Edm.TimeOfDay → "HH:MM:SS[.fff]"
-          out[k] = String(v);
-        } else if (["FLOAT", "REAL"].includes(t)) {
-          // Edm.Double → NaN/Inf como strings (spec OData §7.1)
-          if (typeof v === "number" && isNaN(v)) out[k] = "NaN";
-          else if (typeof v === "number" && !isFinite(v)) out[k] = v > 0 ? "INF" : "-INF";
-          else out[k] = v;
-        } else if (["BIGINT", "DECIMAL", "NUMERIC"].includes(t)) {
-          // Edm.Int64 / Edm.Decimal → string obrigatório com IEEE754Compatible=true
-          out[k] = typeof v === "number" ? String(v) : v;
-        } else {
-          // Edm.String (NVARCHAR etc.) — bool e objetos viram string
-          if (typeof v === "boolean") out[k] = String(v);
-          else if (typeof v === "object" && !(v instanceof Date)) out[k] = JSON.stringify(v);
-          else out[k] = v;
-        }
-      }
-      return out;
-    });
+    const rows = dataResult.rows.map((row) => normalizeRow(row, typeMap));
     return { rows, totalCount };
   });
 }
@@ -286,7 +285,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       const colList = cols.map((c) => `[${c.sqlName}]`).join(", ");
       const sql = `SELECT ${colList}, ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS [_row_number] FROM [${dataset.schemaName}].[${table.sqlName}] ORDER BY (SELECT NULL) OFFSET ${skip} ROWS FETCH NEXT ${top} ROWS ONLY`;
       const result = await executeReadOnly(actor.principal, sql, 120, top, [dataset.schemaName]);
-      response["value"] = result.rows;
+      const typeMap = new Map(cols.map((c) => [c.sqlName, c.sqlType.toUpperCase().replace(/\(.*\)/, "").trim()]));
+      response["value"] = result.rows.map((row) => normalizeRow(row as Record<string, unknown>, typeMap));
       if (countParam === "true") {
         const countSql = `SELECT COUNT(*) AS [cnt] FROM [${dataset.schemaName}].[${table.sqlName}]`;
         const cr = await executeReadOnly(actor.principal, countSql, 30, 1, [dataset.schemaName]);
