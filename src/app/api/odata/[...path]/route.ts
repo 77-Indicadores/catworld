@@ -82,10 +82,14 @@ async function loadDataset(projectSlug: string, datasetSlug: string): Promise<Da
   if (!project) throw new ApiError(404, "NOT_FOUND", "Projeto não encontrado");
   const dataset = await prisma.dataset.findFirst({
     where: { projectId: project.id, slug: datasetSlug, active: true },
-    include: { tables: { include: { columns: { orderBy: { ordinal: "asc" } } } } },
+    include: { tables: { include: { columns: { orderBy: { ordinal: "asc" } }, source: { select: { mode: true } } } } },
   });
   if (!dataset) throw new ApiError(404, "NOT_FOUND", "Dataset não encontrado");
-  return dataset;
+  // Tabelas "live" não existem no Azure SQL — expõe apenas upload (sem source) e extract
+  const tables = dataset.tables
+    .filter((t) => !t.source || t.source.mode === "extract")
+    .map((t) => ({ sqlName: t.sqlName, columns: t.columns }));
+  return { schemaName: dataset.schemaName, tables };
 }
 
 function buildServiceDocument(baseUrl: string, dataset: Dataset) {
@@ -201,6 +205,10 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 
     return Response.json(response, { headers: { "OData-Version": "4.0" } });
   } catch (e) {
+    if (process.env.NODE_ENV !== "production" && !(e instanceof ApiError)) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return Response.json({ debug: msg }, { status: 500 });
+    }
     return handleApiError(e);
   }
 }
