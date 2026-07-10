@@ -1,6 +1,7 @@
 "use client";
 
 import { CheckCircle2, CircleX, Clock3, DatabaseZap, Loader2 } from "lucide-react";
+import { fmtRelative, fmtDuration } from "@/lib/fmt";
 
 export type SourceRefreshWithSource = {
   id: string;
@@ -22,24 +23,6 @@ export type SourceRefreshWithSource = {
   } | null;
 };
 
-function fmtRelative(date: Date) {
-  const diff = Date.now() - date.getTime();
-  const mins = Math.floor(diff / 60000);
-  if (mins < 1) return "agora";
-  if (mins < 60) return `há ${mins} min`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `há ${hours}h`;
-  return `há ${Math.floor(hours / 24)}d`;
-}
-
-function fmtDuration(ms: number) {
-  if (ms < 1000) return `${ms}ms`;
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ${s % 60}s`;
-  return `${Math.floor(m / 60)}h ${m % 60}m`;
-}
 
 const STATUS_CONFIG: Record<string, { cls: string; icon: React.ElementType; label: string }> = {
   QUEUED:  { cls: "badge-ghost",   icon: Clock3,       label: "Aguardando" },

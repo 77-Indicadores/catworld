@@ -9,6 +9,7 @@ import { UploadPagination } from "@/components/uploads/upload-pagination";
 import { UploadPoller } from "@/components/uploads/upload-poller";
 import { UploadFunnel, countFunnelGroups } from "@/components/uploads/upload-funnel";
 import { SourceRefreshCard, type SourceRefreshWithSource } from "@/components/uploads/source-refresh-card";
+import type { Upload, Dataset, Project, Job } from "@prisma/client";
 
 export const dynamic = "force-dynamic";
 
@@ -22,12 +23,26 @@ const GROUP_STATUSES: Record<string, string[]> = {
   failed:    ["FAILED"],
 };
 
-// SOURCE_REFRESH job status → funnel group
-const JOB_GROUP: Record<string, string> = {
+// SOURCE_REFRESH job status → funnel group key
+const JOB_GROUP: Record<string, "pending" | "active" | "completed" | "failed"> = {
   QUEUED:  "pending",
   RUNNING: "active",
   DONE:    "completed",
   FAILED:  "failed",
+};
+
+// Reverse map: group key → job statuses
+const GROUP_TO_JOB_STATUSES: Record<string, string[]> = {};
+for (const [jobStatus, group] of Object.entries(JOB_GROUP)) {
+  (GROUP_TO_JOB_STATUSES[group] ??= []).push(jobStatus);
+}
+
+// Maps job status to an upload status string that countFunnelGroups recognises
+const JOB_STATUS_TO_UPLOAD: Record<string, string> = {
+  QUEUED:  "PENDING_UPLOAD",
+  RUNNING: "IMPORTING",
+  DONE:    "COMPLETED",
+  FAILED:  "FAILED",
 };
 
 function parseComma(value: string | undefined): string[] {
@@ -35,15 +50,16 @@ function parseComma(value: string | undefined): string[] {
   return value.split(",").map((s) => s.trim()).filter(Boolean);
 }
 
-function parseSourceRefreshJobs(
-  jobs: { id: string; status: string; lockedBy: string | null; lastError: string | null; attempts: number; maxAttempts: number; createdAt: Date; updatedAt: Date; payloadJson: string | null }[],
-  sourceMap: Map<string, { id: string; name: string; dataset: { id: string; name: string; project: { id: string; name: string } } }>,
-): SourceRefreshWithSource[] {
-  return jobs.map((j) => {
-    let sourceId: string | undefined;
-    try { sourceId = (JSON.parse(j.payloadJson ?? "{}") as { datasetSourceId?: string }).datasetSourceId; } catch { /* */ }
-    return { ...j, source: sourceId ? (sourceMap.get(sourceId) ?? null) : null };
-  });
+function extractSourceId(payloadJson: string | null): string | undefined {
+  try { return (JSON.parse(payloadJson ?? "{}") as { datasetSourceId?: string }).datasetSourceId; } catch { return undefined; }
+}
+
+type RawJob = Pick<Job, "id" | "status" | "lockedBy" | "lastError" | "attempts" | "maxAttempts" | "createdAt" | "updatedAt" | "payloadJson">;
+type UploadWithDataset = Upload & { dataset: (Dataset & { project: Project }) | null; jobs: { lockedBy: string | null; status: string; weight: number; attempts: number; maxAttempts: number }[] };
+type DataSource = { id: string; name: string; dataset: { id: string; name: string; project: { id: string; name: string } } };
+
+function buildSourceRefreshJobs(jobs: RawJob[], sourceMap: Map<string, DataSource>): SourceRefreshWithSource[] {
+  return jobs.map((j) => ({ ...j, source: sourceMap.get(extractSourceId(j.payloadJson) ?? "") ?? null }));
 }
 
 export default async function UploadsPage({
@@ -59,46 +75,27 @@ export default async function UploadsPage({
   const page  = Math.max(1, parseInt(params.page ?? "1", 10));
   const skip  = (page - 1) * PAGE_SIZE;
 
-  // Expand selected status groups into DB status values for uploads
-  const dbStatuses = selectedStatuses.flatMap((g) => GROUP_STATUSES[g] ?? []);
-  // Map selected group keys to job statuses for SOURCE_REFRESH jobs
-  const dbJobStatuses = selectedStatuses.flatMap((g) =>
-    Object.entries(JOB_GROUP).filter(([, grp]) => grp === g).map(([s]) => s),
-  );
+  const dbStatuses    = selectedStatuses.flatMap((g) => GROUP_STATUSES[g] ?? []);
+  const dbJobStatuses = selectedStatuses.flatMap((g) => GROUP_TO_JOB_STATUSES[g] ?? []);
 
   const uploadWhere = {
-    ...(dbStatuses.length       ? { status:  { in: dbStatuses } } : {}),
+    ...(dbStatuses.length        ? { status:  { in: dbStatuses } } : {}),
     ...(selectedProjectIds.length ? { dataset: { projectId: { in: selectedProjectIds } } } : {}),
   };
 
   const showUploads = selectedType === "all" || selectedType === "uploads";
   const showSources = selectedType === "all" || selectedType === "sources";
 
-  type RawJob = { id: string; status: string; lockedBy: string | null; lastError: string | null; attempts: number; maxAttempts: number; createdAt: Date; updatedAt: Date; payloadJson: string | null };
-  // Fetch source refresh jobs (all, not paginated — they're few)
-  const [sourceJobs, sourceJobTotal]: [RawJob[], number] = showSources
-    ? await Promise.all([
-        prisma.job.findMany({
-          where: {
-            type: "SOURCE_REFRESH",
-            ...(dbJobStatuses.length ? { status: { in: dbJobStatuses } } : {}),
-          },
+  // Round-trip 1: all independent queries run in parallel
+  const [sourceJobs, uploads, uploadTotal, projects, queued, funnelRaw, allStatusCounts] = await Promise.all([
+    showSources
+      ? prisma.job.findMany({
+          where: { type: "SOURCE_REFRESH", ...(dbJobStatuses.length ? { status: { in: dbJobStatuses } } : {}) },
           orderBy: { createdAt: "desc" },
           take: 200,
           select: { id: true, status: true, lockedBy: true, lastError: true, attempts: true, maxAttempts: true, createdAt: true, updatedAt: true, payloadJson: true },
-        }),
-        prisma.job.count({ where: { type: "SOURCE_REFRESH", ...(dbJobStatuses.length ? { status: { in: dbJobStatuses } } : {}) } }),
-      ])
-    : [[], 0];
-
-  // Resolve DatasetSources for source refresh jobs
-  const sourceIds = [...new Set(
-    sourceJobs
-      .map((j) => { try { return (JSON.parse(j.payloadJson ?? "{}") as { datasetSourceId?: string }).datasetSourceId; } catch { return undefined; } })
-      .filter((id): id is string => !!id),
-  )];
-
-  const [uploads, uploadTotal, projects, queued, funnelRaw, allStatusCounts, dataSources] = await Promise.all([
+        }) as Promise<RawJob[]>
+      : Promise.resolve([] as RawJob[]),
     showUploads
       ? prisma.upload.findMany({
           where: uploadWhere,
@@ -106,80 +103,80 @@ export default async function UploadsPage({
           take: PAGE_SIZE,
           skip,
           include: { dataset: { include: { project: true } }, jobs: { orderBy: { createdAt: "desc" }, take: 1, select: { lockedBy: true, status: true, weight: true, attempts: true, maxAttempts: true } } },
-        })
-      : Promise.resolve([]),
+        }) as Promise<UploadWithDataset[]>
+      : Promise.resolve([] as UploadWithDataset[]),
     showUploads ? prisma.upload.count({ where: uploadWhere }) : Promise.resolve(0),
     prisma.project.findMany({ where: { active: true }, select: { id: true, name: true }, orderBy: { name: "asc" } }),
     prisma.upload.count({ where: { status: { in: CANCELLABLE } } }),
     showUploads
       ? prisma.upload.groupBy({ by: ["status"], where: uploadWhere, _count: true })
-      : Promise.resolve([]),
+      : Promise.resolve([] as { status: string; _count: number }[]),
     prisma.upload.groupBy({ by: ["status"], _count: true }),
-    sourceIds.length
-      ? prisma.datasetSource.findMany({
-          where: {
-            id: { in: sourceIds },
-            ...(selectedProjectIds.length ? { dataset: { projectId: { in: selectedProjectIds } } } : {}),
-          },
-          select: { id: true, name: true, dataset: { select: { id: true, name: true, project: { select: { id: true, name: true } } } } },
-        })
-      : Promise.resolve([]),
   ]);
 
-  const sourceMap = new Map(dataSources.map((s) => [s.id, s]));
-  const parsedSourceJobs = parseSourceRefreshJobs(sourceJobs, sourceMap);
+  // Round-trip 2: DatasetSources — depends on sourceJobs result from round-trip 1
+  const sourceIds = [...new Set(sourceJobs.map((j) => extractSourceId(j.payloadJson)).filter((id): id is string => !!id))];
+  const dataSources = sourceIds.length
+    ? await prisma.datasetSource.findMany({
+        where: {
+          id: { in: sourceIds },
+          ...(selectedProjectIds.length ? { dataset: { projectId: { in: selectedProjectIds } } } : {}),
+        },
+        select: { id: true, name: true, dataset: { select: { id: true, name: true, project: { select: { id: true, name: true } } } } },
+      })
+    : [] as DataSource[];
 
-  // Filter source jobs by projectId if needed (when project filter is active)
+  const sourceMap = new Map(dataSources.map((s) => [s.id, s]));
+  const parsedSourceJobs = buildSourceRefreshJobs(sourceJobs, sourceMap);
+
+  // Project filter applied in JS (Job table has no direct projectId FK)
   const filteredSourceJobs = selectedProjectIds.length
     ? parsedSourceJobs.filter((j) => j.source && selectedProjectIds.includes(j.source.dataset.project.id))
     : parsedSourceJobs;
 
-  // Funnel counts: combine upload statuses + source job statuses
+  // Funnel
   const funnelStatuses = [
     ...funnelRaw.flatMap((r) => Array(r._count).fill(r.status) as string[]),
-    ...filteredSourceJobs.map((j) => {
-      const g = JOB_GROUP[j.status];
-      // Map group back to a status string recognized by countFunnelGroups
-      if (g === "pending")   return "PENDING_UPLOAD";
-      if (g === "active")    return "IMPORTING";
-      if (g === "completed") return "COMPLETED";
-      if (g === "failed")    return "FAILED";
-      return j.status;
-    }),
+    ...(showSources ? filteredSourceJobs.map((j) => JOB_STATUS_TO_UPLOAD[j.status] ?? j.status) : []),
   ];
   const funnelCounts = countFunnelGroups(funnelStatuses);
 
-  // Count per group key from unfiltered upload totals
+  // Badge counts: unfiltered upload totals + filtered source job counts
   const statusCountMap = Object.fromEntries(allStatusCounts.map((r) => [r.status, r._count]));
+  const srcCount = { pending: 0, active: 0, completed: 0, failed: 0 };
+  if (showSources) {
+    for (const j of filteredSourceJobs) {
+      const g = JOB_GROUP[j.status];
+      if (g) srcCount[g]++;
+    }
+  }
   const groupCounts = {
-    pending:   (GROUP_STATUSES.pending!).reduce((n, s) => n + (statusCountMap[s] ?? 0), 0),
-    active:    (GROUP_STATUSES.active!).reduce((n, s) => n + (statusCountMap[s] ?? 0), 0),
-    completed: statusCountMap["COMPLETED"] ?? 0,
-    failed:    statusCountMap["FAILED"] ?? 0,
+    pending:   (GROUP_STATUSES.pending!).reduce((n, s) => n + (statusCountMap[s] ?? 0), 0) + srcCount.pending,
+    active:    (GROUP_STATUSES.active!).reduce((n, s) => n + (statusCountMap[s] ?? 0), 0)  + srcCount.active,
+    completed: (statusCountMap["COMPLETED"] ?? 0) + srcCount.completed,
+    failed:    (statusCountMap["FAILED"] ?? 0)    + srcCount.failed,
   };
 
-  const total = uploadTotal + (showSources ? sourceJobTotal : 0);
+  // Use filteredSourceJobs.length for total (honours project filter and the 200-cap)
+  const total = uploadTotal + (showSources ? filteredSourceJobs.length : 0);
   const totalPages = showUploads ? Math.ceil(uploadTotal / PAGE_SIZE) : 1;
 
-  // Build combined list for current page: source jobs (page 1 only) + uploads
-  type ListItem =
-    | { kind: "upload"; key: string; createdAt: Date }
-    | { kind: "source"; key: string; createdAt: Date };
+  // Combined list:
+  //   "all"     view → source jobs injected on page 1 only (interleaved with uploads)
+  //   "sources" view → source jobs shown on every "page" (they're not upload-paginated)
+  type ListItem = { kind: "upload" | "source"; key: string; createdAt: Date };
 
   const uploadItems: ListItem[] = uploads.map((u) => ({ kind: "upload", key: u.id, createdAt: u.createdAt }));
-  const sourceItems: ListItem[] = page === 1
+  const injectSources = showSources && (!showUploads || page === 1);
+  const sourceItems: ListItem[] = injectSources
     ? filteredSourceJobs.map((j) => ({ kind: "source", key: j.id, createdAt: j.createdAt }))
     : [];
 
   const allItems = [...uploadItems, ...sourceItems].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
 
-  const uploadMap = new Map(uploads.map((u) => [u.id, u]));
+  const uploadMap  = new Map(uploads.map((u) => [u.id, u]));
   const sourceJobMap = new Map(filteredSourceJobs.map((j) => [j.id, j]));
-
-  const allStatuses = [
-    ...uploads.map((u) => u.status),
-    ...filteredSourceJobs.map((j) => j.status),
-  ];
+  const allStatuses  = [...uploads.map((u) => u.status), ...filteredSourceJobs.map((j) => j.status)];
 
   return (
     <div className="space-y-6">
@@ -200,9 +197,9 @@ export default async function UploadsPage({
               {(["all", "uploads", "sources"] as const).map((t) => {
                 const labels = { all: "Todos", uploads: "Uploads", sources: "Fontes" };
                 const qs = new URLSearchParams();
-                if (params.status) qs.set("status", params.status);
+                if (params.status)    qs.set("status",    params.status);
                 if (params.projectId) qs.set("projectId", params.projectId);
-                if (t !== "all") qs.set("type", t);
+                if (t !== "all")      qs.set("type",      t);
                 const href = `?${qs.toString()}`;
                 return (
                   <a key={t} href={href} className={`join-item btn btn-xs ${selectedType === t ? "btn-neutral" : "btn-ghost border border-base-300"}`}>
