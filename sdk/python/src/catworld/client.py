@@ -93,6 +93,10 @@ class CatworldClient:
     def rows(self, table_id: str, limit: int = 100):
         return self._request("GET", f"/api/v1/tables/{table_id}/rows", params={"limit": limit})
 
+    def source_info(self, source_id: str):
+        """Retorna metadados de uma fonte: lastRefreshedAt, nextRefreshAt, lastRowCount, lastStatus, refreshPolicy, mode."""
+        return self._request("GET", f"/api/v1/dataset-sources/{source_id}")
+
     def refresh_source(self, source_id: str):
         return self._request("POST", f"/api/v1/dataset-sources/{source_id}/refresh")
 

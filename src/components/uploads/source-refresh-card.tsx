@@ -16,6 +16,8 @@ export type SourceRefreshWithSource = {
     id: string;
     name: string;
     lastRowCount: string | null;
+    lastRefreshedAt: string | null;
+    nextRefreshAt: string | null;
     dataset: {
       id: string;
       name: string;
@@ -54,6 +56,7 @@ export function SourceRefreshCard({ job }: { job: SourceRefreshWithSource }) {
     : "—";
   const datasetHref = src ? `/projects/${src.dataset.project.slug}` : null;
   const rowsLabel = src ? fmtRows(src.lastRowCount) : null;
+  const lastRefreshedLabel = src?.lastRefreshedAt ? new Date(src.lastRefreshedAt).toLocaleString("pt-BR") : null;
 
   const workerSlot = job.lockedBy
     ? job.lockedBy.replace(/^.+-(\d+)$/, "slot $1")
@@ -75,6 +78,12 @@ export function SourceRefreshCard({ job }: { job: SourceRefreshWithSource }) {
           <span>{destination}</span>
           <span>·</span>
           <span>atualização de fonte</span>
+          {lastRefreshedLabel && (
+            <>
+              <span>·</span>
+              <span title="Última atualização bem-sucedida">✓ {lastRefreshedLabel}</span>
+            </>
+          )}
           {rowsLabel && (
             <>
               <span>·</span>

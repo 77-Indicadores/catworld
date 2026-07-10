@@ -6,6 +6,23 @@ import { canAccess } from "@/server/auth/permissions";
 import { ApiError, handleApiError, ok } from "@/server/http";
 import { nextRefresh } from "@/server/connections/sources";
 
+export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  try {
+    const actor = await resolveActor(request);
+    const id = (await params).id;
+    const source = await prisma.datasetSource.findUniqueOrThrow({
+      where: { id },
+      include: { connection: { select: { id: true, name: true, provider: true } }, dataset: { select: { projectId: true } } },
+    });
+    if (actor.role !== "ADMIN" && !await canAccess(actor, "READ", source.dataset.projectId, source.datasetId)) {
+      throw new ApiError(403, "FORBIDDEN", "Sem permissão para ler esta fonte");
+    }
+    return ok(source);
+  } catch (e) {
+    return handleApiError(e);
+  }
+}
+
 const patchSchema = z.object({
   name: z.string().min(1).max(255).optional(),
   mode: z.enum(["extract", "live"]).optional(),
