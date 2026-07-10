@@ -269,7 +269,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     if (table.live) {
       // Tabela live — query direto ao Postgres da origem
       const { rows, totalCount } = await queryLiveTable(table.live, cols, top, skip, countParam === "true");
-      const valued = rows.map((r, i) => ({ ...r, _row_number: skip + i + 1 }));
+      const valued = rows.map((r, i) => ({ ...r, _row_number: String(skip + i + 1) }));
       response["value"] = valued;
       if (countParam === "true") response["@odata.count"] = totalCount;
       if (rows.length === top) {
