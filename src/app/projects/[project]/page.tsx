@@ -42,6 +42,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ projec
           lastStatus: t.source.lastStatus,
           lastRowCount: t.source.lastRowCount ? String(t.source.lastRowCount) : null,
           lastError: t.source.lastError,
+          active: t.source.active,
           lastRefreshedAt: t.source.lastRefreshedAt?.toISOString() ?? null,
           nextRefreshAt: t.source.nextRefreshAt?.toISOString() ?? null,
           connection: { id: t.source.connection.id, name: t.source.connection.name },

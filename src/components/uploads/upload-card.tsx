@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { CheckCircle2, CircleAlert, CircleX, Clock3, Loader2, X } from "lucide-react";
+import { CheckCircle2, CircleAlert, CircleX, Clock3, Loader2, RefreshCw, X } from "lucide-react";
 import type { Upload, Dataset, Project } from "@prisma/client";
 import { fmtBytes, fmtRelative, fmtDuration } from "@/lib/fmt";
 
@@ -31,11 +31,13 @@ const CANCELLABLE = new Set(["PENDING_UPLOAD","QUEUED_PREVIEW","PREVIEWING","AWA
 export function UploadCard({ upload }: { upload: UploadWithDataset }) {
   const router = useRouter();
   const [cancelling, setCancelling] = useState(false);
+  const [retrying, setRetrying] = useState(false);
 
   const cfg = STATUS_CONFIG[upload.status] ?? { cls: "badge-ghost", icon: Clock3, label: upload.status };
   const Icon = cfg.icon;
   const isInProgress = ["QUEUED_PREVIEW", "QUEUED_IMPORT", "IMPORTING", "RETRYING"].includes(upload.status);
   const canCancel = CANCELLABLE.has(upload.status);
+  const canRetry = upload.status === "FAILED";
 
   const handleCancel = async () => {
     if (!confirm(`Cancelar o upload de "${upload.originalFilename}"?`)) return;
@@ -45,6 +47,16 @@ export function UploadCard({ upload }: { upload: UploadWithDataset }) {
       router.refresh();
     } finally {
       setCancelling(false);
+    }
+  };
+
+  const handleRetry = async () => {
+    setRetrying(true);
+    try {
+      await fetch(`/api/v1/uploads/${upload.id}?action=retry`, { method: "POST" });
+      router.refresh();
+    } finally {
+      setRetrying(false);
     }
   };
 
@@ -124,17 +136,30 @@ export function UploadCard({ upload }: { upload: UploadWithDataset }) {
         )}
       </div>
 
-      {canCancel && (
-        <button
-          className="btn btn-ghost btn-xs text-error mt-1 shrink-0"
-          onClick={handleCancel}
-          disabled={cancelling}
-          title="Cancelar upload"
-        >
-          {cancelling ? <Loader2 size={13} className="animate-spin" /> : <X size={13} />}
-          {cancelling ? "Cancelando..." : "Cancelar"}
-        </button>
-      )}
+      <div className="flex flex-col gap-1 mt-1 shrink-0">
+        {canRetry && (
+          <button
+            className="btn btn-ghost btn-xs text-primary"
+            onClick={handleRetry}
+            disabled={retrying}
+            title="Tentar novamente"
+          >
+            {retrying ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+            {retrying ? "Reenfileirando..." : "Tentar novamente"}
+          </button>
+        )}
+        {canCancel && (
+          <button
+            className="btn btn-ghost btn-xs text-error"
+            onClick={handleCancel}
+            disabled={cancelling}
+            title="Cancelar upload"
+          >
+            {cancelling ? <Loader2 size={13} className="animate-spin" /> : <X size={13} />}
+            {cancelling ? "Cancelando..." : "Cancelar"}
+          </button>
+        )}
+      </div>
     </div>
   );
 }

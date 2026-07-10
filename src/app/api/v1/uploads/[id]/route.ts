@@ -69,6 +69,21 @@ export async function POST(r: NextRequest, { params }: { params: Promise<{ id: s
       return ok(await queueImportUpload(actor, id, input), undefined, 202);
     }
 
+    if (action === "retry") {
+      const upload = await prisma.upload.findUniqueOrThrow({
+        where: { id },
+        select: { status: true, mappingJson: true, previewJson: true, datasetId: true },
+      });
+      if (upload.status !== "FAILED") throw new ApiError(409, "NOT_RETRYABLE", "Upload não está em estado de falha");
+      await prisma.job.updateMany({ where: { uploadId: id, status: { in: ["QUEUED", "RUNNING"] } }, data: { status: "FAILED", lastError: "Superseded by retry" } });
+      if (upload.mappingJson && upload.previewJson && upload.datasetId) {
+        const { queueImportUploadAuto } = await import("@/server/uploads/actions");
+        const mapping = JSON.parse(upload.mappingJson) as { originalName: string; sqlName: string; sqlType: string; nullable: boolean }[];
+        return ok(await queueImportUploadAuto(id, mapping), undefined, 202);
+      }
+      return ok(await queuePreviewUpload(id), undefined, 202);
+    }
+
     if (action === "cancel") {
       const CANCELLABLE = ["PENDING_UPLOAD","QUEUED_PREVIEW","PREVIEWING","AWAITING_CONFIRMATION","QUEUED_IMPORT","IMPORTING","RETRYING"];
       const upload = await prisma.upload.findUniqueOrThrow({ where: { id }, select: { status: true } });

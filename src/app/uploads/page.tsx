@@ -56,10 +56,14 @@ function extractSourceId(payloadJson: string | null): string | undefined {
 
 type RawJob = Pick<Job, "id" | "status" | "lockedBy" | "lastError" | "attempts" | "maxAttempts" | "createdAt" | "updatedAt" | "payloadJson">;
 type UploadWithDataset = Upload & { dataset: (Dataset & { project: Project }) | null; jobs: { lockedBy: string | null; status: string; weight: number; attempts: number; maxAttempts: number }[] };
-type DataSource = { id: string; name: string; dataset: { id: string; name: string; project: { id: string; name: string } } };
+type DataSource = { id: string; name: string; lastRowCount: bigint | null; dataset: { id: string; name: string; slug: string; project: { id: string; name: string; slug: string } } };
 
 function buildSourceRefreshJobs(jobs: RawJob[], sourceMap: Map<string, DataSource>): SourceRefreshWithSource[] {
-  return jobs.map((j) => ({ ...j, source: sourceMap.get(extractSourceId(j.payloadJson) ?? "") ?? null }));
+  return jobs.map((j) => {
+    const raw = sourceMap.get(extractSourceId(j.payloadJson) ?? "") ?? null;
+    const source = raw ? { ...raw, lastRowCount: raw.lastRowCount != null ? String(raw.lastRowCount) : null } : null;
+    return { ...j, source };
+  });
 }
 
 export default async function UploadsPage({
@@ -122,7 +126,7 @@ export default async function UploadsPage({
           id: { in: sourceIds },
           ...(selectedProjectIds.length ? { dataset: { projectId: { in: selectedProjectIds } } } : {}),
         },
-        select: { id: true, name: true, dataset: { select: { id: true, name: true, project: { select: { id: true, name: true } } } } },
+        select: { id: true, name: true, lastRowCount: true, dataset: { select: { id: true, name: true, slug: true, project: { select: { id: true, name: true, slug: true } } } } },
       })
     : [] as DataSource[];
 

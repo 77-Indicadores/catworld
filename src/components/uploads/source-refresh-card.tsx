@@ -1,6 +1,6 @@
 "use client";
 
-import { CheckCircle2, CircleX, Clock3, DatabaseZap, Loader2 } from "lucide-react";
+import { CheckCircle2, CircleX, Clock3, DatabaseZap, ExternalLink, Loader2 } from "lucide-react";
 import { fmtRelative, fmtDuration } from "@/lib/fmt";
 
 export type SourceRefreshWithSource = {
@@ -15,14 +15,15 @@ export type SourceRefreshWithSource = {
   source: {
     id: string;
     name: string;
+    lastRowCount: string | null;
     dataset: {
       id: string;
       name: string;
-      project: { id: string; name: string };
+      slug: string;
+      project: { id: string; name: string; slug: string };
     };
   } | null;
 };
-
 
 const STATUS_CONFIG: Record<string, { cls: string; icon: React.ElementType; label: string }> = {
   QUEUED:  { cls: "badge-ghost",   icon: Clock3,       label: "Aguardando" },
@@ -30,6 +31,15 @@ const STATUS_CONFIG: Record<string, { cls: string; icon: React.ElementType; labe
   DONE:    { cls: "badge-success", icon: CheckCircle2, label: "Concluído" },
   FAILED:  { cls: "badge-error",   icon: CircleX,      label: "Falhou" },
 };
+
+function fmtRows(n: string | null) {
+  if (!n) return null;
+  const v = Number(n);
+  if (isNaN(v)) return null;
+  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M linhas`;
+  if (v >= 1_000) return `${(v / 1_000).toFixed(0)}K linhas`;
+  return `${v.toLocaleString("pt-BR")} linhas`;
+}
 
 export function SourceRefreshCard({ job }: { job: SourceRefreshWithSource }) {
   const cfg = STATUS_CONFIG[job.status] ?? { cls: "badge-ghost", icon: Clock3, label: job.status };
@@ -42,6 +52,8 @@ export function SourceRefreshCard({ job }: { job: SourceRefreshWithSource }) {
   const destination = src
     ? `${src.dataset.project.name} → ${src.dataset.name}`
     : "—";
+  const datasetHref = src ? `/projects/${src.dataset.project.slug}` : null;
+  const rowsLabel = src ? fmtRows(src.lastRowCount) : null;
 
   const workerSlot = job.lockedBy
     ? job.lockedBy.replace(/^.+-(\d+)$/, "slot $1")
@@ -63,6 +75,12 @@ export function SourceRefreshCard({ job }: { job: SourceRefreshWithSource }) {
           <span>{destination}</span>
           <span>·</span>
           <span>atualização de fonte</span>
+          {rowsLabel && (
+            <>
+              <span>·</span>
+              <span>{rowsLabel}</span>
+            </>
+          )}
           <span>·</span>
           <span>{fmtRelative(job.createdAt)}</span>
           {workerSlot && isRunning && (
@@ -91,6 +109,17 @@ export function SourceRefreshCard({ job }: { job: SourceRefreshWithSource }) {
           </p>
         )}
       </div>
+
+      {datasetHref && (
+        <a
+          href={datasetHref}
+          className="btn btn-ghost btn-xs mt-1 shrink-0 text-base-content/50"
+          title="Abrir dataset"
+        >
+          <ExternalLink size={13} />
+          Abrir
+        </a>
+      )}
     </div>
   );
 }
