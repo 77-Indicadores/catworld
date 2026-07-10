@@ -10,6 +10,9 @@ const ACTIVE_STATUSES = new Set([
   "QUEUED_IMPORT",
   "IMPORTING",
   "RETRYING",
+  // SOURCE_REFRESH job statuses
+  "QUEUED",
+  "RUNNING",
 ]);
 
 const POLL_INTERVAL = 10_000;
