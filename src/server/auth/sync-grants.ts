@@ -1,23 +1,31 @@
 import { prisma } from "@/server/db";
 import type { Actor } from "./actor";
-import { ensureInternalPrincipal, grantSchema } from "@/server/azure/sql";
+import { batchGrantSchemas } from "@/server/azure/sql";
 
 const CACHE_TTL_MS = 60_000;
-const cache = new Map<string, number>();
+const cache      = new Map<string, number>();
+const inProgress = new Map<string, Promise<void>>();
 
 export async function syncActorGrants(actor: Actor) {
   const now = Date.now();
   const cached = cache.get(actor.principal);
   if (cached && now - cached < CACHE_TTL_MS) return;
 
-  await ensureInternalPrincipal(actor.principal);
+  // Dedup: múltiplos requests simultâneos com cache frio compartilham um único ciclo de GRANTs
+  const running = inProgress.get(actor.principal);
+  if (running) return running;
+
+  const promise = _doSync(actor).finally(() => inProgress.delete(actor.principal));
+  inProgress.set(actor.principal, promise);
+  return promise;
+}
+
+async function _doSync(actor: Actor) {
   const datasets = actor.type === "user" && actor.role === "ADMIN"
     ? (await prisma.dataset.findMany({ where: { active: true } })).map(d => ({ schemaName: d.schemaName, permission: "WRITE" as const }))
     : await datasetsForActor(actor);
-  for (const item of datasets) await grantSchema(actor.principal, item.schemaName, item.permission);
-
-  cache.set(actor.principal, now);
-  return datasets;
+  await batchGrantSchemas(actor.principal, datasets.map(d => ({ schema: d.schemaName, permission: d.permission })));
+  cache.set(actor.principal, Date.now());
 }
 
 export function invalidateSyncCache(principal?: string) {

@@ -70,6 +70,20 @@ export async function grantSchema(principal: string, schema: string, permission:
   for (const grant of grants) await (await sqlPool()).request().query(`GRANT ${grant} ON SCHEMA::${target} TO ${user}`);
 }
 
+export async function batchGrantSchemas(principal: string, items: { schema: string; permission: "READ" | "WRITE" }[]) {
+  if (items.length === 0) return;
+  await ensureInternalPrincipal(principal);
+  const pool = await sqlPool();
+  const user = quoteIdentifier(principal);
+  await Promise.all(
+    items.flatMap(({ schema, permission }) => {
+      const target = quoteIdentifier(schema);
+      const perms = permission === "READ" ? ["SELECT"] : ["SELECT", "INSERT", "UPDATE", "DELETE"];
+      return perms.map((p) => pool.request().query(`GRANT ${p} ON SCHEMA::${target} TO ${user}`));
+    }),
+  );
+}
+
 export async function revokeSchema(principal: string, schema: string) {
   const user = quoteIdentifier(principal), target = quoteIdentifier(schema);
   for (const grant of ["SELECT", "INSERT", "UPDATE", "DELETE"]) await (await sqlPool()).request().query(`IF DATABASE_PRINCIPAL_ID(N'${escapeSqlLiteral(principal)}') IS NOT NULL REVOKE ${grant} ON SCHEMA::${target} FROM ${user}`);
