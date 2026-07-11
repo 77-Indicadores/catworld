@@ -1,3 +1,4 @@
+import * as Sentry from "@sentry/nextjs";
 import {
   BlobServiceClient,
   BlobSASPermissions,
@@ -59,7 +60,10 @@ export async function copyBlob(sourceBlobName: string, destBlobName: string) {
   try {
     response = await sourceClient.download();
   } catch (e) {
-    console.error("[copyBlob] download failed src=%s err=%s", sourceBlobName, e instanceof Error ? e.message : e);
+    Sentry.withScope((scope) => {
+      scope.setContext("blob", { src: sourceBlobName, dst: destBlobName, op: "download" });
+      Sentry.captureException(e);
+    });
     throw e;
   }
   if (!response.readableStreamBody) throw new Error(`Blob source not found: ${sourceBlobName}`);
@@ -67,9 +71,11 @@ export async function copyBlob(sourceBlobName: string, destBlobName: string) {
     await destClient.uploadStream(response.readableStreamBody as NodeReadable, 8 * 1024 * 1024, 4, {
       blobHTTPHeaders: { blobContentType: response.contentType ?? "application/octet-stream" },
     });
-    console.log("[copyBlob] OK %s → %s", sourceBlobName, destBlobName);
   } catch (e) {
-    console.error("[copyBlob] upload failed dst=%s err=%s", destBlobName, e instanceof Error ? e.message : e);
+    Sentry.withScope((scope) => {
+      scope.setContext("blob", { src: sourceBlobName, dst: destBlobName, op: "upload" });
+      Sentry.captureException(e);
+    });
     throw e;
   }
 }

@@ -4,6 +4,7 @@ import { sqlPool, ensureSchema } from "@/server/azure/sql";
 import { quoteIdentifier, sqlIdentifier } from "@/server/security/naming";
 import { ApiError } from "@/server/http";
 import { queryColumns, quotedPgTable, streamPostgresRows, tableColumns, type SourceColumn } from "./postgres";
+import { queryColumnsMssql, quotedMssqlTable, streamMssqlRows, tableColumnsMssql } from "./mssql";
 
 export type RefreshPolicy = "manual" | "hourly" | "daily" | "weekly";
 
@@ -57,13 +58,13 @@ export async function createDatasetSource(input: {
   ]);
   if (!dataset) throw new ApiError(404, "DATASET_NOT_FOUND", "Dataset nao encontrado");
   if (!connection || !connection.active) throw new ApiError(404, "CONNECTION_NOT_FOUND", "Conexao nao encontrada");
-  if (connection.provider !== "postgres") throw new ApiError(400, "UNSUPPORTED_PROVIDER", "Somente Postgres e suportado para fontes");
+  if (!["postgres", "mssql"].includes(connection.provider)) throw new ApiError(400, "UNSUPPORTED_PROVIDER", `Provider ${connection.provider} nao suportado`);
   if (input.sourceKind === "table" && (!input.sourceSchema || !input.sourceTable)) throw new ApiError(400, "INVALID_SOURCE", "Tabela exige schema e nome");
   if (input.sourceKind === "query" && !input.sourceSql?.trim()) throw new ApiError(400, "INVALID_SOURCE", "Consulta obrigatoria");
 
   const columns = input.sourceKind === "table"
-    ? await tableColumns(connection, input.sourceSchema!, input.sourceTable!)
-    : await queryColumns(connection, input.sourceSql!);
+    ? (connection.provider === "mssql" ? await tableColumnsMssql(connection, input.sourceSchema!, input.sourceTable!) : await tableColumns(connection, input.sourceSchema!, input.sourceTable!))
+    : (connection.provider === "mssql" ? await queryColumnsMssql(connection, input.sourceSql!) : await queryColumns(connection, input.sourceSql!));
   if (!columns.length) throw new ApiError(400, "EMPTY_SOURCE", "Fonte nao retornou colunas");
 
   const displayName = input.sourceKind === "table" ? input.sourceTable! : input.name!;
@@ -124,16 +125,17 @@ export async function refreshDatasetSource(datasetSourceId: string) {
     where: { id: datasetSourceId },
     include: { dataset: true, connection: true, targetTable: true },
   });
-  if (!source || !source.active) throw new Error("Fonte nao encontrada");
-  if (source.mode !== "extract") throw new Error("Apenas fontes extract podem ser atualizadas");
-  if (!source.targetTable) throw new Error("Fonte sem tabela de destino");
+  if (!source || !source.active) throw new ApiError(404, "SOURCE_NOT_FOUND", "Fonte não encontrada");
+  if (source.mode !== "extract") throw new ApiError(400, "INVALID_SOURCE_MODE", "Apenas fontes extract podem ser atualizadas");
+  if (!source.targetTable) throw new ApiError(400, "SOURCE_NO_TARGET_TABLE", "Fonte sem tabela de destino");
 
+  const isMssql = source.connection.provider === "mssql";
   const query = source.sourceKind === "table"
-    ? `SELECT * FROM ${quotedPgTable(source.sourceSchema!, source.sourceTable!)}`
+    ? `SELECT * FROM ${isMssql ? quotedMssqlTable(source.sourceSchema!, source.sourceTable!) : quotedPgTable(source.sourceSchema!, source.sourceTable!)}`
     : source.sourceSql!;
   const columns = source.sourceKind === "table"
-    ? await tableColumns(source.connection, source.sourceSchema!, source.sourceTable!)
-    : await queryColumns(source.connection, source.sourceSql!);
+    ? (isMssql ? await tableColumnsMssql(source.connection, source.sourceSchema!, source.sourceTable!) : await tableColumns(source.connection, source.sourceSchema!, source.sourceTable!))
+    : (isMssql ? await queryColumnsMssql(source.connection, source.sourceSql!) : await queryColumns(source.connection, source.sourceSql!));
   const pool = await sqlPool();
   const schema = source.dataset.schemaName;
   const table = source.targetTable.sqlName;
@@ -146,7 +148,7 @@ export async function refreshDatasetSource(datasetSourceId: string) {
   await ensureSchema(schema);
   await pool.request().query(`IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL DROP TABLE ${staging}; CREATE TABLE ${staging} (${columnDefs(columns)})`);
   try {
-    for await (const rows of streamPostgresRows(source.connection, query, 1000)) {
+    for await (const rows of (isMssql ? streamMssqlRows(source.connection, query, 1000) : streamPostgresRows(source.connection, query, 1000))) {
       await bulkInsertRows(pool, schema, stage, columns, rows);
       rowCount += BigInt(rows.length);
     }

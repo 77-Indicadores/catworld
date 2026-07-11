@@ -10,9 +10,12 @@ export function fail(status: number, code: string, message: string, details?: un
 export function serialize<T>(value: T): T {
   return JSON.parse(JSON.stringify(value, (_, item) => typeof item === "bigint" ? item.toString() : item));
 }
-export async function handleApiError(error: unknown) {
+export async function handleApiError(error: unknown, context?: Record<string, unknown>) {
   if (error instanceof ApiError) return fail(error.status, error.code, error.message, error.details);
-Sentry.captureException(error);
+  Sentry.withScope((scope) => {
+    if (context) scope.setContext("request_context", context);
+    Sentry.captureException(error);
+  });
   await Sentry.flush(2000);
   return fail(500, "INTERNAL_ERROR", "Erro interno inesperado");
 }

@@ -1,3 +1,4 @@
+import * as Sentry from "@sentry/nextjs";
 import { extname } from "node:path";
 import sql from "mssql";
 import { prisma } from "@/server/db";
@@ -363,7 +364,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
             if (!isOleDb && !isTruncation) throw bulkError;
 
             if (isTruncation) {
-              console.warn("[importUpload] BULK INSERT truncation (valor >4000 chars), recriando staging NVARCHAR(MAX) upload=%s", uploadId);
+              Sentry.addBreadcrumb({ category: "import", level: "warning", message: "BULK INSERT truncation — rebuilding staging as NVARCHAR(MAX)", data: { uploadId } });
               phaseTimings.importMethod = "tds-fallback-after-truncation";
               stagingIsTyped = false;
               await pool.request().query(
@@ -371,7 +372,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
                  CREATE TABLE ${staging} (${colDefsMax})`,
               ).catch(() => {});
             } else {
-              console.warn("[importUpload] BULK INSERT falhou (%s), tentando TDS fallback upload=%s", message.slice(0, 80), uploadId);
+              Sentry.addBreadcrumb({ category: "import", level: "warning", message: "BULK INSERT failed — falling back to TDS", data: { uploadId, error: message.slice(0, 200) } });
               phaseTimings.importMethod = "tds-fallback-after-bulk-error";
             }
 
@@ -400,7 +401,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
             const isBcpErr = tdsMsg.includes("4815") || tdsMsg.toLowerCase().includes("bcp");
             if (!isBcpErr || !env().CATWORLD_AZURE_BLOB_CONNECTION_STRING) throw tdsErr;
 
-            console.warn("[importUpload] TDS 4815 — falling back to blob-bulk upload=%s", uploadId);
+            Sentry.addBreadcrumb({ category: "import", level: "warning", message: "TDS 4815 BCP error — falling back to blob-bulk", data: { uploadId } });
             phaseTimings.importMethod = "blob-bulk-after-tds-4815";
             await pool.request().query(`TRUNCATE TABLE ${staging}`).catch(() => {});
 

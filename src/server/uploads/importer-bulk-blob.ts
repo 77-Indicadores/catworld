@@ -1,3 +1,4 @@
+import * as Sentry from "@sentry/nextjs";
 import { createHash } from "node:crypto";
 import { PassThrough } from "node:stream";
 import {
@@ -276,7 +277,7 @@ export async function bulkInsertFromBlob(
           throw enhanced;
         }
         const waitMs = 5_000 * attempt;
-        console.warn(`[bulkInsert] transient BULK provider error, retry ${attempt}/5 in ${waitMs}ms: ${detail}`);
+        Sentry.addBreadcrumb({ category: "import", level: "warning", message: `bulkInsert transient BULK provider error — retry ${attempt}/5`, data: { waitMs, detail } });
         await mark("bulkRetryWaitMs", () => new Promise(r => setTimeout(r, waitMs)));
       }
     }
@@ -413,7 +414,7 @@ export async function openrowsetInsertFromBlob(
         const message = error instanceof Error ? error.message : String(error);
         if (attempt >= 5 || !message.includes('OLE DB provider "BULK"')) throw error;
         const waitMs = 5_000 * attempt;
-        console.warn(`[openrowsetInsert] transient error, retry ${attempt}/5 in ${waitMs}ms`);
+        Sentry.addBreadcrumb({ category: "import", level: "warning", message: `openrowsetInsert transient error — retry ${attempt}/5`, data: { waitMs } });
         await mark("openrowsetRetryWaitMs", () => new Promise(r => setTimeout(r, waitMs)));
       }
     }

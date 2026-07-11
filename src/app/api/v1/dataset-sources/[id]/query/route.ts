@@ -5,6 +5,7 @@ import { resolveActor } from "@/server/auth/actor";
 import { canAccess } from "@/server/auth/permissions";
 import { ApiError, handleApiError, ok } from "@/server/http";
 import { executePostgresReadOnly, quotedPgTable } from "@/server/connections/postgres";
+import { executeMssqlReadOnly, quotedMssqlTable } from "@/server/connections/mssql";
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -13,24 +14,30 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const source = await prisma.datasetSource.findUniqueOrThrow({ where: { id: (await params).id }, include: { dataset: true, connection: true, targetTable: true } });
     if (!await canAccess(actor, "READ", source.dataset.projectId, source.datasetId) && actor.role !== "ADMIN") throw new ApiError(403, "FORBIDDEN", "Sem permissao para ler a fonte");
     if (source.mode !== "live") throw new ApiError(400, "NOT_LIVE", "Fonte nao e live");
-    const sql = input.sql
-      ? qualifySourceReference(input.sql, source)
-      : source.sourceKind === "table" ? `SELECT * FROM ${quotedPgTable(source.sourceSchema!, source.sourceTable!)}` : source.sourceSql!;
-    return ok(await executePostgresReadOnly(source.connection, sql, input.timeout, input.limit, input.offset));
+    const isMssql = source.connection.provider === "mssql";
+    const tableRef = isMssql ? quotedMssqlTable(source.sourceSchema!, source.sourceTable!) : quotedPgTable(source.sourceSchema!, source.sourceTable!);
+    const query = input.sql
+      ? qualifySourceReference(input.sql, source, isMssql)
+      : source.sourceKind === "table" ? `SELECT * FROM ${tableRef}` : source.sourceSql!;
+    return ok(isMssql
+      ? await executeMssqlReadOnly(source.connection, query, input.timeout, input.limit, input.offset)
+      : await executePostgresReadOnly(source.connection, query, input.timeout, input.limit, input.offset));
   } catch (e) {
-    if (e instanceof Error && "code" in e) return handleApiError(new ApiError(400, "POSTGRES_QUERY_FAILED", e.message));
+    if (e instanceof Error && "code" in e) return handleApiError(new ApiError(400, "QUERY_FAILED", e.message));
     return handleApiError(e);
   }
 }
 
-function qualifySourceReference(sql: string, source: { sourceKind: string; sourceSchema: string | null; sourceTable: string | null; sourceSql: string | null; targetTable: { name: string; sqlName: string } | null }) {
+function qualifySourceReference(sql: string, source: { sourceKind: string; sourceSchema: string | null; sourceTable: string | null; sourceSql: string | null; targetTable: { name: string; sqlName: string } | null }, isMssql = false) {
+  const quoteAlias = isMssql ? quoteMssqlAlias : quotePgAlias;
+  const quoteTable = (schema: string, table: string) => isMssql ? quotedMssqlTable(schema, table) : quotedPgTable(schema, table);
   if (source.sourceKind === "table" && source.sourceSchema && source.sourceTable) {
-    const quoted = quotedPgTable(source.sourceSchema, source.sourceTable);
-    return replaceTableRefs(sql, [source.sourceTable], (alias) => alias ? `${quoted} ${quotePgAlias(alias)}` : quoted);
+    const quoted = quoteTable(source.sourceSchema, source.sourceTable);
+    return replaceTableRefs(sql, [source.sourceTable], (alias) => alias ? `${quoted} ${quoteAlias(alias)}` : quoted);
   }
   if (source.sourceKind === "query" && source.sourceSql && source.targetTable) {
     const statement = source.sourceSql.trim().replace(/;+\s*$/, "");
-    return replaceTableRefs(sql, [source.targetTable.sqlName, source.targetTable.name], (alias) => `(${statement}) ${quotePgAlias(alias ?? source.targetTable!.sqlName)}`);
+    return replaceTableRefs(sql, [source.targetTable.sqlName, source.targetTable.name], (alias) => `(${statement}) ${quoteAlias(alias ?? source.targetTable!.sqlName)}`);
   }
   return sql;
 }
@@ -81,4 +88,8 @@ function rewriteSqlOutsideLiterals(sql: string, rewrite: (chunk: string) => stri
 
 function quotePgAlias(value: string) {
   return `"${value.replaceAll('"', '""')}"`;
+}
+
+function quoteMssqlAlias(value: string) {
+  return `[${value.replaceAll("]", "]]")}]`;
 }

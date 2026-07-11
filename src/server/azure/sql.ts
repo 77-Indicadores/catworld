@@ -1,3 +1,4 @@
+import * as Sentry from "@sentry/nextjs";
 import sql from "mssql";
 import { env } from "@/server/env";
 import { quoteIdentifier } from "@/server/security/naming";
@@ -75,13 +76,14 @@ export async function batchGrantSchemas(principal: string, items: { schema: stri
   await ensureInternalPrincipal(principal);
   const pool = await sqlPool();
   const user = quoteIdentifier(principal);
-  await Promise.all(
-    items.flatMap(({ schema, permission }) => {
-      const target = quoteIdentifier(schema);
-      const perms = permission === "READ" ? ["SELECT"] : ["SELECT", "INSERT", "UPDATE", "DELETE"];
-      return perms.map((p) => pool.request().query(`GRANT ${p} ON SCHEMA::${target} TO ${user}`));
-    }),
-  );
+  // Build one statement per schema to avoid saturating the connection pool
+  // (previously fired one request per permission per schema via Promise.all)
+  for (const { schema, permission } of items) {
+    const target = quoteIdentifier(schema);
+    const perms = permission === "READ" ? ["SELECT"] : ["SELECT", "INSERT", "UPDATE", "DELETE"];
+    const grants = perms.map((p) => `GRANT ${p} ON SCHEMA::${target} TO ${user}`).join("; ");
+    await pool.request().query(grants);
+  }
 }
 
 export async function revokeSchema(principal: string, schema: string) {
@@ -146,6 +148,12 @@ const tableMap = new Map<string, string[]>();
     return { columns: result.recordset?.columns ? Object.keys(result.recordset.columns) : Object.keys(rows[0] ?? {}), rows, rowCount: rows.length, truncated: (result.recordset?.length ?? 0) > limit, executionTimeMs: Date.now() - started };
   } catch (error) {
     await transaction.rollback().catch(() => undefined);
+    Sentry.addBreadcrumb({
+      category: "db.query",
+      message: "executeReadOnly failed",
+      level: "error",
+      data: { sql: statement, principal, schemas },
+    });
     throw error;
   }
 }
