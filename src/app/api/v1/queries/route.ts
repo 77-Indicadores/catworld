@@ -1,5 +1,6 @@
 import type { NextRequest } from "next/server";
 import { z } from "zod";
+import * as Sentry from "@sentry/nextjs";
 import { resolveActor } from "@/server/auth/actor";
 import { syncActorGrants } from "@/server/auth/sync-grants";
 import { executeReadOnly } from "@/server/azure/sql";
@@ -36,6 +37,10 @@ export async function POST(request: NextRequest) {
     await audit(actor, "QUERY_EXECUTED", "query", undefined, { rowCount: result.rowCount, executionTimeMs: result.executionTimeMs });
     return ok(result);
   } catch (e) {
+    if (e instanceof Error && "code" in e) {
+      Sentry.captureException(e);
+      return handleApiError(new ApiError(400, "QUERY_FAILED", e.message));
+    }
     return handleApiError(e);
   }
 }
