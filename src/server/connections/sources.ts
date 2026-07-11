@@ -1,3 +1,4 @@
+import { randomUUID } from "crypto";
 import sql from "mssql";
 import { prisma } from "@/server/db";
 import { sqlPool, ensureSchema } from "@/server/azure/sql";
@@ -51,6 +52,7 @@ export async function createDatasetSource(input: {
   sourceTable?: string | null;
   sourceSql?: string | null;
   refreshPolicy: RefreshPolicy;
+  sourceGroupId?: string;
 }) {
   const [dataset, connection] = await Promise.all([
     prisma.dataset.findUnique({ where: { id: input.datasetId }, include: { project: true } }),
@@ -84,6 +86,7 @@ export async function createDatasetSource(input: {
       name: displayName,
       mode: input.mode,
       sourceKind: input.sourceKind,
+      sourceGroupId: input.sourceGroupId ?? null,
       sourceSchema: input.sourceSchema ?? null,
       sourceTable: input.sourceTable ?? null,
       sourceSql: input.sourceSql ?? null,
@@ -104,7 +107,9 @@ export async function createDatasetSources(input: {
   sourceSchema: string;
   sourceTables: string[];
   refreshPolicy: RefreshPolicy;
+  sourceGroupId?: string;
 }) {
+  const sourceGroupId = input.sourceGroupId ?? randomUUID();
   const sources = [];
   for (const table of input.sourceTables) {
     sources.push(await createDatasetSource({
@@ -115,6 +120,7 @@ export async function createDatasetSources(input: {
       sourceSchema: input.sourceSchema,
       sourceTable: table,
       refreshPolicy: input.refreshPolicy,
+      sourceGroupId,
     }));
   }
   return sources;

@@ -174,6 +174,7 @@ model DatasetSource {
   name            String        @db.NVarChar(255)
   mode            String        @db.VarChar(20)
   sourceKind      String        @map("source_kind") @db.VarChar(20)
+  sourceGroupId   String?       @map("source_group_id") @db.UniqueIdentifier
   sourceSchema    String?       @map("source_schema") @db.NVarChar(128)
   sourceTable     String?       @map("source_table") @db.NVarChar(128)
   sourceSql       String?       @map("source_sql") @db.NVarChar(Max)
@@ -192,6 +193,7 @@ model DatasetSource {
 
   @@index([datasetId, active])
   @@index([connectionId])
+  @@index([sourceGroupId])
   @@index([mode, refreshPolicy, nextRefreshAt])
   @@map("cw_dataset_sources")
 }

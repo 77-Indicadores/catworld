@@ -36,6 +36,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       sourceTables: z.array(z.string().min(1)).optional(),
       sourceSql: z.string().optional().nullable(),
       refreshPolicy: z.enum(["manual", "hourly", "daily", "weekly"]).default("manual"),
+      sourceGroupId: z.string().uuid().optional(),
     }).parse(await request.json());
     if (input.sourceKind === "table" && input.sourceTables?.length) {
       return ok(await createDatasetSources({
@@ -45,6 +46,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         sourceSchema: input.sourceSchema ?? "",
         sourceTables: input.sourceTables,
         refreshPolicy: input.refreshPolicy,
+        sourceGroupId: input.sourceGroupId,
       }), undefined, 201);
     }
     return ok(await createDatasetSource({ datasetId, ...input }), undefined, 201);

@@ -28,6 +28,7 @@ const patchSchema = z.object({
   mode: z.enum(["extract", "live"]).optional(),
   refreshPolicy: z.enum(["manual", "hourly", "daily", "weekly"]).optional(),
   active: z.boolean().optional(),
+  sourceSql: z.string().min(1).optional(),
 });
 
 async function authorise(request: NextRequest, id: string) {

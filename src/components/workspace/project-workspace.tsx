@@ -10,7 +10,7 @@ import { QueryPanel } from "./query-panel";
 import { DatasetPanel } from "./dataset-panel";
 
 type Column = { id: string; sqlName: string; originalName: string; sqlType: string; nullable: boolean };
-type TableSource = { id: string; name: string; mode: string; sourceKind: string; sourceSchema: string | null; sourceTable: string | null; refreshPolicy: string; active: boolean; lastStatus: string | null; lastRowCount: string | null; lastError: string | null; lastRefreshedAt: string | null; nextRefreshAt: string | null; connection: { id: string; name: string } };
+type TableSource = { id: string; name: string; mode: string; sourceKind: string; sourceGroupId: string | null; sourceSchema: string | null; sourceTable: string | null; sourceSql: string | null; refreshPolicy: string; active: boolean; lastStatus: string | null; lastRowCount: string | null; lastError: string | null; lastRefreshedAt: string | null; nextRefreshAt: string | null; connection: { id: string; name: string } };
 type Table = { id: string; name: string; sqlName: string; rowCount: string; lastDataAt: string | null; source: TableSource | null; columns: Column[] };
 type Dataset = { id: string; slug: string; name: string; description: string | null; active: boolean; schemaName: string; tables: Table[] };
 type Project = { id: string; slug: string; name: string; description: string | null; active: boolean; datasets: Dataset[] };
@@ -29,7 +29,7 @@ function CopyId({ label, id, className }: { label: string; id: string; className
     <button
       onClick={copy}
       title={`Copiar ${label} ID`}
-      className={`group flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left text-[10px] text-base-content/35 transition-colors hover:bg-base-200 hover:text-base-content/60 ${className ?? ""}`}
+      className={"group flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left text-[10px] text-base-content/35 transition-colors hover:bg-base-200 hover:text-base-content/60 " + (className ?? "")}
     >
       {copied ? <Check size={10} className="shrink-0 text-success" /> : <Copy size={10} className="shrink-0 opacity-0 group-hover:opacity-100" />}
       <span className="font-mono truncate">{label}: {id}</span>
@@ -257,7 +257,7 @@ export function ProjectWorkspace({ project, publicOrigin }: { project: Project; 
         <div className="px-2 pt-2">
           <button
             onClick={openQuery}
-            className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition-colors ${activeTab?.kind === "query" ? "bg-primary/10 font-medium text-primary" : "text-base-content/65 hover:bg-base-200"}`}
+            className={"flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition-colors " + (activeTab?.kind === "query" ? "bg-primary/10 font-medium text-primary" : "text-base-content/65 hover:bg-base-200")}
           >
             <Terminal size={14} />Consultar SQL
           </button>
@@ -334,7 +334,7 @@ export function ProjectWorkspace({ project, publicOrigin }: { project: Project; 
             <div
               key={tab.id}
               onClick={() => setActiveTabId(tab.id)}
-              className={`group flex shrink-0 cursor-pointer select-none items-center gap-1.5 border-r border-base-300 px-3 py-2.5 text-sm transition-colors ${activeTabId === tab.id ? "bg-base-200 font-medium text-base-content" : "text-base-content/50 hover:bg-base-100/60 hover:text-base-content/80"}`}
+              className={"group flex shrink-0 cursor-pointer select-none items-center gap-1.5 border-r border-base-300 px-3 py-2.5 text-sm transition-colors " + (activeTabId === tab.id ? "bg-base-200 font-medium text-base-content" : "text-base-content/50 hover:bg-base-100/60 hover:text-base-content/80")}
             >
               {tab.kind === "query" ? <Terminal size={13} className="shrink-0" /> : tab.kind === "dataset" ? <Database size={13} className="shrink-0 text-primary" /> : <Table2 size={13} className="shrink-0" />}
               <span className="max-w-[140px] truncate">{tab.label}</span>
