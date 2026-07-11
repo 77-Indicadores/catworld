@@ -36,12 +36,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   if (pathname === "/login") return <>{children}</>;
 
+  const isWorkspace = /^\/projects\/[^/]+/.test(pathname);
   const crumbs = pathname.split("/").filter(Boolean).map((item) => item.replaceAll("-", " "));
 
-  return (
-    <div className="min-h-screen lg:grid lg:grid-cols-[60px_1fr] xl:grid-cols-[220px_1fr]">
-      {sidebarOpen && <button aria-label="Fechar menu" className="fixed inset-0 z-30 bg-neutral/35 backdrop-blur-sm lg:hidden" onClick={() => setSidebarOpen(false)} />}
-      <aside className={`fixed inset-y-0 left-0 z-40 flex w-[220px] flex-col border-r border-base-300 bg-base-100 transition-transform lg:sticky lg:top-0 lg:h-screen lg:w-[60px] xl:w-[220px] ${sidebarOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"}`}>
+  const sidebar = isWorkspace ? null : (
+    <aside className={`fixed inset-y-0 left-0 z-40 flex w-[220px] flex-col border-r border-base-300 bg-base-100 transition-transform lg:sticky lg:top-0 lg:h-screen lg:w-[60px] xl:w-[220px] ${sidebarOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"}`}>
         <div className="flex h-16 items-center justify-between border-b border-base-300 px-3 xl:px-5">
           <Link href="/dashboard" className="flex items-center gap-3">
             <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-primary text-primary-content shadow-sm"><Database size={19} /></span>
@@ -85,11 +84,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </div>
           </div>
         </div>
-      </aside>
+    </aside>
+  );
+
+  return (
+    <div className={`min-h-screen ${isWorkspace ? "" : "lg:grid lg:grid-cols-[60px_1fr] xl:grid-cols-[220px_1fr]"}`}>
+      {sidebarOpen && !isWorkspace && <button aria-label="Fechar menu" className="fixed inset-0 z-30 bg-neutral/35 backdrop-blur-sm lg:hidden" onClick={() => setSidebarOpen(false)} />}
+      {sidebar}
 
       <div className="min-w-0">
         <header className="sticky top-0 z-20 flex h-16 items-center gap-3 border-b border-base-300 bg-base-100/90 px-4 backdrop-blur-xl sm:px-6">
-          <button className="btn btn-ghost btn-sm btn-square lg:hidden" onClick={() => setSidebarOpen(true)}><Menu size={20} /></button>
+          <button className={`btn btn-ghost btn-sm btn-square ${isWorkspace ? "" : "lg:hidden"}`} onClick={() => setSidebarOpen(true)}><Menu size={20} /></button>
           <label className="input input-sm hidden w-full max-w-md items-center gap-2 bg-base-200 md:flex">
             <Search size={15} className="text-base-content/45" />
             <input type="search" placeholder="Buscar projetos, datasets ou tabelas..." className="grow" />
