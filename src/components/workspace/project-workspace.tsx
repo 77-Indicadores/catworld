@@ -36,7 +36,7 @@ export function ProjectWorkspace({ project, publicOrigin }: { project: Project; 
   const activeTable = selection.kind === "table" ? activeDataset?.tables.find((t) => t.id === selection.tableId) : undefined;
 
   return (
-    <div className="grid gap-6 xl:grid-cols-[280px_1fr]">
+    <div className="grid gap-6 lg:grid-cols-[260px_1fr]">
       <div className="rounded-box border border-base-300 bg-base-100">
         <div className="border-b border-base-300 p-3">
           <label className="input input-sm flex items-center gap-2"><Search size={14} className="text-base-content/45" /><span className="sr-only">Buscar dataset ou tabela</span><input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Buscar dataset ou tabela..." className="grow" /></label>

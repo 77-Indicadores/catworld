@@ -39,25 +39,25 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const crumbs = pathname.split("/").filter(Boolean).map((item) => item.replaceAll("-", " "));
 
   return (
-    <div className="min-h-screen lg:grid lg:grid-cols-[252px_1fr]">
+    <div className="min-h-screen lg:grid lg:grid-cols-[60px_1fr] xl:grid-cols-[220px_1fr]">
       {sidebarOpen && <button aria-label="Fechar menu" className="fixed inset-0 z-30 bg-neutral/35 backdrop-blur-sm lg:hidden" onClick={() => setSidebarOpen(false)} />}
-      <aside className={`fixed inset-y-0 left-0 z-40 flex w-[252px] flex-col border-r border-base-300 bg-base-100 transition-transform lg:sticky lg:top-0 lg:h-screen ${sidebarOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"}`}>
-        <div className="flex h-16 items-center justify-between border-b border-base-300 px-5">
+      <aside className={`fixed inset-y-0 left-0 z-40 flex w-[220px] flex-col border-r border-base-300 bg-base-100 transition-transform lg:sticky lg:top-0 lg:h-screen lg:w-[60px] xl:w-[220px] ${sidebarOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"}`}>
+        <div className="flex h-16 items-center justify-between border-b border-base-300 px-3 xl:px-5">
           <Link href="/dashboard" className="flex items-center gap-3">
-            <span className="grid size-9 place-items-center rounded-xl bg-primary text-primary-content shadow-sm"><Database size={19} /></span>
-            <span><strong className="block leading-none">Catworld</strong><small className="text-[10px] uppercase tracking-[0.2em] text-base-content/45">data lake</small></span>
+            <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-primary text-primary-content shadow-sm"><Database size={19} /></span>
+            <span className="xl:block hidden"><strong className="block leading-none">Catworld</strong><small className="text-[10px] uppercase tracking-[0.2em] text-base-content/45">data lake</small></span>
           </Link>
           <button className="btn btn-ghost btn-sm btn-square lg:hidden" onClick={() => setSidebarOpen(false)}><X size={18} /></button>
         </div>
-        <nav className="flex-1 overflow-y-auto p-3">
-          <p className="px-3 pb-2 pt-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-base-content/40">Workspace</p>
+        <nav className="flex-1 overflow-y-auto p-2 xl:p-3">
+          <p className="hidden px-3 pb-2 pt-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-base-content/40 xl:block">Workspace</p>
           <ul className="menu w-full gap-1 p-0">
             {nav.map((item) => {
               const active = pathname === item.href || (item.href !== "/dashboard" && pathname.startsWith(`${item.href}/`));
               return (
-                <li key={item.href}>
-                  <Link href={item.href} onClick={() => setSidebarOpen(false)} className={active ? "active font-medium" : "text-base-content/70"}>
-                    <item.icon size={17} />{item.label}
+                <li key={item.href} className="tooltip tooltip-right xl:tooltip-right" data-tip={item.label}>
+                  <Link href={item.href} onClick={() => setSidebarOpen(false)} className={`flex items-center gap-3 xl:gap-2 ${active ? "active font-medium" : "text-base-content/70"}`}>
+                    <item.icon size={17} className="shrink-0" /><span className="hidden xl:inline">{item.label}</span>
                   </Link>
                 </li>
               );
@@ -68,19 +68,21 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             {navBottom.map((item) => {
               const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
               return (
-                <li key={item.href}>
-                  <Link href={item.href} onClick={() => setSidebarOpen(false)} className={active ? "active font-medium" : "text-base-content/70"}>
-                    <item.icon size={17} />{item.label}
+                <li key={item.href} className="tooltip tooltip-right" data-tip={item.label}>
+                  <Link href={item.href} onClick={() => setSidebarOpen(false)} className={`flex items-center gap-3 xl:gap-2 ${active ? "active font-medium" : "text-base-content/70"}`}>
+                    <item.icon size={17} className="shrink-0" /><span className="hidden xl:inline">{item.label}</span>
                   </Link>
                 </li>
               );
             })}
           </ul>
         </nav>
-        <div className="border-t border-base-300 p-3">
-          <div className="rounded-xl bg-base-200 p-3">
-            <div className="flex items-center gap-2 text-xs font-medium"><CloudCog size={15} className="text-success" />Azure SQL conectado</div>
-            <p className="mt-1 pl-[23px] text-[11px] text-base-content/50">38 ms · Produção</p>
+        <div className="border-t border-base-300 p-2 xl:p-3">
+          <div className="tooltip tooltip-right xl:tooltip-right" data-tip="Azure SQL conectado · 38ms">
+            <div className="flex items-center justify-center gap-2 rounded-xl bg-base-200 p-3 xl:justify-start">
+              <CloudCog size={15} className="shrink-0 text-success" />
+              <span className="hidden xl:block"><span className="text-xs font-medium">Azure SQL conectado</span><p className="text-[11px] text-base-content/50">38 ms · Produção</p></span>
+            </div>
           </div>
         </div>
       </aside>
