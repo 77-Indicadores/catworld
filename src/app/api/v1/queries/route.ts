@@ -20,18 +20,21 @@ export async function POST(request: NextRequest) {
       projectId: z.string().uuid().optional(),
     }).parse(await request.json());
 
-    await syncActorGrants(actor);
-
     let schemas: string[] = [];
+    let syncScope: { datasetIds?: string[]; projectIds?: string[] } | undefined;
     if (input.datasetId) {
       const dataset = await prisma.dataset.findUnique({ where: { id: input.datasetId, active: true } });
-      if (!dataset) throw new ApiError(404, "NOT_FOUND", "Dataset não encontrado");
+      if (!dataset) throw new ApiError(404, "NOT_FOUND", "Dataset nao encontrado");
       schemas = [dataset.schemaName];
+      syncScope = { datasetIds: [dataset.id] };
     } else if (input.projectId) {
       const datasets = await prisma.dataset.findMany({ where: { projectId: input.projectId, active: true } });
       if (!datasets.length) throw new ApiError(404, "NOT_FOUND", "Nenhum dataset encontrado para este projeto");
       schemas = datasets.map((d) => d.schemaName);
+      syncScope = { projectIds: [input.projectId] };
     }
+
+    await syncActorGrants(actor, syncScope);
 
     const result = await executeReadOnly(actor.principal, input.sql, input.timeout, input.limit, schemas, input.offset);
     await audit(actor, "QUERY_EXECUTED", "query", undefined, { rowCount: result.rowCount, executionTimeMs: result.executionTimeMs });
