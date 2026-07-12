@@ -97,7 +97,7 @@ function escXml(s: string) {
 type Column    = { originalName: string; sqlName: string; sqlType: string; nullable: boolean };
 type LiveSource = { mode: "live"; connection: PgConnection; sourceKind: string; sourceSchema: string | null; sourceTable: string | null; sourceSql: string | null };
 type Table     = { sqlName: string; columns: Column[]; live: LiveSource | null };
-type Dataset   = { schemaName: string; tables: Table[] };
+type Dataset   = { id: string; schemaName: string; tables: Table[] };
 
 async function loadDataset(projectSlug: string, datasetSlug: string): Promise<Dataset> {
   const cacheKey = `${projectSlug}/${datasetSlug}`;
@@ -143,7 +143,7 @@ async function loadDataset(projectSlug: string, datasetSlug: string): Promise<Da
     return { sqlName: t.sqlName, columns: t.columns, live };
   });
 
-  const result: Dataset = { schemaName: dataset.schemaName, tables };
+  const result: Dataset = { id: dataset.id, schemaName: dataset.schemaName, tables };
   datasetCache.set(cacheKey, { dataset: result, expiresAt: now + DATASET_CACHE_TTL });
   return result;
 }
@@ -351,7 +351,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         response["@odata.nextLink"] = appendApiKey(next, apiKey);
       }
     } else {
-      await syncActorGrants(actor);
+      await syncActorGrants(actor, { datasetIds: [dataset.id] });
       const colList = cols.map((c) => `[${c.sqlName}]`).join(", ");
       const dataSql  = `SELECT ${colList}, ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS [_row_number] FROM [${dataset.schemaName}].[${table.sqlName}] ORDER BY (SELECT NULL) OFFSET ${skip} ROWS FETCH NEXT ${top} ROWS ONLY`;
       const countSql = `SELECT COUNT(*) AS [cnt] FROM [${dataset.schemaName}].[${table.sqlName}]`;

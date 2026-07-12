@@ -82,7 +82,10 @@ export async function batchGrantSchemas(principal: string, items: { schema: stri
     const target = quoteIdentifier(schema);
     const perms = permission === "READ" ? ["SELECT"] : ["SELECT", "INSERT", "UPDATE", "DELETE"];
     const grants = perms.map((p) => `GRANT ${p} ON SCHEMA::${target} TO ${user}`).join("; ");
-    await pool.request().query(grants);
+    // Guard: skip schemas that don't exist in the database (may exist in Prisma but not in SQL Server)
+    await pool.request().query(
+      `IF SCHEMA_ID(N'${escapeSqlLiteral(schema)}') IS NOT NULL BEGIN ${grants} END`,
+    );
   }
 }
 
