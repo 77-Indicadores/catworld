@@ -202,7 +202,11 @@ function hasTopLevelOrderBy(sql: string): boolean {
 }
 
 function qualifyTable(sql: string, table: string, schema: string): string {
-  return sql.replace(new RegExp(`(?<!\\.)\\b${table}\\b`, "gi"), `${quoteIdentifier(schema)}.${quoteIdentifier(table)}`);
+  const qualified = `${quoteIdentifier(schema)}.${quoteIdentifier(table)}`;
+  const pattern = new RegExp(`(?<!\\.)\\b${table.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "gi");
+  // Split on SQL string literals (N'...' or '...', with '' escapes) so we don't replace inside them
+  const parts = sql.split(/(N?'[^']*(?:''[^']*)*')/gi);
+  return parts.map((part, i) => (i % 2 === 1 ? part : part.replace(pattern, qualified))).join("");
 }
 
 export async function createExternalDatabaseUser(name: string, password: string) {
