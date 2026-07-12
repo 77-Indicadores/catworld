@@ -33,6 +33,53 @@ export async function deleteTable(id: string) {
   await dropTable(table.dataset.schemaName, table.sqlName);
 }
 
+export async function deleteDatasetSource(id: string) {
+  const source = await prisma.datasetSource.findUniqueOrThrow({
+    where: { id },
+    include: { targetTable: { include: { dataset: true } } },
+  });
+  const target = source.targetTable;
+  const sourcePayload = JSON.stringify({ datasetSourceId: source.id });
+  const uploads = target ? await prisma.upload.findMany({ where: { tableId: target.id }, select: { id: true } }) : [];
+  const uploadIds = uploads.map((u) => u.id);
+
+  await prisma.$transaction([
+    prisma.job.deleteMany({ where: { OR: [{ payloadJson: sourcePayload }, ...(uploadIds.length ? [{ uploadId: { in: uploadIds } }] : [])] } }),
+    ...(uploadIds.length ? [prisma.upload.deleteMany({ where: { id: { in: uploadIds } } })] : []),
+    prisma.datasetSource.delete({ where: { id: source.id } }),
+    ...(target ? [prisma.datasetTable.delete({ where: { id: target.id } })] : []),
+  ]);
+
+  if (target && source.mode === "extract") await dropTable(target.dataset.schemaName, target.sqlName);
+}
+
+export async function deleteDatasetSourceGroup(groupId: string) {
+  const sources = await prisma.datasetSource.findMany({
+    where: { sourceGroupId: groupId },
+    include: { targetTable: { include: { dataset: true } } },
+    orderBy: { createdAt: "asc" },
+  });
+  const sourceIds = sources.map((s) => s.id);
+  const sourcePayloads = sourceIds.map((id) => JSON.stringify({ datasetSourceId: id }));
+  const targets = sources.map((s) => s.targetTable ? ({ sourceMode: s.mode, table: s.targetTable }) : null).filter(Boolean) as { sourceMode: string; table: NonNullable<(typeof sources)[number]["targetTable"]> }[];
+  const tableIds = targets.map((t) => t.table.id);
+  const uploads = tableIds.length ? await prisma.upload.findMany({ where: { tableId: { in: tableIds } }, select: { id: true } }) : [];
+  const uploadIds = uploads.map((u) => u.id);
+
+  await prisma.$transaction([
+    prisma.job.deleteMany({ where: { OR: [...(sourcePayloads.length ? [{ payloadJson: { in: sourcePayloads } }] : []), ...(uploadIds.length ? [{ uploadId: { in: uploadIds } }] : [])] } }),
+    ...(uploadIds.length ? [prisma.upload.deleteMany({ where: { id: { in: uploadIds } } })] : []),
+    prisma.datasetSource.deleteMany({ where: { id: { in: sourceIds } } }),
+    ...(tableIds.length ? [prisma.datasetTable.deleteMany({ where: { id: { in: tableIds } } })] : []),
+  ]);
+
+  for (const target of targets) {
+    if (target.sourceMode === "extract") await dropTable(target.table.dataset.schemaName, target.table.sqlName);
+  }
+
+  return { deletedSources: sourceIds.length, deletedTables: tableIds.length };
+}
+
 export async function deleteDataset(id: string) {
   const dataset = await prisma.dataset.findUniqueOrThrow({ where: { id }, include: { tables: true } });
   const tableIds = dataset.tables.map((t) => t.id);

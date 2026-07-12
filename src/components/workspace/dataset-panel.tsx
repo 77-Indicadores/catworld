@@ -34,7 +34,7 @@ function buildGroups(tables: Table[]): SourceGroup[] {
 
   for (const t of tables) {
     const s = t.source;
-    if (!s || !s.active) continue;
+    if (!s) continue;
     if (s.sourceGroupId) {
       if (!batchMap.has(s.sourceGroupId)) batchMap.set(s.sourceGroupId, { sources: [], tables: [] });
       const g = batchMap.get(s.sourceGroupId)!;
@@ -57,6 +57,12 @@ function statusKind(status: string | null): "healthy" | "warning" | "error" | "i
   if (status === "failed") return "error";
   if (status === "running" || status === "queued") return "warning";
   return "inactive";
+}
+
+function sourceBadge(source: Source) {
+  if (!source.active) return { status: "inactive" as const, label: "Pausado" };
+  const kind = statusKind(source.lastStatus);
+  return { status: kind, label: kind === "error" ? "Erro" : kind === "warning" ? "Processando" : kind === "healthy" ? "Pronto" : "Pendente" };
 }
 
 function refreshText(policy: string) {
@@ -88,15 +94,19 @@ function BatchGroupRow({ groupId, datasetId, sources, tables, onSelectTable, onC
   const [refreshing, setRefreshing] = useState(false);
   const rep = sources[0]!; // representative source — all share mode/policy/status/connection
   const activeSources = sources.filter(s => s.active);
+  const failedSources = sources.filter(s => s.active && s.lastStatus === "failed");
+  const runningSources = sources.filter(s => s.active && (s.lastStatus === "running" || s.lastStatus === "queued"));
+  const completedSources = sources.filter(s => s.active && (s.lastStatus === "completed" || s.lastStatus === "ready"));
 
-  // Aggregate status: failed > running/queued > completed > inactive
-  const worstStatus = activeSources.reduce<"healthy" | "warning" | "error" | "inactive">((acc, s) => {
-    const k = statusKind(s.lastStatus);
-    if (k === "error") return "error";
-    if (k === "warning" && acc !== "error") return "warning";
-    if (k === "healthy" && acc === "inactive") return "healthy";
-    return acc;
-  }, "inactive");
+  const groupStatus = failedSources.length ? "error" : runningSources.length ? "warning" : activeSources.length ? "healthy" : "inactive";
+  const groupLabel = groupStatus === "error" ? "Erro" : groupStatus === "warning" ? "Processando" : groupStatus === "healthy" ? "Pronto" : "Pausado";
+  const groupSummary = failedSources.length
+    ? `${completedSources.length} concluida${completedSources.length !== 1 ? "s" : ""} · ${failedSources.length} com erro`
+    : runningSources.length
+      ? `${runningSources.length} processando · ${completedSources.length} concluida${completedSources.length !== 1 ? "s" : ""}`
+      : activeSources.length
+        ? `${completedSources.length} concluida${completedSources.length !== 1 ? "s" : ""}`
+        : "Sync pausado; dados mantidos como snapshot";
 
   const allActive = activeSources.length === sources.length;
 
@@ -110,14 +120,15 @@ function BatchGroupRow({ groupId, datasetId, sources, tables, onSelectTable, onC
 
   async function refreshGroup() {
     setRefreshing(true);
-    await Promise.all(activeSources.map(s => fetch(`/api/v1/dataset-sources/${s.id}/refresh`, { method: "POST" })));
+    const targets = failedSources.length ? failedSources : activeSources;
+    await Promise.all(targets.map(s => fetch(`/api/v1/dataset-sources/${s.id}/refresh`, { method: "POST" })));
     setRefreshing(false);
     onChanged();
   }
 
   async function deleteGroup() {
     const label = `${tables.length} tabela${tables.length !== 1 ? "s" : ""} de ${rep.sourceSchema ?? rep.connection.name}`;
-    if (!confirm(`Remover importação com ${label}? Os dados já copiados não serão apagados.`)) return;
+    if (!confirm(`Remover importacao com ${label}? Isto removera ${tables.length} tabela${tables.length !== 1 ? "s" : ""} deste dataset e os dados materializados no Catworld. A origem externa nao sera alterada.`)) return;
     await fetch(`/api/v1/source-groups/${groupId}`, { method: "DELETE" });
     onChanged();
   }
@@ -133,11 +144,12 @@ function BatchGroupRow({ groupId, datasetId, sources, tables, onSelectTable, onC
             <span className="truncate font-medium text-base-content">
               {rep.sourceSchema ? `${rep.connection.name} · ${rep.sourceSchema}` : rep.connection.name}
             </span>
-            <StatusBadge status={worstStatus} label={worstStatus === "error" ? "Erro" : worstStatus === "warning" ? "Processando" : worstStatus === "healthy" ? "OK" : "Pronta"} />
+            <StatusBadge status={groupStatus} label={groupLabel} />
           </div>
           <p className="text-xs text-base-content/40">
             {tables.length} tabela{tables.length !== 1 ? "s" : ""}
             {" · " + (rep.mode === "extract" ? refreshText(rep.refreshPolicy) : "Ao vivo")}
+            {" · " + groupSummary}
           </p>
         </div>
       </div>
@@ -152,6 +164,7 @@ function BatchGroupRow({ groupId, datasetId, sources, tables, onSelectTable, onC
             >
               <Table2 size={11} className="shrink-0 text-base-content/40" />
               <span className="flex-1 truncate font-mono">{t.name}</span>
+              {t.source && <StatusBadge status={sourceBadge(t.source).status} label={sourceBadge(t.source).label} />}
               {t.lastDataAt && (
                 <span className="shrink-0 text-base-content/30">{new Date(t.lastDataAt).toLocaleDateString("pt-BR")}</span>
               )}
@@ -174,7 +187,7 @@ function BatchGroupRow({ groupId, datasetId, sources, tables, onSelectTable, onC
       {/* Erros */}
       {sources.some(s => s.lastError) && (
         <div className="mt-2 ml-10 rounded bg-error/8 px-2 py-1 font-mono text-[11px] text-error">
-          {sources.find(s => s.lastError)?.lastError}
+          {(failedSources[0]?.sourceTable ?? failedSources[0]?.name ?? sources.find(s => s.lastError)?.name) + ": "}{failedSources[0]?.lastError ?? sources.find(s => s.lastError)?.lastError}
         </div>
       )}
 
@@ -185,12 +198,12 @@ function BatchGroupRow({ groupId, datasetId, sources, tables, onSelectTable, onC
           {allActive
             ? <ToggleRight size={13} className="text-success" />
             : <ToggleLeft size={13} className="text-base-content/30" />}
-          {allActive ? "Ativa" : "Inativa"}
+          {allActive ? "Sync ativo" : "Sync pausado"}
         </button>
         {rep.mode === "extract" && (
-          <button onClick={refreshGroup} disabled={refreshing} className="btn btn-ghost btn-xs gap-1">
+          <button onClick={refreshGroup} disabled={refreshing || activeSources.length === 0} className="btn btn-ghost btn-xs gap-1">
             <RefreshCw size={12} className={refreshing ? "animate-spin" : ""} />
-            {refreshing ? "…" : "Atualizar"}
+            {refreshing ? "..." : failedSources.length ? "Tentar novamente" : "Atualizar"}
           </button>
         )}
         <button onClick={deleteGroup} className="btn btn-ghost btn-xs text-error/60 hover:text-error ml-auto" title="Remover importação">
@@ -378,7 +391,7 @@ function SingleSourceRow({ source: s, table: t, onSelectTable, onChanged }: {
   }
 
   async function deleteSource() {
-    if (!confirm(`Remover a fonte "${s.name}"? Os dados já copiados não serão apagados.`)) return;
+    if (!confirm(`Remover a fonte "${s.name}"? Isto removera a tabela "${t.name}" deste dataset e os dados materializados no Catworld. A origem externa nao sera alterada.`)) return;
     await fetch(`/api/v1/dataset-sources/${s.id}`, { method: "DELETE" });
     onChanged();
   }
@@ -400,7 +413,7 @@ function SingleSourceRow({ source: s, table: t, onSelectTable, onChanged }: {
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="truncate font-medium text-base-content">{s.name}</span>
-            <StatusBadge status={statusKind(s.lastStatus)} label={s.lastStatus ?? "Pronta"} />
+            <StatusBadge status={sourceBadge(s).status} label={sourceBadge(s).label} />
           </div>
           <p className="truncate text-xs text-base-content/40">
             {s.connection.name} · Consulta personalizada
@@ -423,12 +436,12 @@ function SingleSourceRow({ source: s, table: t, onSelectTable, onChanged }: {
           {s.active
             ? <ToggleRight size={13} className="text-success" />
             : <ToggleLeft size={13} className="text-base-content/30" />}
-          {s.active ? "Ativa" : "Inativa"}
+          {s.active ? "Sync ativo" : "Sync pausado"}
         </button>
         {s.mode === "extract" && (
-          <button onClick={refreshSource} disabled={refreshing || s.lastStatus === "running"} className="btn btn-ghost btn-xs gap-1">
+          <button onClick={refreshSource} disabled={!s.active || refreshing || s.lastStatus === "running"} className="btn btn-ghost btn-xs gap-1">
             <RefreshCw size={12} className={refreshing || s.lastStatus === "running" ? "animate-spin" : ""} />
-            {refreshing ? "…" : "Atualizar"}
+            {refreshing ? "..." : s.lastStatus === "failed" ? "Tentar novamente" : "Atualizar"}
           </button>
         )}
         <button onClick={deleteSource} className="btn btn-ghost btn-xs text-error/60 hover:text-error ml-auto" title="Remover fonte">

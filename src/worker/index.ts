@@ -246,6 +246,28 @@ async function recoverStale() {
          WHERE j.upload_id=u.id AND j.status IN ('QUEUED','RUNNING','COMPLETED')
        )`,
   );
+
+  await prisma.$executeRawUnsafe(
+    `UPDATE s
+     SET last_status='failed',
+         last_error='Processamento interrompido',
+         next_refresh_at=CASE
+           WHEN s.refresh_policy='hourly' THEN DATEADD(HOUR,1,SYSUTCDATETIME())
+           WHEN s.refresh_policy='daily' THEN DATEADD(DAY,1,SYSUTCDATETIME())
+           WHEN s.refresh_policy='weekly' THEN DATEADD(DAY,7,SYSUTCDATETIME())
+           ELSE NULL
+         END,
+         updated_at=SYSUTCDATETIME()
+     FROM dbo.cw_dataset_sources s
+     WHERE s.last_status='running'
+       AND NOT EXISTS (
+         SELECT 1
+         FROM dbo.cw_jobs j
+         WHERE j.type='SOURCE_REFRESH'
+           AND j.status IN ('QUEUED','RUNNING')
+           AND JSON_VALUE(j.payload_json,'$.datasetSourceId') = CONVERT(nvarchar(36),s.id)
+       )`,
+  );
 }
 
 async function loop(concurrencyId: number) {

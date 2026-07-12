@@ -5,6 +5,7 @@ import { resolveActor } from "@/server/auth/actor";
 import { canAccess } from "@/server/auth/permissions";
 import { ApiError, handleApiError, ok } from "@/server/http";
 import { nextRefresh } from "@/server/connections/sources";
+import { deleteDatasetSource } from "@/server/data/catalog";
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -69,14 +70,7 @@ export async function DELETE(request: NextRequest, { params }: { params: Promise
   try {
     const id = (await params).id;
     await authorise(request, id);
-
-    // Cancel any queued jobs for this source
-    await prisma.job.updateMany({
-      where: { type: "SOURCE_REFRESH", status: "QUEUED", payloadJson: JSON.stringify({ datasetSourceId: id }) },
-      data: { status: "FAILED", lastError: "Fonte removida" },
-    });
-
-    await prisma.datasetSource.update({ where: { id }, data: { active: false } });
+    await deleteDatasetSource(id);
     return ok({ deleted: true });
   } catch (e) {
     return handleApiError(e);

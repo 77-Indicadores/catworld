@@ -17,7 +17,6 @@ export default async function DashboardPage() {
     prisma.upload.count({ where: { status: { in: CANCELLABLE } } }),
   ]);
   const bytes = tables.reduce((n, t) => n + t.sizeBytes, 0n);
-  const now = Date.now();
 
   return (
     <div className="space-y-6">
@@ -45,7 +44,7 @@ export default async function DashboardPage() {
               <div key={u.id} className="flex items-center justify-between px-5 py-3.5">
                 <div className="min-w-0">
                   <p className="truncate text-sm font-medium">{u.originalFilename}</p>
-                  <p className="text-xs text-base-content/50">{u.dataset?.name ?? "Destino pendente"} · {timeAgo(u.createdAt, now)}</p>
+                  <p className="text-xs text-base-content/50">{u.dataset?.name ?? "Destino pendente"} · {timeAgo(u.createdAt)}</p>
                 </div>
                 <StatusBadge status={u.status === "COMPLETED" ? "healthy" : u.status === "FAILED" ? "error" : "warning"} label={u.status} />
               </div>
@@ -57,7 +56,7 @@ export default async function DashboardPage() {
             {audits.map(e => (
               <div key={e.id} className="px-5 py-3">
                 <p className="text-sm font-medium">{e.eventType}</p>
-                <p className="text-xs text-base-content/45">{e.user?.name ?? "Token ou sistema"} · {timeAgo(e.createdAt, now)}</p>
+                <p className="text-xs text-base-content/45">{e.user?.name ?? "Token ou sistema"} · {timeAgo(e.createdAt)}</p>
               </div>
             ))}
           </div>
@@ -75,11 +74,6 @@ function formatBytes(value: bigint) {
   return `${(n / 1024 ** i).toFixed(i ? 1 : 0)} ${units[i]}`;
 }
 
-function timeAgo(date: Date, now: number) {
-  const s = Math.floor((now - date.getTime()) / 1000);
-  if (s < 60) return "agora";
-  if (s < 3600) return `${Math.floor(s / 60)}min`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h`;
-  if (s < 604800) return `${Math.floor(s / 86400)}d`;
+function timeAgo(date: Date) {
   return date.toLocaleDateString("pt-BR");
 }

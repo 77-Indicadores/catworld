@@ -5,6 +5,7 @@ import { resolveActor } from "@/server/auth/actor";
 import { canAccess } from "@/server/auth/permissions";
 import { ApiError, handleApiError, ok } from "@/server/http";
 import { nextRefresh, queueSourceRefresh } from "@/server/connections/sources";
+import { deleteDatasetSourceGroup } from "@/server/data/catalog";
 
 async function authoriseGroup(request: NextRequest, groupId: string) {
   const actor = await resolveActor(request);
@@ -38,7 +39,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       : effectivePolicy === "manual" ? null : undefined;
 
     await prisma.datasetSource.updateMany({
-      where: { sourceGroupId: groupId, active: true },
+      where: { sourceGroupId: groupId },
       data: {
         ...(input.mode !== undefined ? { mode: input.mode } : {}),
         ...(input.mode === "live" ? { refreshPolicy: "manual", nextRefreshAt: null } : {}),
@@ -63,25 +64,7 @@ export async function DELETE(request: NextRequest, { params }: { params: Promise
   try {
     const groupId = (await params).groupId;
     await authoriseGroup(request, groupId);
-
-    // Cancel queued jobs
-    const sources = await prisma.datasetSource.findMany({
-      where: { sourceGroupId: groupId },
-      select: { id: true },
-    });
-    for (const s of sources) {
-      await prisma.job.updateMany({
-        where: { type: "SOURCE_REFRESH", status: "QUEUED", payloadJson: JSON.stringify({ datasetSourceId: s.id }) },
-        data: { status: "FAILED", lastError: "Fonte removida" },
-      });
-    }
-
-    await prisma.datasetSource.updateMany({
-      where: { sourceGroupId: groupId },
-      data: { active: false },
-    });
-
-    return ok({ deleted: sources.length });
+    return ok(await deleteDatasetSourceGroup(groupId));
   } catch (e) {
     return handleApiError(e);
   }
