@@ -2,6 +2,9 @@ from catworld import CatworldClient
 import httpx
 import json
 import pytest
+from pathlib import Path
+
+from catworld import ConnectionError
 
 
 def test_client_constructs():
@@ -126,3 +129,41 @@ def test_query_rejects_mixed_live_and_internal_tables():
             assert exc.code == "MIXED_QUERY_ENGINES"
         else:
             raise AssertionError("Expected mixed engine validation error")
+
+
+def test_upload_raises_connection_error_when_polling_gets_non_json_error():
+    upload_file = Path("sdk/python/tests/.tmp-upload.csv")
+    upload_file.write_text("id,name\n1,Mochi\n", encoding="utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/api/v1/uploads":
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "upload": {"id": "upload-123"},
+                        "sas": {"url": "https://blob.example/upload-123"},
+                    }
+                },
+            )
+        if request.method == "PUT" and request.url.host == "blob.example":
+            return httpx.Response(201, text="")
+        if request.method == "POST" and request.url.path == "/api/v1/uploads/upload-123/uploaded":
+            return httpx.Response(200, json={"data": {"ok": True}})
+        if request.method == "GET" and request.url.path == "/api/v1/uploads/upload-123":
+            return httpx.Response(502, text="Bad Gateway")
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = CatworldClient("https://catworld.example", "cw_live_test")
+    client._client.close()
+    client._client = httpx.Client(
+        base_url="https://catworld.example",
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        with pytest.raises(ConnectionError, match="Bad Gateway"):
+            client.upload(upload_file, dataset_id="dataset-1", poll_interval=0)
+    finally:
+        client.close()
+        upload_file.unlink(missing_ok=True)

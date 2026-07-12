@@ -81,7 +81,7 @@ export async function tableColumnsMssql(connection: MssqlConnection, schema: str
       .input("schema", sql.NVarChar(128), schema)
       .input("table", sql.NVarChar(128), table)
       .query<{ column_name: string; data_type: string; is_nullable: string }>(
-        `SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=@schema AND TABLE_NAME=@table ORDER BY ORDINAL_POSITION`,
+        `SELECT COLUMN_NAME AS column_name, DATA_TYPE AS data_type, IS_NULLABLE AS is_nullable FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=@schema AND TABLE_NAME=@table ORDER BY ORDINAL_POSITION`,
       );
     return result.recordset.map((row) => ({
       originalName: row.column_name,
