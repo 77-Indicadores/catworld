@@ -28,10 +28,10 @@ export type SourceRefreshWithSource = {
 };
 
 const STATUS_CONFIG: Record<string, { cls: string; icon: React.ElementType; label: string }> = {
-  QUEUED:  { cls: "badge-ghost",   icon: Clock3,       label: "Aguardando" },
-  RUNNING: { cls: "badge-info",    icon: Loader2,      label: "Em andamento" },
-  DONE:    { cls: "badge-success", icon: CheckCircle2, label: "Concluído" },
-  FAILED:  { cls: "badge-error",   icon: CircleX,      label: "Falhou" },
+  QUEUED:    { cls: "badge-ghost",   icon: Clock3,       label: "Aguardando" },
+  RUNNING:   { cls: "badge-info",    icon: Loader2,      label: "Em andamento" },
+  COMPLETED: { cls: "badge-success", icon: CheckCircle2, label: "Concluido" },
+  FAILED:    { cls: "badge-error",   icon: CircleX,      label: "Falhou" },
 };
 
 function fmtRows(n: string | null) {
@@ -47,7 +47,7 @@ export function SourceRefreshCard({ job }: { job: SourceRefreshWithSource }) {
   const cfg = STATUS_CONFIG[job.status] ?? { cls: "badge-ghost", icon: Clock3, label: job.status };
   const Icon = cfg.icon;
   const isRunning = job.status === "RUNNING";
-  const isDone = job.status === "DONE" || job.status === "FAILED";
+  const isDone = job.status === "COMPLETED" || job.status === "FAILED";
 
   const src = job.source;
   const name = src?.name ?? "Fonte desconhecida";

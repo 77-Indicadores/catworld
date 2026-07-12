@@ -25,10 +25,10 @@ const GROUP_STATUSES: Record<string, string[]> = {
 
 // SOURCE_REFRESH job status → funnel group key
 const JOB_GROUP: Record<string, "pending" | "active" | "completed" | "failed"> = {
-  QUEUED:  "pending",
-  RUNNING: "active",
-  DONE:    "completed",
-  FAILED:  "failed",
+  QUEUED:    "pending",
+  RUNNING:   "active",
+  COMPLETED: "completed",
+  FAILED:    "failed",
 };
 
 // Reverse map: group key → job statuses
@@ -39,10 +39,10 @@ for (const [jobStatus, group] of Object.entries(JOB_GROUP)) {
 
 // Maps job status to an upload status string that countFunnelGroups recognises
 const JOB_STATUS_TO_UPLOAD: Record<string, string> = {
-  QUEUED:  "PENDING_UPLOAD",
-  RUNNING: "IMPORTING",
-  DONE:    "COMPLETED",
-  FAILED:  "FAILED",
+  QUEUED:    "PENDING_UPLOAD",
+  RUNNING:   "IMPORTING",
+  COMPLETED: "COMPLETED",
+  FAILED:    "FAILED",
 };
 
 function parseComma(value: string | undefined): string[] {
