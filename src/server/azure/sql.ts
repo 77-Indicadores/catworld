@@ -126,9 +126,8 @@ const tableMap = new Map<string, string[]>();
         if (found.length === 1) {
           statement = qualifyTable(statement, table, found[0]!);
         }
-        if (found.length === 0) {
-          throw new ApiError(400, "TABLE_NOT_FOUND", `Tabela '${table}' não encontrada no contexto informado. Verifique o dataset_id ou project_id.`);
-        }
+        // found.length === 0: silently skip — it's a CTE alias, subquery alias, or
+        // temp table; SQL Server will produce the appropriate error if it's truly invalid.
       }
     }
   }
@@ -138,10 +137,13 @@ const tableMap = new Map<string, string[]>();
   (request as unknown as { timeout: number }).timeout = Math.min(Math.max(timeout, 1), 120) * 1000;
   const started = Date.now();
   try {
+    const hasCte = /^\s*WITH\b/i.test(statement);
     const paged = offset > 0
       ? hasTopLevelOrderBy(statement)
         ? `${statement} OFFSET ${offset} ROWS FETCH NEXT ${limit} ROWS ONLY`
-        : `SELECT * FROM (${statement}) AS _cw_q ORDER BY (SELECT NULL) OFFSET ${offset} ROWS FETCH NEXT ${limit} ROWS ONLY`
+        : hasCte
+          ? `${statement} ORDER BY (SELECT NULL) OFFSET ${offset} ROWS FETCH NEXT ${limit} ROWS ONLY`
+          : `SELECT * FROM (${statement}) AS _cw_q ORDER BY (SELECT NULL) OFFSET ${offset} ROWS FETCH NEXT ${limit} ROWS ONLY`
       : statement;
     const result = await request.query(paged);
     const rows = result.recordset?.slice(0, limit) ?? [];
@@ -157,31 +159,12 @@ const tableMap = new Map<string, string[]>();
   }
 }
 
-function extractCteNames(sql: string): Set<string> {
-  const names = new Set<string>();
-  if (!/^\s*WITH\b/i.test(sql)) return names;
-  // Find identifier AS ( patterns at paren depth 0 — these are CTE definitions
-  const nameRe = /\b([a-zA-Z_][a-zA-Z0-9_]*)\s+AS\s*\(/gi;
-  let m;
-  while ((m = nameRe.exec(sql)) !== null) {
-    let depth = 0;
-    for (let j = 0; j < m.index; j++) {
-      if (sql[j] === "(") depth++;
-      else if (sql[j] === ")") depth--;
-    }
-    if (depth === 0) names.add(m[1]!.toLowerCase());
-  }
-  return names;
-}
-
 function extractUnqualifiedTableRefs(sql: string): string[] {
-  const cteNames = extractCteNames(sql);
   const tableKeywords = /\b(?:FROM|JOIN|INNER\s+JOIN|LEFT\s+JOIN|RIGHT\s+JOIN|FULL\s+JOIN|CROSS\s+JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)\b/gi;
   const results: string[] = [];
   let match;
   while ((match = tableKeywords.exec(sql)) !== null) {
     const ref = match[1]!;
-    if (cteNames.has(ref.toLowerCase())) continue;
     const idx = match.index + match[0].lastIndexOf(ref);
     if (sql[idx - 1] === ".") continue; // already schema-qualified (after dot)
     if (sql[idx + ref.length] === ".") continue; // is a schema name (before dot)
@@ -211,9 +194,12 @@ function qualifyTable(sql: string, table: string, schema: string): string {
   return parts.map((part, i) => {
     if (i % 2 === 1) return part; // string literal — skip
     return part.replace(pattern, (match, offset) => {
-      // Skip if preceded by AS keyword (column/table alias)
+      // Skip if preceded by AS keyword (column alias: SELECT x AS name)
       const before = part.slice(0, offset).trimEnd();
       if (/\bAS$/i.test(before)) return match;
+      // Skip if followed by AS ( (CTE definition: WITH name AS (...))
+      const after = part.slice(offset + match.length).trimStart();
+      if (/^AS\s*\(/i.test(after)) return match;
       return qualified;
     });
   }).join("");
