@@ -5,7 +5,7 @@ import { Download, Play } from "lucide-react";
 type Dataset = { id: string; name: string; schemaName: string; tables: { id: string; name: string; sqlName: string; source: { id: string; mode: string } | null; columns: { sqlName: string }[] }[] };
 type Result = { columns: string[]; rows: Record<string, unknown>[]; executionTimeMs: number; truncated: boolean };
 
-export function QueryPanel({ datasets }: { datasets: Dataset[] }) {
+export function QueryPanel({ datasets, projectId }: { datasets: Dataset[]; projectId?: string }) {
   const [sql, setSql] = useState("SELECT TOP 100 *\nFROM ");
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<Result | null>(null);
@@ -22,7 +22,7 @@ export function QueryPanel({ datasets }: { datasets: Dataset[] }) {
     try {
       const response = await fetch(
         liveSourceId ? `/api/v1/dataset-sources/${liveSourceId}/query` : "/api/v1/queries",
-        { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sql, limit: 10000, timeout: 30 }) }
+        { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sql, limit: 10000, timeout: 30, ...(projectId ? { projectId } : {}) }) }
       );
       const body = await response.json();
       if (!response.ok) throw new Error(body.error?.message ?? "Falha na consulta");

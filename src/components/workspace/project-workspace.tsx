@@ -388,7 +388,7 @@ export function ProjectWorkspace({ project, publicOrigin }: { project: Project; 
             )}
 
             {activeTab?.kind === "query" && (
-              <QueryPanel datasets={project.datasets} />
+              <QueryPanel datasets={project.datasets} projectId={project.id} />
             )}
           </div>
 
