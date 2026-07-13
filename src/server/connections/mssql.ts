@@ -173,16 +173,56 @@ function splitFinalSelect(sql: string): { prefix: string; finalSelect: string } 
 
 export async function* streamMssqlRows(connection: MssqlConnection, query: string, batchSize = 1000): AsyncGenerator<Record<string, unknown>[]> {
   const statement = safeStatementMssql(query);
-  const pool = new sql.ConnectionPool(config(connection));
+  // Use a longer timeout for full-table streaming — the query may run for many minutes
+  const pool = new sql.ConnectionPool({ ...config(connection), requestTimeout: 7_200_000 });
   await pool.connect();
   try {
-    let offset = 0;
+    const request = new sql.Request(pool);
+    request.stream = true;
+
+    let batch: Record<string, unknown>[] = [];
+    let notify: (() => void) | null = null;
+    const queue: Record<string, unknown>[][] = [];
+    let streamError: Error | null = null;
+    let finished = false;
+
+    request.on("row", (row: Record<string, unknown>) => {
+      batch.push(row);
+      if (batch.length >= batchSize) {
+        queue.push(batch);
+        batch = [];
+        request.pause();
+        notify?.();
+        notify = null;
+      }
+    });
+
+    request.on("error", (err: Error) => {
+      streamError = err;
+      notify?.();
+      notify = null;
+    });
+
+    request.on("done", () => {
+      if (batch.length > 0) { queue.push(batch); batch = []; }
+      finished = true;
+      notify?.();
+      notify = null;
+    });
+
+    request.query(statement);
+
     while (true) {
-      const result = await pool.request().query(paginateMssql(statement, offset, batchSize));
-      if (!result.recordset.length) break;
-      yield result.recordset as Record<string, unknown>[];
-      if (result.recordset.length < batchSize) break;
-      offset += batchSize;
+      if (queue.length > 0) {
+        yield queue.shift()!;
+        request.resume();
+      } else if (streamError) {
+        throw streamError;
+      } else if (finished) {
+        break;
+      } else {
+        await new Promise<void>((r) => { notify = r; });
+      }
     }
   } finally {
     await pool.close().catch(() => undefined);
