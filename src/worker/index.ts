@@ -59,7 +59,17 @@ async function work(job: Claimed) {
   if (job.type === "SOURCE_REFRESH") {
     const payload = JSON.parse(job.payload_json ?? "{}") as { datasetSourceId?: string };
     if (!payload.datasetSourceId) throw new Error("SOURCE_REFRESH sem datasetSourceId");
-    await refreshDatasetSource(payload.datasetSourceId);
+    const hb = setInterval(
+      () => prisma.job.update({ where: { id: job.id }, data: { heartbeatAt: new Date() } }).catch(
+        (e) => console.warn("[heartbeat] falhou job=%s: %s", job.id, e instanceof Error ? e.message : e)
+      ),
+      15000,
+    );
+    try {
+      await refreshDatasetSource(payload.datasetSourceId);
+    } finally {
+      clearInterval(hb);
+    }
     await prisma.job.update({ where: { id: job.id }, data: { status: "COMPLETED", lockedAt: null, lockedBy: null, heartbeatAt: null, lastError: null } });
     return;
   }

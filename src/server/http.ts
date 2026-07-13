@@ -17,7 +17,8 @@ export async function handleApiError(error: unknown, context?: Record<string, un
     Sentry.captureException(error);
   });
   await Sentry.flush(2000);
-  return fail(500, "INTERNAL_ERROR", "Erro interno inesperado");
+  const message = error instanceof Error ? error.message : String(error);
+  return fail(500, "INTERNAL_ERROR", message);
 }
 export class ApiError extends Error {
   constructor(public status: number, public code: string, message: string, public details?: unknown) { super(message); }

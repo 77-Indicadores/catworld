@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Cable, CheckCircle2, DatabaseZap, Play, Plus, RefreshCw, Search, Table2 } from "lucide-react";
 
-type Connection = { id: string; name: string; server: string; databaseName: string };
+type Connection = { id: string; name: string; provider: string; server: string; databaseName: string };
 type SchemaRow = { schema: string };
 type TableRow = { schema: string; table: string };
 type Column = { originalName: string; sqlName: string; sqlType: string };
@@ -130,9 +130,11 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
     }
   }
 
+  const activeConnection = connections.find((c) => c.id === connectionId);
+  const providerLabel = activeConnection?.provider === "mssql" ? "SQL Server" : "Postgres";
   const queryIsReady = queryName.trim() && sourceSql.trim() && queryStatus === "ok" && queryTestedSql === sourceSql;
   const canChooseOrigin = connectionId && (sourceKind === "table" ? selectedTables.length > 0 : queryIsReady);
-  const modeLabel = mode === "extract" ? "Copiar para o Catworld" : "Consultar direto no Postgres";
+  const modeLabel = mode === "extract" ? "Copiar para o Catworld" : `Consultar direto no ${providerLabel}`;
 
   return (
     <>
@@ -145,7 +147,7 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
           </div>
 
           {loadingMeta && <div className="alert alert-info alert-soft mt-4"><span className="loading loading-spinner loading-sm" />Carregando metadados da conexao...</div>}
-          {connections.length === 0 && !loadingMeta && <div className="alert alert-warning alert-soft mt-4">Crie uma conexao Postgres antes de adicionar fontes ao dataset.</div>}
+          {connections.length === 0 && !loadingMeta && <div className="alert alert-warning alert-soft mt-4">Crie uma conexao antes de adicionar fontes ao dataset.</div>}
           {error && <div className="alert alert-error alert-soft mt-4">{error}</div>}
 
           {step === "origin" && (
@@ -155,7 +157,7 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
                 <button type="button" className={`btn join-item btn-sm ${sourceKind === "query" ? "btn-primary" : "btn-outline"}`} onClick={() => setSourceKind("query")}><Play size={14} />Usar consulta</button>
               </div>
               <div className="grid gap-4 lg:grid-cols-2">
-                <Field label="Conexao Postgres"><select className="select w-full" value={connectionId} onChange={(e) => setConnectionId(e.target.value)}>{connections.map((c) => <option key={c.id} value={c.id}>{c.name} - {c.databaseName}</option>)}</select></Field>
+                <Field label="Conexao"><select className="select w-full" value={connectionId} onChange={(e) => setConnectionId(e.target.value)}>{connections.map((c) => <option key={c.id} value={c.id}>{c.name} ({c.provider === "mssql" ? "SQL Server" : "Postgres"}) - {c.databaseName}</option>)}</select></Field>
                 {sourceKind === "table" ? (
                   <>
                     <Field label="Schema"><select className="select w-full" value={schema} onChange={(e) => setSchema(e.target.value)}>{schemas.map((s) => <option key={s.schema}>{s.schema}</option>)}</select></Field>
@@ -201,7 +203,7 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
                 ) : (
                   <>
                     <Field label="Nome da tabela no Catworld" hint="Obrigatorio para fontes criadas por consulta."><input className="input w-full" value={queryName} onChange={(e) => setQueryName(e.target.value)} /></Field>
-                    <Field label="Consulta SQL" hint="Somente SELECT ou WITH. A consulta roda no Postgres da conexao escolhida." wide><textarea className="textarea h-44 w-full font-mono text-sm" value={sourceSql} onChange={(e) => { setSourceSql(e.target.value); setQueryStatus("idle"); }} /></Field>
+                    <Field label="Consulta SQL" hint={`Somente SELECT ou WITH. A consulta roda no ${providerLabel} da conexao escolhida.`} wide><textarea className="textarea h-44 w-full font-mono text-sm" value={sourceSql} onChange={(e) => { setSourceSql(e.target.value); setQueryStatus("idle"); }} /></Field>
                     <div className="lg:col-span-2">
                       <div className="flex flex-wrap items-center gap-2">
                         <button type="button" className="btn btn-outline btn-sm" onClick={testQuery} disabled={loading || !connectionId || !sourceSql.trim()}><Play size={14} />{loading ? "Testando..." : "Testar consulta"}</button>
@@ -217,8 +219,8 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
 
           {step === "mode" && (
             <div className="mt-5 grid gap-4 lg:grid-cols-2">
-              <button type="button" onClick={() => setMode("extract")} className={`rounded-box border p-4 text-left ${mode === "extract" ? "border-primary bg-primary/10" : "border-base-300 bg-base-100"}`}><DatabaseZap className="text-primary" size={22} /><h4 className="mt-3 font-semibold">Copiar para o Catworld</h4><p className="mt-1 text-sm text-base-content/60">Cria tabela(s) fisicas no dataset com o mesmo nome das tabelas Postgres selecionadas.</p></button>
-              <button type="button" onClick={() => setMode("live")} className={`rounded-box border p-4 text-left ${mode === "live" ? "border-primary bg-primary/10" : "border-base-300 bg-base-100"}`}><Cable className="text-primary" size={22} /><h4 className="mt-3 font-semibold">Consultar direto no Postgres</h4><p className="mt-1 text-sm text-base-content/60">Nao copia dados. Cada visualizacao consulta a origem.</p></button>
+              <button type="button" onClick={() => setMode("extract")} className={`rounded-box border p-4 text-left ${mode === "extract" ? "border-primary bg-primary/10" : "border-base-300 bg-base-100"}`}><DatabaseZap className="text-primary" size={22} /><h4 className="mt-3 font-semibold">Copiar para o Catworld</h4><p className="mt-1 text-sm text-base-content/60">Cria tabela(s) fisicas no dataset com o mesmo nome das tabelas selecionadas.</p></button>
+              <button type="button" onClick={() => setMode("live")} className={`rounded-box border p-4 text-left ${mode === "live" ? "border-primary bg-primary/10" : "border-base-300 bg-base-100"}`}><Cable className="text-primary" size={22} /><h4 className="mt-3 font-semibold">Consultar direto no {providerLabel}</h4><p className="mt-1 text-sm text-base-content/60">Nao copia dados. Cada visualizacao consulta a origem.</p></button>
               <Field label="Atualizacao" hint={mode === "live" ? "Fontes ao vivo sempre consultam a origem na hora." : "Define quando o Catworld deve copiar os dados novamente."} wide><select disabled={mode === "live"} className="select w-full" value={refreshPolicy} onChange={(e) => setRefreshPolicy(e.target.value)}><option value="manual">Manual</option><option value="hourly">A cada hora</option><option value="daily">Diaria</option><option value="weekly">Semanal</option></select></Field>
             </div>
           )}
@@ -226,7 +228,7 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
           {step === "preview" && (
             <div className="mt-5 space-y-4">
               <div className="rounded-box border border-base-300 bg-base-200/40 p-4 text-sm"><strong>{modeLabel}</strong><span className="ml-2 text-base-content/60">{sourceKind === "table" ? `${selectedTables.length} tabela(s) de ${schema}` : queryName}</span></div>
-              {sourceKind === "table" ? <div className="max-h-72 overflow-auto rounded-box border border-base-300"><table className="table table-sm"><thead><tr><th>Tabela Postgres</th><th>Nome no Catworld</th></tr></thead><tbody>{selectedTables.map((t) => <tr key={t}><td className="font-mono text-xs">{schema}.{t}</td><td>{t}</td></tr>)}</tbody></table></div> : columns.length > 0 ? <div className="max-h-72 overflow-auto rounded-box border border-base-300"><table className="table table-sm"><thead><tr><th>Coluna na origem</th><th>Nome no Catworld</th><th>Tipo</th></tr></thead><tbody>{columns.map((c) => <tr key={c.sqlName}><td>{c.originalName}</td><td className="font-mono text-xs">{c.sqlName}</td><td>{c.sqlType}</td></tr>)}</tbody></table></div> : <div className="alert alert-warning alert-soft">Nenhuma coluna carregada. Volte e gere a previa novamente.</div>}
+              {sourceKind === "table" ? <div className="max-h-72 overflow-auto rounded-box border border-base-300"><table className="table table-sm"><thead><tr><th>Tabela {providerLabel}</th><th>Nome no Catworld</th></tr></thead><tbody>{selectedTables.map((t) => <tr key={t}><td className="font-mono text-xs">{schema}.{t}</td><td>{t}</td></tr>)}</tbody></table></div> : columns.length > 0 ? <div className="max-h-72 overflow-auto rounded-box border border-base-300"><table className="table table-sm"><thead><tr><th>Coluna na origem</th><th>Nome no Catworld</th><th>Tipo</th></tr></thead><tbody>{columns.map((c) => <tr key={c.sqlName}><td>{c.originalName}</td><td className="font-mono text-xs">{c.sqlName}</td><td>{c.sqlType}</td></tr>)}</tbody></table></div> : <div className="alert alert-warning alert-soft">Nenhuma coluna carregada. Volte e gere a previa novamente.</div>}
             </div>
           )}
 
