@@ -227,8 +227,8 @@ function tdsType(type: string): sql.ISqlType | (() => sql.ISqlType) {
 
 function convert(value: unknown, type: string) {
   if (value == null) return null;
-  if (type === "BIGINT") return Number(value);
-  if (type.startsWith("DECIMAL")) return Number(value);
+  if (type === "BIGINT") { const n = Number(value); return isFinite(n) ? n : null; }
+  if (type.startsWith("DECIMAL")) { const n = Number(value); return isFinite(n) ? n : null; }
   if (type === "DATE" || type === "DATETIME2") return value instanceof Date ? value : new Date(String(value));
   if (type === "TIME") return String(value);
   return typeof value === "object" ? JSON.stringify(value) : String(value);

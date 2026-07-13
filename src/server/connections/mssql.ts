@@ -116,9 +116,7 @@ export async function executeMssqlReadOnly(connection: MssqlConnection, query: s
     const req = pool.request();
     const started = Date.now();
     const clampedLimit = Math.min(Math.max(limit, 1), 10000);
-    const result = await req.query(
-      `SELECT * FROM (${statement}) cw_live_result ORDER BY (SELECT NULL) OFFSET ${Math.max(offset, 0)} ROWS FETCH NEXT ${clampedLimit + 1} ROWS ONLY`,
-    );
+    const result = await req.query(paginateMssql(statement, Math.max(offset, 0), clampedLimit + 1));
     const rows = result.recordset.slice(0, clampedLimit) as Record<string, unknown>[];
     const cols = result.recordset.columns as Record<string, { name: string }> | undefined;
     return {
@@ -133,6 +131,34 @@ export async function executeMssqlReadOnly(connection: MssqlConnection, query: s
   }
 }
 
+function paginateMssql(statement: string, offset: number, batchSize: number): string {
+  const trimmed = statement.trimStart();
+  if (/^with\b/i.test(trimmed)) {
+    // CTEs can't be used inside FROM (...) — inject a terminal CTE for pagination
+    const split = splitFinalSelect(trimmed);
+    if (split) {
+      const prefix = split.prefix.replace(/,\s*$/, "");
+      return `${prefix}, cw_page AS (${split.finalSelect}) SELECT * FROM cw_page ORDER BY (SELECT NULL) OFFSET ${offset} ROWS FETCH NEXT ${batchSize} ROWS ONLY`;
+    }
+  }
+  return `SELECT * FROM (${statement}) cw_extract_result ORDER BY (SELECT NULL) OFFSET ${offset} ROWS FETCH NEXT ${batchSize} ROWS ONLY`;
+}
+
+function splitFinalSelect(sql: string): { prefix: string; finalSelect: string } | null {
+  let depth = 0;
+  let lastTopSelect = -1;
+  for (let i = 0; i < sql.length; i++) {
+    const ch = sql[i];
+    if (ch === "(") depth++;
+    else if (ch === ")") depth--;
+    else if (depth === 0 && /^select\b/i.test(sql.slice(i)) && (i === 0 || /[\s,]/i.test(sql[i - 1]!))) {
+      lastTopSelect = i;
+    }
+  }
+  if (lastTopSelect === -1) return null;
+  return { prefix: sql.slice(0, lastTopSelect), finalSelect: sql.slice(lastTopSelect) };
+}
+
 export async function* streamMssqlRows(connection: MssqlConnection, query: string, batchSize = 1000): AsyncGenerator<Record<string, unknown>[]> {
   const statement = safeStatementMssql(query);
   const pool = new sql.ConnectionPool(config(connection));
@@ -140,9 +166,7 @@ export async function* streamMssqlRows(connection: MssqlConnection, query: strin
   try {
     let offset = 0;
     while (true) {
-      const result = await pool.request().query(
-        `SELECT * FROM (${statement}) cw_extract_result ORDER BY (SELECT NULL) OFFSET ${offset} ROWS FETCH NEXT ${batchSize} ROWS ONLY`,
-      );
+      const result = await pool.request().query(paginateMssql(statement, offset, batchSize));
       if (!result.recordset.length) break;
       yield result.recordset as Record<string, unknown>[];
       if (result.recordset.length < batchSize) break;
