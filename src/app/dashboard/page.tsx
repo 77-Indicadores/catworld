@@ -70,6 +70,7 @@ export default async function DashboardPage() {
   const avgSec = avgRows[0]?.avg_sec ?? 0;
   const dtu = dtuResult.recordset[0];
   const jobs = jobStatsRows[0] ?? { running_count: 0, queued_count: 0, completed_today: 0, failed_today: 0 };
+  const tableCount = projectsData.reduce((n, p) => n + p.datasets.reduce((m, d) => m + d.tables.length, 0), 0);
 
   return (
     <div className="space-y-6">
@@ -82,7 +83,7 @@ export default async function DashboardPage() {
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard label="Projetos" value={String(projectCount)} hint="projetos ativos" icon={<FolderKanban size={20} />} />
-        <StatCard label="Datasets" value={String(datasetCount)} hint="datasets ativos" icon={<Database size={20} />} />
+        <StatCard label="Datasets" value={String(datasetCount)} hint={`${tableCount} tabelas`} icon={<Database size={20} />} />
         <StatCard
           label="DTU médio"
           value={`${Math.round(dtu?.avg_dtu_pct ?? 0)} %`}
