@@ -10,6 +10,7 @@ type Source = {
   mode: string;
   refreshPolicy: string;
   keyColumn: string | null;
+  deltaColumn: string | null;
   sourceKind: string;
   sourceSql?: string | null;
   connection: { id: string; name: string };
@@ -21,6 +22,7 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
   const [mode, setMode] = useState(source.mode);
   const [policy, setPolicy] = useState(source.refreshPolicy);
   const [keyColumn, setKeyColumn] = useState(source.keyColumn ?? "");
+  const [deltaColumn, setDeltaColumn] = useState(source.deltaColumn ?? "");
   const [sql, setSql] = useState(source.sourceSql ?? "");
   const [sqlTested, setSqlTested] = useState(source.sourceSql ?? "");
   const [sqlStatus, setSqlStatus] = useState<"idle" | "ok" | "error">("ok");
@@ -34,6 +36,7 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
     setMode(source.mode);
     setPolicy(source.refreshPolicy);
     setKeyColumn(source.keyColumn ?? "");
+    setDeltaColumn(source.deltaColumn ?? "");
     setSql(source.sourceSql ?? "");
     setSqlTested(source.sourceSql ?? "");
     setSqlStatus("ok");
@@ -63,6 +66,7 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
       mode,
       refreshPolicy: mode === "live" ? "manual" : policy,
       keyColumn: keyColumn.trim() || null,
+      deltaColumn: deltaColumn.trim() || null,
     };
     if (source.sourceKind === "query") body.sourceSql = sql;
     const response = await fetch(`/api/v1/dataset-sources/${source.id}`, {
@@ -163,6 +167,22 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
                 />
                 <span className="label-text-alt mt-1 text-base-content/55">
                   Se definida, cada atualização faz upsert pela chave em vez de substituir a tabela inteira.
+                </span>
+              </label>
+            )}
+
+            {/* Delta column — only for extract table sources */}
+            {mode === "extract" && source.sourceKind === "table" && (
+              <label className="form-control w-full">
+                <span className="label-text font-medium">Coluna delta (incremental) <span className="font-normal text-base-content/50">(opcional)</span></span>
+                <input
+                  className="input mt-1 w-full font-mono text-sm"
+                  placeholder="ex: updated_at"
+                  value={deltaColumn}
+                  onChange={(e) => setDeltaColumn(e.target.value)}
+                />
+                <span className="label-text-alt mt-1 text-base-content/55">
+                  Requer coluna-chave. Cada carga busca apenas registros com valor maior que o último carregado.
                 </span>
               </label>
             )}

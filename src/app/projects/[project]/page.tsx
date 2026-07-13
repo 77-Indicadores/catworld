@@ -43,6 +43,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ projec
           sourceSql: t.source.sourceSql,
           refreshPolicy: t.source.refreshPolicy,
           keyColumn: t.source.keyColumn,
+          deltaColumn: t.source.deltaColumn,
           lastStatus: t.source.lastStatus,
           lastRowCount: t.source.lastRowCount ? String(t.source.lastRowCount) : null,
           lastError: t.source.lastError,

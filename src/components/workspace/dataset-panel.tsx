@@ -13,7 +13,7 @@ type Source = {
   id: string; name: string; mode: string; sourceKind: string;
   sourceGroupId: string | null;
   sourceSchema: string | null; sourceTable: string | null; sourceSql: string | null;
-  refreshPolicy: string; keyColumn: string | null; active: boolean;
+  refreshPolicy: string; keyColumn: string | null; deltaColumn: string | null; active: boolean;
   lastStatus: string | null; lastRowCount: string | null; lastError: string | null;
   lastRefreshedAt: string | null; nextRefreshAt: string | null;
   connection: { id: string; name: string };

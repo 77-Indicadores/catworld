@@ -138,9 +138,16 @@ export async function refreshDatasetSource(datasetSourceId: string) {
   if (!source.targetTable) throw new ApiError(400, "SOURCE_NO_TARGET_TABLE", "Fonte sem tabela de destino");
 
   const isMssql = source.connection.provider === "mssql";
-  const query = source.sourceKind === "table"
+
+  // Delta: only fetch rows newer than lastDeltaValue (table sources only, requires keyColumn for upsert)
+  const useDelta = !!(source.deltaColumn && source.lastDeltaValue && source.keyColumn && source.sourceKind === "table");
+  const baseTableQuery = source.sourceKind === "table"
     ? `SELECT * FROM ${isMssql ? quotedMssqlTable(source.sourceSchema!, source.sourceTable!) : quotedPgTable(source.sourceSchema!, source.sourceTable!)}`
     : source.sourceSql!;
+  const query = useDelta
+    ? `${baseTableQuery} WHERE ${quoteIdentifier(source.deltaColumn!)} > '${source.lastDeltaValue!.replace(/'/g, "''")}'`
+    : baseTableQuery;
+
   const columns = source.sourceKind === "table"
     ? (isMssql ? await tableColumnsMssql(source.connection, source.sourceSchema!, source.sourceTable!) : await tableColumns(source.connection, source.sourceSchema!, source.sourceTable!))
     : (isMssql ? await queryColumnsMssql(source.connection, source.sourceSql!) : await queryColumns(source.connection, source.sourceSql!));
@@ -183,6 +190,15 @@ export async function refreshDatasetSource(datasetSourceId: string) {
       await tx.rollback().catch(() => undefined);
       throw e;
     }
+    // Capture new delta value from staging before it's swapped/dropped
+    let newDeltaValue: string | null | undefined = undefined;
+    if (source.deltaColumn && source.sourceKind === "table" && source.keyColumn) {
+      const col = quoteIdentifier(source.deltaColumn);
+      const res = await pool.request().query(`SELECT MAX(${col}) AS v FROM ${staging}`);
+      const v = res.recordset[0]?.v;
+      if (v != null) newDeltaValue = v instanceof Date ? v.toISOString() : String(v);
+    }
+
     await replaceColumnCatalog(source.targetTable.id, columns, rowCount);
     await prisma.datasetSource.update({
       where: { id: source.id },
@@ -192,6 +208,7 @@ export async function refreshDatasetSource(datasetSourceId: string) {
         lastError: null,
         lastRefreshedAt: new Date(),
         nextRefreshAt: nextRefresh(source.refreshPolicy),
+        ...(newDeltaValue !== undefined ? { lastDeltaValue: newDeltaValue } : {}),
       },
     });
     return { rowCount };

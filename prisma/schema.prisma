@@ -180,6 +180,8 @@ model DatasetSource {
   sourceSql       String?       @map("source_sql") @db.NVarChar(Max)
   refreshPolicy   String        @default("manual") @map("refresh_policy") @db.VarChar(20)
   keyColumn       String?       @map("key_column") @db.VarChar(128)
+  deltaColumn     String?       @map("delta_column") @db.VarChar(128)
+  lastDeltaValue  String?       @map("last_delta_value") @db.NVarChar(Max)
   lastStatus      String?       @map("last_status") @db.VarChar(32)
   lastRowCount    BigInt?       @map("last_row_count")
   lastError       String?       @map("last_error") @db.NVarChar(Max)
