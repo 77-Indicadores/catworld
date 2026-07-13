@@ -263,12 +263,23 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
       // Write clean blob → BULK INSERT directly into target (no staging, no INSERT SELECT).
       // IX__cw_rh index on target acts as completion sentinel for retry idempotency
       // (created AFTER INSERT succeeds, so its presence = INSERT completed).
-      const idxRes = await pool.request().query(
-        `SELECT COUNT(*) n FROM sys.indexes
-         WHERE object_id=OBJECT_ID(N'${schema}.${tableName}',N'U') AND name=N'IX__cw_rh'`,
-      );
-      if (Number(idxRes.recordset[0].n) > 0) {
-        // Idempotent: OPENROWSET INSERT + index already completed in a prior attempt
+      // Idempotency: IX__cw_rh on target was created by THIS upload's INSERT (after the insert,
+      // before metadata commit). Verify with the clean blob: if the clean blob for this uploadId
+      // still exists AND the index is already on the target, this is a genuine retry.
+      // If the index exists but the blob is gone → a PREVIOUS upload created the index; don't skip.
+      const cleanBlobName = `bulkimport/${uploadId}.csv`;
+      const { BlobServiceClient: _BlobSvc } = await import("@azure/storage-blob");
+      const _benv = (() => { const e = env(); const connStr = e.CATWORLD_AZURE_BLOB_CONNECTION_STRING!; return { connStr, container: e.CATWORLD_AZURE_BLOB_CONTAINER }; })();
+      const _cleanClient = _BlobSvc.fromConnectionString(_benv.connStr).getContainerClient(_benv.container).getBlockBlobClient(cleanBlobName);
+      const [idxRes, cleanBlobExists] = await Promise.all([
+        pool.request().query(
+          `SELECT COUNT(*) n FROM sys.indexes
+           WHERE object_id=OBJECT_ID(N'${schema}.${tableName}',N'U') AND name=N'IX__cw_rh'`,
+        ),
+        _cleanClient.exists(),
+      ]);
+      if (Number(idxRes.recordset[0].n) > 0 && cleanBlobExists) {
+        // Idempotent: INSERT + index completed in a prior attempt for THIS upload (clean blob still pending deletion)
         const cntRes = await pool.request().query(`SELECT COUNT_BIG(*) n FROM ${target}`);
         total = Number(cntRes.recordset[0].n);
         inserted = total;
@@ -288,7 +299,6 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
           `CREATE TABLE ${target} (${typedColumnDefs(mapping)},[_cw_rh] CHAR(32) NULL)`,
         );
 
-        const cleanBlobName = `bulkimport/${uploadId}.csv`;
         try {
           const orResult = await bulkInsertFromBlob(
             uploadId, source, mapping, schema, tableName, opts, onProgress, false, knownRowCount,

@@ -46,6 +46,22 @@ async function localFile(upload: { blobName: string; originalFilename: string })
   return { dir, path: converted };
 }
 
+// Downloads from originals/ (falling back to blobName) to a temp file so the import
+// uses the DuckDB server-side path — same parser as the client-side preview.
+async function localOriginals(upload: { id: string; blobName: string; originalFilename: string }) {
+  const ext = extname(upload.originalFilename).toLowerCase();
+  const dir = await mkdtemp(join(tmpdir(), "catworld-"));
+  const path = join(dir, basename(upload.originalFilename));
+  let stream: NodeJS.ReadableStream;
+  try {
+    stream = await downloadFile(`originals/${upload.id}${ext}`);
+  } catch {
+    stream = await downloadFile(upload.blobName);
+  }
+  await pipeline(stream, createWriteStream(path));
+  return { dir, path };
+}
+
 async function convertLegacy(path: string, dir: string) {
   await new Promise<void>((resolve, reject) => {
     const child = spawn("soffice", ["--headless", "--convert-to", "xlsx", "--outdir", dir, path], { stdio: "ignore" });
@@ -113,26 +129,13 @@ async function work(job: Claimed) {
       }
     } else if (job.type === "IMPORT_UPLOAD") {
       await prisma.upload.update({ where: { id: upload.id }, data: { status: "IMPORTING", progress: 35 } });
-      const ext = extname(upload.originalFilename).toLowerCase();
-      const useStream = !!env().CATWORLD_AZURE_BLOB_CONNECTION_STRING && ext !== ".xls";
-
-      if (useStream) {
-        // Use originals/ copy (made at upload time, no lifecycle TTL) — fall back to blobName if missing
-        let stream: NodeJS.ReadableStream;
-        try {
-          stream = await downloadFile(`originals/${upload.id}${ext}`);
-        } catch {
-          stream = await downloadFile(upload.blobName);
-        }
-        await importUpload(upload.id, stream);
-      } else {
-        // Local storage or XLS: download to disk first
-        const file = await localFile(upload);
-        try {
-          await importUpload(upload.id, file.path);
-        } finally {
-          await rm(file.dir, { recursive: true, force: true });
-        }
+      // Always download to disk so rowsFromFile uses DuckDB server-side (same parser as client preview).
+      // This prevents csv-parse quote-handling discrepancies from dropping rows at end of file.
+      const file = await localOriginals(upload);
+      try {
+        await importUpload(upload.id, file.path);
+      } finally {
+        await rm(file.dir, { recursive: true, force: true });
       }
     } else {
       throw new Error(`Tipo de job desconhecido: ${job.type}`);

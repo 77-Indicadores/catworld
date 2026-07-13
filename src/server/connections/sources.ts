@@ -168,6 +168,15 @@ export async function refreshDatasetSource(datasetSourceId: string) {
       await bulkInsertRows(pool, schema, stage, columns, rows);
       rowCount += BigInt(rows.length);
     }
+    // Capture new delta value BEFORE the transaction swaps/drops staging
+    let newDeltaValue: string | null | undefined = undefined;
+    if (source.deltaColumn && source.sourceKind === "table" && source.keyColumn) {
+      const col = quoteIdentifier(source.deltaColumn);
+      const res = await pool.request().query(`SELECT MAX(${col}) AS v FROM ${staging}`);
+      const v = res.recordset[0]?.v;
+      if (v != null) newDeltaValue = v instanceof Date ? v.toISOString() : String(v);
+    }
+
     const tx = new sql.Transaction(pool);
     await tx.begin();
     try {
@@ -190,14 +199,6 @@ export async function refreshDatasetSource(datasetSourceId: string) {
     } catch (e) {
       await tx.rollback().catch(() => undefined);
       throw e;
-    }
-    // Capture new delta value from staging before it's swapped/dropped
-    let newDeltaValue: string | null | undefined = undefined;
-    if (source.deltaColumn && source.sourceKind === "table" && source.keyColumn) {
-      const col = quoteIdentifier(source.deltaColumn);
-      const res = await pool.request().query(`SELECT MAX(${col}) AS v FROM ${staging}`);
-      const v = res.recordset[0]?.v;
-      if (v != null) newDeltaValue = v instanceof Date ? v.toISOString() : String(v);
     }
 
     await replaceColumnCatalog(source.targetTable.id, columns, rowCount);

@@ -86,9 +86,12 @@ export async function previewFileInBrowser(file: File): Promise<FilePreviewResul
       const conn = await db.connect();
 
       try {
-        // Auto-detect CSV dialect and get schema
+        // Auto-detect CSV dialect and get schema.
+        // null_padding=true matches csv-parse's relax_column_count behavior (short rows padded, not rejected).
+        // No ignore_errors — we want the same row count as the server-side csv-parse import.
+        const csvOpts = `sample_size=2000, null_padding=true`;
         const descResult = await conn.query(
-          `DESCRIBE SELECT * FROM read_csv_auto(${JSON.stringify(file.name)}, sample_size=2000, ignore_errors=true)`,
+          `DESCRIBE SELECT * FROM read_csv_auto(${JSON.stringify(file.name)}, ${csvOpts})`,
         );
         const descRows = descResult.toArray().map((r) => r.toJSON() as { column_name: string; column_type: string });
 
@@ -112,10 +115,10 @@ export async function previewFileInBrowser(file: File): Promise<FilePreviewResul
         // Get sample rows (up to 20) and row count
         const [sampleResult, countResult] = await Promise.all([
           conn.query(
-            `SELECT * FROM read_csv_auto(${JSON.stringify(file.name)}, sample_size=2000, ignore_errors=true) LIMIT 20`,
+            `SELECT * FROM read_csv_auto(${JSON.stringify(file.name)}, ${csvOpts}) LIMIT 20`,
           ),
           conn.query(
-            `SELECT COUNT(*) AS n FROM read_csv_auto(${JSON.stringify(file.name)}, sample_size=2000, ignore_errors=true)`,
+            `SELECT COUNT(*) AS n FROM read_csv_auto(${JSON.stringify(file.name)}, ${csvOpts})`,
           ),
         ]);
 
