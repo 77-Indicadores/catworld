@@ -261,76 +261,54 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
     if (canUseOpenrowset) {
       // ── Direct BULK INSERT to target ───────────────────────────────────────────
       // Write clean blob → BULK INSERT directly into target (no staging, no INSERT SELECT).
-      // IX__cw_rh index on target acts as completion sentinel for retry idempotency
-      // (created AFTER INSERT succeeds, so its presence = INSERT completed).
-      // Idempotency: IX__cw_rh on target was created by THIS upload's INSERT (after the insert,
-      // before metadata commit). Verify with the clean blob: if the clean blob for this uploadId
-      // still exists AND the index is already on the target, this is a genuine retry.
-      // If the index exists but the blob is gone → a PREVIOUS upload created the index; don't skip.
       const cleanBlobName = `bulkimport/${uploadId}.csv`;
-      const { BlobServiceClient: _BlobSvc } = await import("@azure/storage-blob");
-      const _benv = (() => { const e = env(); const connStr = e.CATWORLD_AZURE_BLOB_CONNECTION_STRING!; return { connStr, container: e.CATWORLD_AZURE_BLOB_CONTAINER }; })();
-      const _cleanClient = _BlobSvc.fromConnectionString(_benv.connStr).getContainerClient(_benv.container).getBlockBlobClient(cleanBlobName);
-      const [idxRes, cleanBlobExists] = await Promise.all([
-        pool.request().query(
-          `SELECT COUNT(*) n FROM sys.indexes
-           WHERE object_id=OBJECT_ID(N'${schema}.${tableName}',N'U') AND name=N'IX__cw_rh'`,
-        ),
-        _cleanClient.exists(),
-      ]);
-      if (Number(idxRes.recordset[0].n) > 0 && cleanBlobExists) {
-        // Idempotent: INSERT + index completed in a prior attempt for THIS upload (clean blob still pending deletion)
-        const cntRes = await pool.request().query(`SELECT COUNT_BIG(*) n FROM ${target}`);
-        total = Number(cntRes.recordset[0].n);
-        inserted = total;
-        actual = BigInt(total);
-        phaseTimings.importMethod = "direct-bulk-idempotent";
-      } else {
-        // Prepare target: DROP if exists (handles schema mismatch and partial prior attempt)
-        const targetNowExists = Number(
-          (await pool.request().query(
-            `SELECT CASE WHEN OBJECT_ID(N'${schema}.${tableName}',N'U') IS NULL THEN 0 ELSE 1 END n`,
-          )).recordset[0].n,
-        ) === 1;
-        if (targetNowExists) {
-          await pool.request().query(`DROP TABLE ${target}`);
-        }
-        await pool.request().query(
-          `CREATE TABLE ${target} (${typedColumnDefs(mapping)},[_cw_rh] CHAR(32) NULL)`,
-        );
+      await deleteBulkCleanBlob(cleanBlobName);
 
-        try {
-          const orResult = await bulkInsertFromBlob(
-            uploadId, source, mapping, schema, tableName, opts, onProgress, false, knownRowCount,
-          );
-          total = orResult.total;
-          inserted = total;
-          phaseTimings.importMethod = "direct-bulk";
-          phaseTimings.bulkBlob = orResult;
-          let cleanBlobDeleted = false;
-          deleteCleanBlob = async () => {
-            if (cleanBlobDeleted || !env().CATWORLD_AZURE_BLOB_CONNECTION_STRING) return;
-            cleanBlobDeleted = true;
-            const { BlobServiceClient } = await import("@azure/storage-blob");
-            const { env: getEnv } = await import("@/server/env");
-            const eBlob = getEnv();
-            BlobServiceClient.fromConnectionString(eBlob.CATWORLD_AZURE_BLOB_CONNECTION_STRING!)
-              .getContainerClient(eBlob.CATWORLD_AZURE_BLOB_CONTAINER)
-              .getBlockBlobClient(orResult.cleanBlobName).delete().catch(() => {});
-          };
-        } catch (orError) {
-          await deleteBulkCleanBlob(cleanBlobName);
-          throw orError;
-        }
-
-        // CREATE INDEX after INSERT: completion sentinel for retry idempotency
-        await pool.request().query(`CREATE INDEX [IX__cw_rh] ON ${target} ([_cw_rh])`);
-
-        const countStr = (await pool.request().query(
-          `SELECT COUNT_BIG(*) count FROM ${target}`,
-        )).recordset[0].count as string;
-        actual = BigInt(countStr);
+      // Prepare target: DROP if exists (handles schema mismatch and partial prior attempt).
+      // Do not skip this for idempotency: IX__cw_rh belongs to the previous table
+      // contents, so it is not proof that this upload was imported.
+      const targetNowExists = Number(
+        (await pool.request().query(
+          `SELECT CASE WHEN OBJECT_ID(N'${schema}.${tableName}',N'U') IS NULL THEN 0 ELSE 1 END n`,
+        )).recordset[0].n,
+      ) === 1;
+      if (targetNowExists) {
+        await pool.request().query(`DROP TABLE ${target}`);
       }
+      await pool.request().query(
+        `CREATE TABLE ${target} (${typedColumnDefs(mapping)},[_cw_rh] CHAR(32) NULL)`,
+      );
+
+      try {
+        const orResult = await bulkInsertFromBlob(
+          uploadId, source, mapping, schema, tableName, opts, onProgress, false, knownRowCount,
+        );
+        total = orResult.total;
+        inserted = total;
+        phaseTimings.importMethod = "direct-bulk";
+        phaseTimings.bulkBlob = orResult;
+        let cleanBlobDeleted = false;
+        deleteCleanBlob = async () => {
+          if (cleanBlobDeleted || !env().CATWORLD_AZURE_BLOB_CONNECTION_STRING) return;
+          cleanBlobDeleted = true;
+          const { BlobServiceClient } = await import("@azure/storage-blob");
+          const { env: getEnv } = await import("@/server/env");
+          const eBlob = getEnv();
+          BlobServiceClient.fromConnectionString(eBlob.CATWORLD_AZURE_BLOB_CONNECTION_STRING!)
+            .getContainerClient(eBlob.CATWORLD_AZURE_BLOB_CONTAINER)
+            .getBlockBlobClient(orResult.cleanBlobName).delete().catch(() => {});
+        };
+      } catch (orError) {
+        await deleteBulkCleanBlob(cleanBlobName);
+        throw orError;
+      }
+
+      await pool.request().query(`CREATE INDEX [IX__cw_rh] ON ${target} ([_cw_rh])`);
+
+      const countStr = (await pool.request().query(
+        `SELECT COUNT_BIG(*) count FROM ${target}`,
+      )).recordset[0].count as string;
+      actual = BigInt(countStr);
     } else {
       // ── Staging path (delta replace, TDS, append, upsert, phase2) ─────────────
       const destTable = stage;
