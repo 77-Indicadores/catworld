@@ -37,6 +37,9 @@
   ],
   "exclude": [
     "node_modules",
+    "scripts/**/*.ts",
+    "scripts/**/*.mts",
+    "scripts/**/*.cts",
     "test-upload.ts",
     "reset-pw.ts"
   ]
