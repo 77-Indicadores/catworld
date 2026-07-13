@@ -97,7 +97,16 @@ export default async function DashboardPage() {
         />
       </div>
 
-      <div className="grid gap-6 xl:grid-cols-2">
+      <Panel title="Fila de carga" action={<Link href="/uploads" className="text-xs text-primary hover:underline">Ver uploads</Link>}>
+        <div className="grid grid-cols-2 divide-x divide-y divide-base-300 sm:grid-cols-4 sm:divide-y-0">
+          <JobStat label="Em execução" value={Number(jobs.running_count)} color="text-info" />
+          <JobStat label="Na fila" value={Number(jobs.queued_count)} color="text-warning" />
+          <JobStat label="Concluídos hoje" value={Number(jobs.completed_today)} color="text-success" />
+          <JobStat label="Com falha hoje" value={Number(jobs.failed_today)} color="text-error" />
+        </div>
+      </Panel>
+
+      <div className="grid gap-6">
         <Panel title="Atualização dos projetos">
           <div className="divide-y divide-base-300">
             {projectsData.length === 0 && (
@@ -169,14 +178,6 @@ export default async function DashboardPage() {
           </div>
         </Panel>
 
-        <Panel title="Fila de carga" action={<Link href="/uploads" className="text-xs text-primary hover:underline">Ver uploads</Link>}>
-          <div className="grid grid-cols-2 divide-x divide-y divide-base-300">
-            <JobStat label="Em execução" value={Number(jobs.running_count)} color="text-info" />
-            <JobStat label="Na fila" value={Number(jobs.queued_count)} color="text-warning" />
-            <JobStat label="Concluídos hoje" value={Number(jobs.completed_today)} color="text-success" />
-            <JobStat label="Com falha hoje" value={Number(jobs.failed_today)} color="text-error" />
-          </div>
-        </Panel>
       </div>
     </div>
   );
