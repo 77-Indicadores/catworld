@@ -111,10 +111,16 @@ export function UploadCard({ upload, importSummary }: { upload: UploadWithDatase
           <span>{MODE_LABELS[upload.mode] ?? upload.mode}</span>
           <span>·</span>
           <span>{fmtBytes(upload.sizeBytes)}</span>
-          {upload.insertedCount != null && (
+          {upload.rowCount != null && (
             <>
               <span>·</span>
-              <span>{Number(upload.insertedCount).toLocaleString("pt-BR")} linhas</span>
+              <span>{Number(upload.rowCount).toLocaleString("pt-BR")} linhas</span>
+            </>
+          )}
+          {upload.insertedCount != null && Number(upload.insertedCount) > 0 && Number(upload.insertedCount) !== Number(upload.rowCount) && (
+            <>
+              <span>·</span>
+              <span>+{Number(upload.insertedCount).toLocaleString("pt-BR")} novas</span>
             </>
           )}
           {upload.updatedCount != null && Number(upload.updatedCount) > 0 && (
