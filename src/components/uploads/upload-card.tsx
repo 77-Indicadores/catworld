@@ -169,20 +169,6 @@ export function UploadCard({ upload, importSummary }: { upload: UploadWithDatase
               </span>
             </>
           )}
-          {(() => {
-            const { parsedRows, physicalRows, importMethod } = importSummary ?? {};
-            const isFullReplace = importMethod && !["idempotent-retry"].includes(importMethod) && upload.mode === "replace" && Number(upload.insertedCount ?? 0) === Number(upload.rowCount ?? 0);
-            if (!isFullReplace || parsedRows == null || physicalRows == null) return null;
-            if (parsedRows === physicalRows) return null;
-            return (
-              <>
-                <span>·</span>
-                <span className="text-warning font-medium" title={`Arquivo: ${parsedRows.toLocaleString("pt-BR")} linhas — tabela física: ${physicalRows.toLocaleString("pt-BR")} linhas`}>
-                  ⚠ divergência: arquivo {parsedRows.toLocaleString("pt-BR")} → tabela {physicalRows.toLocaleString("pt-BR")}
-                </span>
-              </>
-            );
-          })()}
         </div>
 
         {upload.status === "FAILED" && upload.errorMessage && (
