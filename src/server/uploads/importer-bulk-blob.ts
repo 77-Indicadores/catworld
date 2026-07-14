@@ -296,7 +296,10 @@ export async function bulkInsertFromBlob(
  * Eliminates the staging table entirely for full-replace operations —
  * one log write pass instead of two (BULK INSERT staging + INSERT SELECT target).
  */
-export async function openrowsetInsertFromBlob(
+// openrowsetInsertFromBlob removed — it did TRUNCATE on the production table on retry (BUG5).
+// The direct-bulk path in importer.ts now uses a temp-table+sp_rename pattern instead.
+// Dead code kept here for reference only; do not re-export without fixing the retry logic.
+async function _openrowsetInsertFromBlob_DELETED(
   uploadId: string,
   source: string | NodeJS.ReadableStream,
   mapping: ParsedColumn[],

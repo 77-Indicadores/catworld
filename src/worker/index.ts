@@ -101,6 +101,20 @@ async function work(job: Claimed) {
     return;
   }
 
+  // BUG6-fix: if recoverStale re-queued a stale job while the original worker is still
+  // running, two workers may claim the same upload concurrently. Guard by checking that
+  // no OTHER RUNNING job for this upload exists (besides the one we just claimed).
+  if (job.type === "IMPORT_UPLOAD" && upload.status === "IMPORTING") {
+    const otherRunning = await prisma.job.findFirst({
+      where: { uploadId: job.upload_id, status: "RUNNING", id: { not: job.id } },
+    });
+    if (otherRunning) {
+      console.warn(`[worker] upload ${upload.id} já está sendo processado por outro job ${otherRunning.id}, pulando`);
+      await prisma.job.update({ where: { id: job.id }, data: { status: "COMPLETED", lockedAt: null, lockedBy: null, heartbeatAt: null, lastError: null } });
+      return;
+    }
+  }
+
   const heartbeat = setInterval(
     () => prisma.job.update({ where: { id: job.id }, data: { heartbeatAt: new Date() } }).catch(
       (e) => console.warn("[heartbeat] falhou job=%s: %s", job.id, e instanceof Error ? e.message : e)

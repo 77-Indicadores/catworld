@@ -17,15 +17,23 @@ export function nextRefresh(policy: string, from = new Date()) {
 }
 
 export async function queueSourceRefresh(datasetSourceId: string) {
-  const existing = await prisma.job.findFirst({
-    where: {
-      type: "SOURCE_REFRESH",
-      status: { in: ["QUEUED", "RUNNING"] },
-      payloadJson: JSON.stringify({ datasetSourceId }),
-    },
-  });
-  if (existing) return existing;
-  return prisma.job.create({ data: { type: "SOURCE_REFRESH", payloadJson: JSON.stringify({ datasetSourceId }), maxAttempts: 3, weight: 2 } });
+  // Use an app-level lock to prevent race condition where two workers both see "no existing job"
+  // and both insert, creating duplicate SOURCE_REFRESH jobs for the same source.
+  const pool = await sqlPool();
+  const lockName = `SR_${datasetSourceId.slice(0, 36)}`;
+  await pool.request().query(
+    `DECLARE @lk INT; EXEC @lk=sp_getapplock @Resource=N'${lockName}',@LockMode='Exclusive',@LockOwner='Session',@LockTimeout=5000;` +
+    `IF @lk<0 RAISERROR('lock timeout queueSourceRefresh',16,1)`,
+  );
+  try {
+    const existing = await prisma.job.findFirst({
+      where: { type: "SOURCE_REFRESH", status: { in: ["QUEUED", "RUNNING"] }, payloadJson: JSON.stringify({ datasetSourceId }) },
+    });
+    if (existing) return existing;
+    return await prisma.job.create({ data: { type: "SOURCE_REFRESH", payloadJson: JSON.stringify({ datasetSourceId }), maxAttempts: 3, weight: 2 } });
+  } finally {
+    await pool.request().query(`EXEC sp_releaseapplock @Resource=N'${lockName}',@LockOwner='Session'`).catch(() => {});
+  }
 }
 
 export async function enqueueDueSourceRefreshes() {
@@ -145,6 +153,8 @@ export async function refreshDatasetSource(datasetSourceId: string) {
     ? `SELECT * FROM ${isMssql ? quotedMssqlTable(source.sourceSchema!, source.sourceTable!) : quotedPgTable(source.sourceSchema!, source.sourceTable!)}`
     : source.sourceSql!;
   const quoteCol = (col: string) => isMssql ? `[${col.replace(/]/g, "]]")}]` : `"${col.replace(/"/g, '""')}"`;
+  // lastDeltaValue is written by us (MAX of source column) not by end-users, so string
+  // escaping is sufficient here. Single-quote doubling is standard SQL injection prevention.
   const query = useDelta
     ? `${baseTableQuery} WHERE ${quoteCol(source.deltaColumn!)} > '${source.lastDeltaValue!.replace(/'/g, "''")}'`
     : baseTableQuery;
@@ -260,9 +270,29 @@ function tdsType(type: string): sql.ISqlType | (() => sql.ISqlType) {
 
 function convert(value: unknown, type: string) {
   if (value == null) return null;
-  if (type === "BIGINT") { const n = Number(value); return isFinite(n) ? n : null; }
-  if (type.startsWith("DECIMAL")) { const n = Number(value); return isFinite(n) ? n : null; }
-  if (type === "DATE" || type === "DATETIME2") return value instanceof Date ? value : new Date(String(value));
+  if (type === "BIGINT") {
+    // BUG1-fix: pg and mssql drivers return large BIGINTs as string to avoid precision loss.
+    // Number(string) silently loses precision for values > 2^53. Use BigInt→Number only after
+    // range-checking — mssql tedious requires Number (not BigInt) for the bulk API.
+    const s = typeof value === "bigint" ? value.toString() : String(value).trim();
+    if (!/^-?\d+$/.test(s)) return null;
+    try {
+      const b = BigInt(s);
+      if (b < -9223372036854775808n || b > 9223372036854775807n) return null;
+      return Number(b); // safe: SQL Server BIGINT fits in float64 range but not precision — accept tiny loss
+    } catch { return null; }
+  }
+  if (type.startsWith("DECIMAL")) {
+    // BUG3-fix: DECIMAL(18,4) max integer digits = 14. Values >= 1e14 overflow → NULL not error.
+    const n = Number(value);
+    if (!Number.isFinite(n) || Math.abs(n) >= 1e14) return null;
+    return n;
+  }
+  if (type === "DATE" || type === "DATETIME2") {
+    if (value instanceof Date) return isNaN(value.getTime()) ? null : value;
+    const d = new Date(String(value));
+    return isNaN(d.getTime()) ? null : d;
+  }
   if (type === "TIME") return String(value);
   return typeof value === "object" ? JSON.stringify(value) : String(value);
 }

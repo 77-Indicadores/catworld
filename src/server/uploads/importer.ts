@@ -227,7 +227,19 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
 
   // ── Idempotency: if staging already exists and has rows, skip data loading ──
   // This handles retries where the staging was populated but the transaction failed.
-  const stagingHasData = await checkStagingHasData(pool, schema, stage);
+  // BUG2-fix: if staging row count < knownRowCount (for full replace), it means the staging is
+  // incomplete from a mid-stream crash — drop it and re-import from scratch. Trusting a partial
+  // staging would mark the upload COMPLETED with fewer rows than the file actually contains.
+  const stagingRowCount = await checkStagingHasData(pool, schema, stage);
+  const isFullReplaceMode = (upload.mode === "replace" || !targetExists) && !deltaReplace && !phase2;
+  const stagingIsPartial = stagingRowCount > 0 && isFullReplaceMode && knownRowCount > 0 && stagingRowCount < knownRowCount;
+
+  if (stagingIsPartial) {
+    console.warn("[importUpload] staging parcial detectado (%d/%d linhas) — descartando e reimportando upload=%s", stagingRowCount, knownRowCount, uploadId);
+    await pool.request().query(`DROP TABLE ${staging}`).catch(() => {});
+  }
+
+  const stagingHasData = !stagingIsPartial && stagingRowCount > 0;
 
   if (!stagingHasData && !canUseOpenrowset) {
     await pool.request().query(
@@ -235,7 +247,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
        CREATE TABLE ${staging} (${colDefs})`,
     );
   } else if (stagingHasData) {
-    console.log("[importUpload] staging já populado, pulando carga (retry idempotente) upload=%s", uploadId);
+    console.log("[importUpload] staging já populado (%d linhas), pulando carga (retry idempotente) upload=%s", stagingRowCount, uploadId);
   }
 
   let total = 0, inserted = 0, updated = 0;
@@ -684,16 +696,16 @@ async function deleteBulkCleanBlob(cleanBlobName: string): Promise<void> {
   } catch { /* best-effort */ }
 }
 
-async function checkStagingHasData(pool: sql.ConnectionPool, schema: string, stage: string): Promise<boolean> {
+async function checkStagingHasData(pool: sql.ConnectionPool, schema: string, stage: string): Promise<number> {
   try {
     const r = await pool.request().query(
       `SELECT CASE WHEN OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL
-              THEN (SELECT COUNT(*) FROM ${quoteIdentifier(schema)}.${quoteIdentifier(stage)})
+              THEN (SELECT COUNT_BIG(*) FROM ${quoteIdentifier(schema)}.${quoteIdentifier(stage)})
               ELSE 0 END n`,
     );
-    return Number(r.recordset[0].n) > 0;
+    return Number(r.recordset[0].n);
   } catch {
-    return false;
+    return 0;
   }
 }
 
