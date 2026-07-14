@@ -8,6 +8,29 @@ import { fmtBytes, fmtRelative, fmtDuration } from "@/lib/fmt";
 
 type JobSummary = { lockedBy: string | null; status: string; weight: number; attempts: number; maxAttempts: number };
 type UploadWithDataset = Upload & { dataset: (Dataset & { project: Project }) | null; jobs: JobSummary[] };
+type ImportSummary = { importMethod?: string; previewRows?: number; parsedRows?: number; physicalRows?: number; totalImportMs?: number };
+
+const METHOD_LABELS: Record<string, string> = {
+  "direct-bulk":               "bulk direto",
+  "blob-bulk":                 "bulk blob",
+  "tds-small-csv":             "streaming",
+  "tds-primary":               "streaming",
+  "tds-fallback-after-truncation": "streaming*",
+  "tds-fallback-after-bulk-error": "streaming*",
+  "blob-bulk-after-tds-4815":  "bulk blob*",
+  "idempotent-retry":          "idempotente",
+};
+
+const METHOD_CLS: Record<string, string> = {
+  "direct-bulk":               "badge-accent",
+  "blob-bulk":                 "badge-accent",
+  "tds-small-csv":             "badge-ghost",
+  "tds-primary":               "badge-ghost",
+  "tds-fallback-after-truncation": "badge-warning",
+  "tds-fallback-after-bulk-error": "badge-warning",
+  "blob-bulk-after-tds-4815":  "badge-warning",
+  "idempotent-retry":          "badge-ghost",
+};
 
 const STATUS_CONFIG: Record<string, { cls: string; icon: React.ElementType; label: string }> = {
   COMPLETED:              { cls: "badge-success",  icon: CheckCircle2, label: "Concluído" },
@@ -28,7 +51,7 @@ const MODE_LABELS: Record<string, string> = {
 
 const CANCELLABLE = new Set(["PENDING_UPLOAD","QUEUED_PREVIEW","PREVIEWING","AWAITING_CONFIRMATION","QUEUED_IMPORT","IMPORTING","RETRYING"]);
 
-export function UploadCard({ upload }: { upload: UploadWithDataset }) {
+export function UploadCard({ upload, importSummary }: { upload: UploadWithDataset; importSummary?: ImportSummary }) {
   const router = useRouter();
   const [cancelling, setCancelling] = useState(false);
   const [retrying, setRetrying] = useState(false);
@@ -62,7 +85,7 @@ export function UploadCard({ upload }: { upload: UploadWithDataset }) {
 
   const job = upload.jobs[0] ?? null;
   const workerSlot = job?.lockedBy
-    ? job.lockedBy.replace(/^.+-(\d+)$/, "slot $1")
+    ? (job.lockedBy.match(/-(\d+)(?:@\S+)?$/) ?? [])[1] ? `slot ${(job.lockedBy.match(/-(\d+)(?:@\S+)?$/) ?? [])[1]}` : job.lockedBy
     : null;
   const ds = upload.dataset;
   const destination = ds
@@ -118,6 +141,25 @@ export function UploadCard({ upload }: { upload: UploadWithDataset }) {
             <>
               <span>·</span>
               <span title="Duração total">⏱ {fmtDuration(upload.updatedAt.getTime() - upload.createdAt.getTime())}</span>
+            </>
+          )}
+          {importSummary?.importMethod && (
+            <>
+              <span>·</span>
+              <span
+                className={`badge badge-xs ${METHOD_CLS[importSummary.importMethod] ?? "badge-ghost"}`}
+                title={`Método de importação: ${importSummary.importMethod}`}
+              >
+                {METHOD_LABELS[importSummary.importMethod] ?? importSummary.importMethod}
+              </span>
+            </>
+          )}
+          {importSummary?.previewRows != null && importSummary?.physicalRows != null && importSummary.previewRows !== importSummary.physicalRows && (
+            <>
+              <span>·</span>
+              <span className="text-warning" title={`preview=${importSummary.previewRows} → físico=${importSummary.physicalRows}`}>
+                ⚠ contagem diverge
+              </span>
             </>
           )}
         </div>

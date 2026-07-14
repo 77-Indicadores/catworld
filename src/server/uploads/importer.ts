@@ -259,29 +259,25 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
     };
 
     if (canUseOpenrowset) {
-      // ── Direct BULK INSERT to target ───────────────────────────────────────────
-      // Write clean blob → BULK INSERT directly into target (no staging, no INSERT SELECT).
+      // ── Direct BULK INSERT → temp table → atomic rename to target ─────────────
+      // SAFETY: BULK INSERT into a temp table first; only rename to production after
+      // verifying row count. This preserves old data if BULK INSERT fails mid-stream.
       const cleanBlobName = `bulkimport/${uploadId}.csv`;
       await deleteBulkCleanBlob(cleanBlobName);
 
-      // Prepare target: DROP if exists (handles schema mismatch and partial prior attempt).
-      // Do not skip this for idempotency: IX__cw_rh belongs to the previous table
-      // contents, so it is not proof that this upload was imported.
-      const targetNowExists = Number(
-        (await pool.request().query(
-          `SELECT CASE WHEN OBJECT_ID(N'${schema}.${tableName}',N'U') IS NULL THEN 0 ELSE 1 END n`,
-        )).recordset[0].n,
-      ) === 1;
-      if (targetNowExists) {
-        await pool.request().query(`DROP TABLE ${target}`);
-      }
+      // Temp table lives in the same schema, named by uploadId (idempotent across retries).
+      const directTmp = `cw_direct_${upload.id.replaceAll("-", "").slice(0, 20)}`;
+      const directTmpFull = `${quoteIdentifier(schema)}.${quoteIdentifier(directTmp)}`;
+
+      // Drop any leftover temp from a previous failed attempt, then create fresh.
       await pool.request().query(
-        `CREATE TABLE ${target} (${typedColumnDefs(mapping)},[_cw_rh] CHAR(32) NULL)`,
+        `IF OBJECT_ID(N'${schema}.${directTmp}',N'U') IS NOT NULL DROP TABLE ${directTmpFull};
+         CREATE TABLE ${directTmpFull} (${typedColumnDefs(mapping)},[_cw_rh] CHAR(32) NULL)`,
       );
 
       try {
         const orResult = await bulkInsertFromBlob(
-          uploadId, source, mapping, schema, tableName, opts, onProgress, false, knownRowCount,
+          uploadId, source, mapping, schema, directTmp, opts, onProgress, false, knownRowCount,
         );
         total = orResult.total;
         inserted = total;
@@ -299,16 +295,51 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
             .getBlockBlobClient(orResult.cleanBlobName).delete().catch(() => {});
         };
       } catch (orError) {
+        // BULK INSERT failed — clean up temp, old target is UNTOUCHED.
+        await pool.request().query(
+          `IF OBJECT_ID(N'${schema}.${directTmp}',N'U') IS NOT NULL DROP TABLE ${directTmpFull}`,
+        ).catch(() => {});
         await deleteBulkCleanBlob(cleanBlobName);
         throw orError;
       }
 
-      await pool.request().query(`CREATE INDEX [IX__cw_rh] ON ${target} ([_cw_rh])`);
+      await pool.request().query(`CREATE INDEX [IX__cw_rh] ON ${directTmpFull} ([_cw_rh])`);
 
+      // Integrity check BEFORE dropping the old target — row count must match parsed count.
       const countStr = (await pool.request().query(
-        `SELECT COUNT_BIG(*) count FROM ${target}`,
+        `SELECT COUNT_BIG(*) count FROM ${directTmpFull}`,
       )).recordset[0].count as string;
       actual = BigInt(countStr);
+
+      if (actual !== BigInt(total)) {
+        // Count mismatch — drop temp, old target is still intact.
+        await pool.request().query(
+          `IF OBJECT_ID(N'${schema}.${directTmp}',N'U') IS NOT NULL DROP TABLE ${directTmpFull}`,
+        ).catch(() => {});
+        throw new Error(
+          `[integrity] direct-bulk: arquivo produziu ${total} linhas mas tabela temporária tem ${actual.toString()} linhas. ` +
+          `Tabela original preservada. Upload marcado FAILED.`,
+        );
+      }
+
+      // Count verified — swap temp → target inside an explicit transaction so a crash
+      // between DROP and sp_rename rolls back and restores the old target automatically.
+      const swapTx = new sql.Transaction(pool);
+      await swapTx.begin();
+      try {
+        const swapReq = new sql.Request(swapTx);
+        await swapReq.query(
+          `IF OBJECT_ID(N'${schema}.${tableName}',N'U') IS NOT NULL DROP TABLE ${target}`,
+        );
+        await swapReq.query(`EXEC sp_rename '${schema}.${directTmp}', '${tableName}'`);
+        await swapTx.commit();
+      } catch (swapErr) {
+        await swapTx.rollback().catch(() => undefined);
+        await pool.request().query(
+          `IF OBJECT_ID(N'${schema}.${directTmp}',N'U') IS NOT NULL DROP TABLE ${directTmpFull}`,
+        ).catch(() => {});
+        throw swapErr;
+      }
     } else {
       // ── Staging path (delta replace, TDS, append, upsert, phase2) ─────────────
       const destTable = stage;

@@ -123,17 +123,38 @@ export default async function UploadsPage({
     prisma.upload.groupBy({ by: ["status"], _count: true }),
   ]);
 
-  // Round-trip 2: DatasetSources — depends on sourceJobs result from round-trip 1
-  const sourceIds = [...new Set(sourceJobs.map((j) => extractSourceId(j.payloadJson)).filter((id): id is string => !!id))];
-  const dataSources = sourceIds.length
-    ? await prisma.datasetSource.findMany({
-        where: {
-          id: { in: sourceIds },
-          ...(selectedProjectIds.length ? { dataset: { projectId: { in: selectedProjectIds } } } : {}),
-        },
-        select: { id: true, name: true, lastRowCount: true, lastRefreshedAt: true, nextRefreshAt: true, dataset: { select: { id: true, name: true, slug: true, project: { select: { id: true, name: true, slug: true } } } } },
-      })
-    : [] as DataSource[];
+  // Round-trip 2: DatasetSources + ImportPerf audit events — both depend on round-trip 1
+  const sourceIds   = [...new Set(sourceJobs.map((j) => extractSourceId(j.payloadJson)).filter((id): id is string => !!id))];
+  const uploadIds   = uploads.map((u) => u.id);
+
+  const [dataSources, importPerfEvents] = await Promise.all([
+    sourceIds.length
+      ? prisma.datasetSource.findMany({
+          where: {
+            id: { in: sourceIds },
+            ...(selectedProjectIds.length ? { dataset: { projectId: { in: selectedProjectIds } } } : {}),
+          },
+          select: { id: true, name: true, lastRowCount: true, lastRefreshedAt: true, nextRefreshAt: true, dataset: { select: { id: true, name: true, slug: true, project: { select: { id: true, name: true, slug: true } } } } },
+        })
+      : Promise.resolve([] as DataSource[]),
+    uploadIds.length
+      ? prisma.auditEvent.findMany({
+          where: { eventType: "UPLOAD_IMPORT_PERF", resourceId: { in: uploadIds } },
+          select: { resourceId: true, detailJson: true },
+        })
+      : Promise.resolve([] as { resourceId: string | null; detailJson: string | null }[]),
+  ]);
+
+  // Build Map<uploadId, ImportSummary>
+  type ImportSummary = { importMethod?: string; previewRows?: number; parsedRows?: number; physicalRows?: number; totalImportMs?: number };
+  const importSummaryMap = new Map<string, ImportSummary>();
+  for (const ev of importPerfEvents) {
+    if (!ev.resourceId || !ev.detailJson) continue;
+    try {
+      const d = JSON.parse(ev.detailJson) as ImportSummary;
+      importSummaryMap.set(ev.resourceId, { importMethod: d.importMethod, previewRows: d.previewRows, parsedRows: d.parsedRows, physicalRows: d.physicalRows, totalImportMs: d.totalImportMs });
+    } catch { /* ignore malformed JSON */ }
+  }
 
   const sourceMap = new Map(dataSources.map((s) => [s.id, s]));
   const parsedSourceJobs = buildSourceRefreshJobs(sourceJobs, sourceMap);
@@ -241,7 +262,7 @@ export default async function UploadsPage({
           <div className="divide-y divide-base-300">
             {allItems.map((item) =>
               item.kind === "upload"
-                ? <UploadCard key={item.key} upload={uploadMap.get(item.key)!} />
+                ? <UploadCard key={item.key} upload={uploadMap.get(item.key)!} importSummary={importSummaryMap.get(item.key)} />
                 : <SourceRefreshCard key={item.key} job={sourceJobMap.get(item.key)!} />,
             )}
           </div>
