@@ -38,7 +38,18 @@ if not TOKEN:
     print("ERRO: defina CATWORLD_TOKEN=<seu_token>"); sys.exit(1)
 if not DATASET_ID:
     print("ERRO: defina CATWORLD_DATASET_ID=<dataset_id>"); sys.exit(1)
-SCHEMA     = "d_tmk_construtora_ftp"
+
+# Resolve schema name dynamically from the dataset record
+_ds_resp = httpx.get(f"{BASE_URL}/api/v1/datasets", headers={"Authorization": f"Bearer {TOKEN}"}, timeout=10)
+_ds_resp.raise_for_status()
+_ds_list = _ds_resp.json()
+_ds_items = _ds_list.get("data", _ds_list) if isinstance(_ds_list, dict) else _ds_list
+_ds = next((d for d in _ds_items if d.get("id") == DATASET_ID), None)
+if not _ds:
+    print(f"ERRO: dataset {DATASET_ID} nao encontrado"); sys.exit(1)
+SCHEMA = _ds.get("schemaName", "")
+if not SCHEMA:
+    print(f"ERRO: dataset {DATASET_ID} nao tem schemaName"); sys.exit(1)
 
 POLL_INTERVAL = 4
 POLL_TIMEOUT  = 600

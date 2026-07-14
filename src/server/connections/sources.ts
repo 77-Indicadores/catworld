@@ -271,15 +271,14 @@ function tdsType(type: string): sql.ISqlType | (() => sql.ISqlType) {
 function convert(value: unknown, type: string) {
   if (value == null) return null;
   if (type === "BIGINT") {
-    // BUG1-fix: pg and mssql drivers return large BIGINTs as string to avoid precision loss.
-    // Number(string) silently loses precision for values > 2^53. Use BigInt→Number only after
-    // range-checking — mssql tedious requires Number (not BigInt) for the bulk API.
+    // Return native BigInt — tedious bulk API accepts it and preserves full 64-bit precision.
+    // Drivers return large BIGINTs as string to avoid float64 precision loss; handle both.
     const s = typeof value === "bigint" ? value.toString() : String(value).trim();
     if (!/^-?\d+$/.test(s)) return null;
     try {
       const b = BigInt(s);
       if (b < -9223372036854775808n || b > 9223372036854775807n) return null;
-      return Number(b); // safe: SQL Server BIGINT fits in float64 range but not precision — accept tiny loss
+      return b;
     } catch { return null; }
   }
   if (type.startsWith("DECIMAL")) {
