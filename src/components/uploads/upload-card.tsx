@@ -114,21 +114,30 @@ export function UploadCard({ upload, importSummary }: { upload: UploadWithDatase
           {upload.rowCount != null && (
             <>
               <span>·</span>
-              <span>{Number(upload.rowCount).toLocaleString("pt-BR")} linhas</span>
+              <span title="Total de linhas na tabela após o import">{Number(upload.rowCount).toLocaleString("pt-BR")} linhas</span>
             </>
           )}
-          {upload.insertedCount != null && Number(upload.insertedCount) > 0 && Number(upload.insertedCount) !== Number(upload.rowCount) && (
-            <>
-              <span>·</span>
-              <span>+{Number(upload.insertedCount).toLocaleString("pt-BR")} novas</span>
-            </>
-          )}
-          {upload.updatedCount != null && Number(upload.updatedCount) > 0 && (
-            <>
-              <span>·</span>
-              <span>{Number(upload.updatedCount).toLocaleString("pt-BR")} removidas</span>
-            </>
-          )}
+          {(() => {
+            const inserted = Number(upload.insertedCount ?? 0);
+            const removed  = Number(upload.updatedCount  ?? 0);
+            const total    = Number(upload.rowCount       ?? 0);
+            // Full replace: insertedCount == rowCount — não mostrar delta redundante
+            if (inserted === total && removed === 0) return null;
+            // Delta ou append: mostrar o que mudou
+            return (
+              <>
+                {inserted > 0 && (
+                  <><span>·</span><span title="Linhas novas inseridas nesta operação">+{inserted.toLocaleString("pt-BR")} novas</span></>
+                )}
+                {removed > 0 && (
+                  <><span>·</span><span title="Linhas removidas nesta operação">−{removed.toLocaleString("pt-BR")} removidas</span></>
+                )}
+                {inserted === 0 && removed === 0 && upload.mode === "replace" && (
+                  <><span>·</span><span className="text-base-content/40" title="Dados idênticos ao import anterior — nenhuma linha alterada">sem alterações</span></>
+                )}
+              </>
+            );
+          })()}
           <span>·</span>
           <span>{fmtRelative(upload.createdAt)}</span>
           {workerSlot && upload.status === "IMPORTING" && (
@@ -160,14 +169,20 @@ export function UploadCard({ upload, importSummary }: { upload: UploadWithDatase
               </span>
             </>
           )}
-          {importSummary?.previewRows != null && importSummary?.physicalRows != null && importSummary.previewRows !== importSummary.physicalRows && (
-            <>
-              <span>·</span>
-              <span className="text-warning" title={`preview=${importSummary.previewRows} → físico=${importSummary.physicalRows}`}>
-                ⚠ contagem diverge
-              </span>
-            </>
-          )}
+          {(() => {
+            const { parsedRows, physicalRows, importMethod } = importSummary ?? {};
+            const isFullReplace = importMethod && !["idempotent-retry"].includes(importMethod) && upload.mode === "replace" && Number(upload.insertedCount ?? 0) === Number(upload.rowCount ?? 0);
+            if (!isFullReplace || parsedRows == null || physicalRows == null) return null;
+            if (parsedRows === physicalRows) return null;
+            return (
+              <>
+                <span>·</span>
+                <span className="text-warning font-medium" title={`Arquivo: ${parsedRows.toLocaleString("pt-BR")} linhas — tabela física: ${physicalRows.toLocaleString("pt-BR")} linhas`}>
+                  ⚠ divergência: arquivo {parsedRows.toLocaleString("pt-BR")} → tabela {physicalRows.toLocaleString("pt-BR")}
+                </span>
+              </>
+            );
+          })()}
         </div>
 
         {upload.status === "FAILED" && upload.errorMessage && (
