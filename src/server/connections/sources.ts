@@ -30,8 +30,17 @@ export async function queueSourceRefresh(datasetSourceId: string) {
     const existing = await prisma.job.findFirst({
       where: { type: "SOURCE_REFRESH", status: { in: ["QUEUED", "RUNNING"] }, payloadJson: JSON.stringify({ datasetSourceId }) },
     });
-    if (existing) return existing;
-    return await prisma.job.create({ data: { type: "SOURCE_REFRESH", payloadJson: JSON.stringify({ datasetSourceId }), maxAttempts: 3, weight: 2 } });
+    if (existing) {
+      if (existing.status === "QUEUED") {
+        await prisma.datasetSource.update({ where: { id: datasetSourceId }, data: { lastStatus: "queued", lastError: null } });
+      }
+      return existing;
+    }
+    const [job] = await prisma.$transaction([
+      prisma.job.create({ data: { type: "SOURCE_REFRESH", payloadJson: JSON.stringify({ datasetSourceId }), maxAttempts: 3, weight: 2 } }),
+      prisma.datasetSource.update({ where: { id: datasetSourceId }, data: { lastStatus: "queued", lastError: null } }),
+    ]);
+    return job;
   } finally {
     await pool.request().query(`EXEC sp_releaseapplock @Resource=N'${lockName}',@LockOwner='Session'`).catch(() => {});
   }
@@ -212,19 +221,22 @@ export async function refreshDatasetSource(datasetSourceId: string) {
       throw e;
     }
 
-    await replaceColumnCatalog(source.targetTable.id, columns, rowCount);
+    const finalCountResult = await pool.request().query(`SELECT COUNT_BIG(*) count FROM ${target}`);
+    const finalRowCount = BigInt(finalCountResult.recordset[0]?.count ?? rowCount);
+
+    await replaceColumnCatalog(source.targetTable.id, columns, finalRowCount);
     await prisma.datasetSource.update({
       where: { id: source.id },
       data: {
         lastStatus: "completed",
-        lastRowCount: rowCount,
+        lastRowCount: finalRowCount,
         lastError: null,
         lastRefreshedAt: new Date(),
         nextRefreshAt: nextRefreshFromCron(source.refreshCron),
         ...(newDeltaValue !== undefined ? { lastDeltaValue: newDeltaValue } : {}),
       },
     });
-    return { rowCount };
+    return { rowCount: finalRowCount };
   } catch (e) {
     await pool.request().query(`IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL DROP TABLE ${staging}`).catch(() => undefined);
     const message = e instanceof Error ? e.message : String(e);
@@ -289,9 +301,10 @@ function convert(value: unknown, type: string) {
     return n;
   }
   if (type === "DATE" || type === "DATETIME2") {
-    if (value instanceof Date) return isNaN(value.getTime()) ? null : value;
-    const d = new Date(String(value));
-    return isNaN(d.getTime()) ? null : d;
+    const d = value instanceof Date ? value : new Date(String(value));
+    if (isNaN(d.getTime())) return null;
+    const year = d.getUTCFullYear();
+    return year < 1753 || year > 9999 ? null : d;
   }
   if (type === "TIME") return String(value);
   return typeof value === "object" ? JSON.stringify(value) : String(value);

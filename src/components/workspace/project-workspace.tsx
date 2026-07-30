@@ -1,5 +1,5 @@
 "use client";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Cable, Check, ChevronRight, Copy, Database, DatabaseZap, RefreshCw, Search, Table2, Terminal, Trash2, TriangleAlert, X } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { StatusBadge } from "@/components/ui/primitives";
@@ -191,6 +191,16 @@ export function ProjectWorkspace({ project, publicOrigin }: { project: Project; 
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState("");
+  const hasActiveRefresh = useMemo(
+    () => project.datasets.some(d => d.tables.some(t => t.source?.mode === "extract" && (t.source.lastStatus === "queued" || t.source.lastStatus === "running"))),
+    [project.datasets],
+  );
+
+  useEffect(() => {
+    if (!hasActiveRefresh) return;
+    const id = window.setInterval(() => router.refresh(), 3000);
+    return () => window.clearInterval(id);
+  }, [hasActiveRefresh, router]);
 
   function openDataset(dataset: Dataset) {
     const tabId = `dataset-${dataset.id}`;
@@ -227,7 +237,12 @@ export function ProjectWorkspace({ project, publicOrigin }: { project: Project; 
   }
 
   function toggleDataset(id: string) {
-    setExpanded(prev => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; });
+    setExpanded(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   }
 
   const activeTab = tabs.find(t => t.id === activeTabId) ?? null;

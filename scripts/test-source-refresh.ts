@@ -26,4 +26,4 @@ async function main() {
   process.exit(0);
 }
 
-main().catch(e => { console.error('ERRO:', e.message); process.exit(1); });
+main().catch(e => { console.error('ERRO:', e?.stack ?? e?.message ?? e); process.exit(1); });
