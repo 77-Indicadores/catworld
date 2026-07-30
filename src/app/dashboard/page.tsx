@@ -24,9 +24,10 @@ export default async function DashboardPage() {
       prisma.project.count({ where: { active: true } }),
       prisma.dataset.count({ where: { active: true } }),
       prisma.$queryRaw<AvgRow[]>`
-        SELECT AVG(DATEDIFF(SECOND, created_at, updated_at)) avg_sec
+        SELECT AVG(DATEDIFF(SECOND, locked_at, updated_at)) avg_sec
         FROM cw_jobs
         WHERE status = 'COMPLETED' AND type = 'SOURCE_REFRESH'
+          AND locked_at IS NOT NULL
           AND updated_at >= DATEADD(DAY, -7, GETUTCDATE())
       `,
       prisma.$queryRaw<JobStatsRow[]>`
