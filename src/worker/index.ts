@@ -349,13 +349,16 @@ async function main() {
   const concurrency = env().CATWORLD_WORKER_CONCURRENCY;
   console.log(`Catworld worker ${env().CATWORLD_WORKER_ID} iniciado (concorrência: ${concurrency})`);
   await releaseSelf();
+  const rawTypes = env().CATWORLD_WORKER_JOB_TYPES;
+  const allowedTypes = rawTypes ? rawTypes.split(",").map(t => t.trim()).filter(Boolean) : null;
+  const handlesSourceRefresh = !allowedTypes || allowedTypes.includes("SOURCE_REFRESH");
   let lastRecovery = 0;
   const recoveryLoop = async () => {
     while (!stopping) {
       if (Date.now() - lastRecovery > 60000) {
         try {
           await recoverStale();
-          await enqueueDueSourceRefreshes();
+          if (handlesSourceRefresh) await enqueueDueSourceRefreshes();
         } catch (e) {
           console.warn("[recovery] erro (transiente): %s", e instanceof Error ? e.message : e);
         }
