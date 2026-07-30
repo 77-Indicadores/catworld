@@ -9,7 +9,7 @@ import {
 } from "@azure/storage-blob";
 import { sqlPool } from "@/server/azure/sql";
 import { quoteIdentifier } from "@/server/security/naming";
-import { rowsFromFile, type ParsedColumn, type RowsFromFileOpts } from "./parser";
+import { rowsFromFile, type ParsedColumn, type RowsFromFileOpts, type ParseStats } from "./parser";
 import { normalizeDateLike } from "./date-normalize";
 import { env } from "@/server/env";
 
@@ -19,6 +19,7 @@ export type BulkBlobResult = {
   cleanBlobName: string;
   reusedCleanBlob: boolean;
   bulkAttempts: number;
+  parseStats: ParseStats;
 };
 
 function blobEnv() {
@@ -128,11 +129,13 @@ export async function bulkInsertFromBlob(
   opts?: RowsFromFileOpts,
   onProgress?: (rows: number) => void,
   isPreProcessed = false,
-  knownRowCount = 0
+  knownRowCount = 0,
+  parseStats?: ParseStats,
 ): Promise<BulkBlobResult> {
   const { connStr, account, key, container } = blobEnv();
   const cleanBlobName = `bulkimport/${uploadId}.csv`;
   const timings: Record<string, number> = {};
+  const ps: ParseStats = parseStats ?? {};
   const mark = async <T>(name: string, fn: () => Promise<T>): Promise<T> => {
     const started = Date.now();
     try {
@@ -177,7 +180,7 @@ export async function bulkInsertFromBlob(
         total++;
       }
     } else {
-      for await (const row of rowsFromFile(source, mapping, opts)) {
+      for await (const row of rowsFromFile(source, mapping, opts, ps)) {
         // Hash uses sanitizeCsvField (stable across deploys — hash must match existing target rows)
         const hashLine = mapping.map(c => sanitizeCsvField(row[c.sqlName])).join("|");
         const rowHash  = createHash("md5").update(hashLine).digest("hex");
@@ -288,7 +291,7 @@ export async function bulkInsertFromBlob(
     await pool.request().query(`DROP DATABASE SCOPED CREDENTIAL IF EXISTS [${tempCred}]`).catch(() => {});
   }
 
-  return { total, timings, cleanBlobName, reusedCleanBlob, bulkAttempts };
+  return { total, timings, cleanBlobName, reusedCleanBlob, bulkAttempts, parseStats: ps };
 }
 
 /**
@@ -427,5 +430,5 @@ async function _openrowsetInsertFromBlob_DELETED(
     await pool.request().query(`DROP DATABASE SCOPED CREDENTIAL IF EXISTS [${tempCred}]`).catch(() => {});
   }
 
-  return { total, timings, cleanBlobName, reusedCleanBlob: false, bulkAttempts };
+  return { total, timings, cleanBlobName, reusedCleanBlob: false, bulkAttempts, parseStats: {} };
 }

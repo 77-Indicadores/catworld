@@ -13,6 +13,7 @@ import { hasDateTimePart, isDateLike } from "./date-normalize";
 export type ParsedColumn={originalName:string;sqlName:string;sqlType:string;nullable:boolean};
 export type FilePreview={columns:ParsedColumn[];rows:Record<string,unknown>[];rowCount:number;encoding:string;separator:string|null;sheetNames:string[]};
 export type RowsFromFileOpts={encoding?:string;separator?:string;ext?:string};
+export type ParseStats={parseMethod?:"duckdb"|"csv-parse"|"xlsx"|"stream";parseMs?:number;fileEncoding?:string;fileSeparator?:string;fallbackReason?:string};
 
 export async function previewFile(path:string):Promise<FilePreview>{
  const ext=extname(path).toLowerCase(); if(ext===".csv")return previewCsv(path); if(ext===".xlsx")return previewXlsx(path); if(ext===".xls")throw new Error("XLS legado deve ser convertido pelo worker antes da leitura"); throw new Error("Formato não suportado. Use CSV, XLSX ou XLS");
@@ -131,7 +132,8 @@ function xlsxColumnIndices(headers:string[],columns:ParsedColumn[]){
 export async function* rowsFromFile(
  source:string|NodeJS.ReadableStream,
  columns:ParsedColumn[],
- opts?:RowsFromFileOpts
+ opts?:RowsFromFileOpts,
+ stats?:ParseStats
 ):AsyncGenerator<Record<string,unknown>>{
  const ext=typeof source==="string"?extname(source).toLowerCase():(opts?.ext??".csv");
 
@@ -143,6 +145,7 @@ export async function* rowsFromFile(
    // For non-UTF-8 files: transcode to a temp UTF-8 file so DuckDB (UTF-8 only) can read it.
    // This gives DuckDB speed even for win1252/latin1 files — csv-parse is the last resort.
    const {separator} = await detectFileHints(source);
+   if(stats){stats.fileEncoding=fileEncoding;stats.fileSeparator=separator}
    if(fileEncoding!=="utf8"){
     const tmpDir=await mkdtemp(join(tmpdir(),"cw-duckdb-"));
     const tmpFile=join(tmpDir,"converted.csv");
@@ -150,10 +153,13 @@ export async function* rowsFromFile(
     try{
      await pipeline(createReadStream(source),iconv.decodeStream(fileEncoding),createWriteStream(tmpFile,{encoding:"utf8"}));
      const{rowsFromCsvDuckDB}=await import("./parser-duckdb");
+     if(stats)stats.parseMethod="duckdb";
+     const t0=Date.now();
      yield* rowsFromCsvDuckDB(tmpFile,columns);
      usedDuckDB=true;
+     if(stats)stats.parseMs=Date.now()-t0;
     }catch(e){
-     if(!usedDuckDB)console.warn("[parser] DuckDB (non-UTF8 transcoded) falhou, usando csv-parse:",e instanceof Error?e.message:e);
+     if(!usedDuckDB){if(stats){stats.parseMethod="csv-parse";stats.fallbackReason=`duckdb-failed: ${e instanceof Error?e.message.slice(0,200):String(e)}`}console.warn("[parser] DuckDB (non-UTF8 transcoded) falhou, usando csv-parse:",e instanceof Error?e.message:e);}
      else throw e;
     }finally{
      await rm(tmpDir,{recursive:true,force:true}).catch(()=>{});
@@ -162,24 +168,32 @@ export async function* rowsFromFile(
    }else{
     try{
      const{rowsFromCsvDuckDB}=await import("./parser-duckdb");
+     if(stats)stats.parseMethod="duckdb";
+     const t0=Date.now();
      yield* rowsFromCsvDuckDB(source,columns);
+     if(stats)stats.parseMs=Date.now()-t0;
      return;
     }catch(e){
      console.warn("[parser] DuckDB falhou, usando csv-parse como fallback:",e instanceof Error?e.message:e);
+     if(stats){stats.parseMethod="csv-parse";stats.fallbackReason=`duckdb-failed: ${e instanceof Error?e.message.slice(0,200):String(e)}`}
     }
    }
    // csv-parse fallback (DuckDB failed or unavailable)
+   if(stats&&!stats.parseMethod)stats.parseMethod="csv-parse";
+   const t0csv=Date.now();
    const readable=createReadStream(source);
    let header=true;
    for await(const row of csvPipeStream(readable,fileEncoding,separator)){
     if(header){header=false;continue}
     yield Object.fromEntries(columns.map((c,i)=>[c.sqlName,row[i]??null]));
    }
+   if(stats)stats.parseMs=Date.now()-t0csv;
    return;
   }
   // Stream source: requires opts.encoding + opts.separator
   const encoding=opts?.encoding??"utf8";
   const separator=opts?.separator??",";
+  if(stats){stats.parseMethod="stream";stats.fileEncoding=encoding;stats.fileSeparator=separator}
   let header=true;
   for await(const row of csvPipeStream(source,encoding,separator)){
    if(header){header=false;continue}
@@ -189,6 +203,8 @@ export async function* rowsFromFile(
  }
 
  if(ext===".xlsx"){
+  if(stats){stats.parseMethod="xlsx";stats.fileEncoding="xlsx"}
+  const t0=Date.now();
   if(typeof source==="string"){
    const workbook=new ExcelJS.Workbook();await workbook.xlsx.readFile(source);const sheet=workbook.worksheets[0];if(!sheet)return;
    let header=true,columnIndices:number[]=columns.map((_,i)=>i);
@@ -197,11 +213,13 @@ export async function* rowsFromFile(
     if(header){header=false;columnIndices=xlsxColumnIndices(values,columns);continue}
     yield Object.fromEntries(columns.map((c,i)=>[c.sqlName,normalizeCellForColumn(values[columnIndices[i]!]??"",c)??null]));
    }
+   if(stats)stats.parseMs=Date.now()-t0;
    return;
   }
   // ExcelJS WorkbookReader accepts both file path and Readable stream
   const reader=new ExcelJS.stream.xlsx.WorkbookReader(source as unknown as Stream,{worksheets:"emit",sharedStrings:"cache",styles:"ignore",hyperlinks:"ignore"});
   for await(const worksheet of reader){let header=true,columnIndices:number[]=columns.map((_,i)=>i);for await(const row of worksheet){const values=(Array.isArray(row.values)?row.values.slice(1):[]).map(cellValue);if(header){header=false;columnIndices=xlsxColumnIndices(values,columns);continue}yield Object.fromEntries(columns.map((c,i)=>[c.sqlName,normalizeCellForColumn(values[columnIndices[i]!]??"",c)??null]))}break}
+  if(stats)stats.parseMs=Date.now()-t0;
   return;
  }
 

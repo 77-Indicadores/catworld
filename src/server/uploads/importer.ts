@@ -4,7 +4,7 @@ import sql from "mssql";
 import { prisma } from "@/server/db";
 import { sqlPool } from "@/server/azure/sql";
 import { quoteIdentifier, sqlIdentifier } from "@/server/security/naming";
-import { previewFile, rowsFromFile, type FilePreview, type ParsedColumn, type RowsFromFileOpts } from "./parser";
+import { previewFile, rowsFromFile, type FilePreview, type ParsedColumn, type RowsFromFileOpts, type ParseStats } from "./parser";
 import { bulkInsertFromBlob, sanitizeCsvField } from "./importer-bulk-blob";
 import { env } from "@/server/env";
 import { normalizeDateLike } from "./date-normalize";
@@ -129,6 +129,7 @@ async function tdsBulkCopy(
   uploadId: string,
   onProgress?: (rows: number) => void,
   typed = true,
+  stats?: ParseStats,
 ): Promise<number> {
   const batchDelay = env().CATWORLD_IMPORT_BATCH_DELAY_MS;
   const stringify = (v: unknown) => (v == null || String(v).trim() === "" ? null : String(v));
@@ -160,7 +161,7 @@ async function tdsBulkCopy(
     onProgress?.(total);
   };
 
-  for await (const row of rowsFromFile(source, mapping, opts)) {
+  for await (const row of rowsFromFile(source, mapping, opts, stats)) {
     batch.push(row);
     if (batch.length >= 50_000) await flush();
   }
@@ -174,6 +175,7 @@ async function tdsBulkCopy(
 export async function importUpload(uploadId: string, source: string | NodeJS.ReadableStream) {
   const importStarted = Date.now();
   const phaseTimings: Record<string, unknown> = {};
+  const parseStats: ParseStats = {};
 
   const upload = await prisma.upload.findUniqueOrThrow({ where: { id: uploadId }, include: { dataset: true, table: true } });
   if (!upload.dataset) throw new Error("Dataset não definido");
@@ -289,7 +291,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
 
       try {
         const orResult = await bulkInsertFromBlob(
-          uploadId, source, mapping, schema, directTmp, opts, onProgress, false, knownRowCount,
+          uploadId, source, mapping, schema, directTmp, opts, onProgress, false, knownRowCount, parseStats,
         );
         total = orResult.total;
         inserted = total;
@@ -362,7 +364,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
           const cleanBlobName = `bulkimport/${uploadId}.csv`;
           try {
             const blobResult = await bulkInsertFromBlob(
-              uploadId, source, mapping, schema, destTable, opts, onProgress, phase2, knownRowCount,
+              uploadId, source, mapping, schema, destTable, opts, onProgress, phase2, knownRowCount, parseStats,
             );
             total = blobResult.total;
             phaseTimings.importMethod = "blob-bulk";
@@ -419,13 +421,13 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
               tdsSource = await downloadFile(upload.blobName);
             }
 
-            total = await tdsBulkCopy(pool, tdsSource, mapping, schema, destTable, opts, knownRowCount, uploadId, onProgress, stagingIsTyped);
+            total = await tdsBulkCopy(pool, tdsSource, mapping, schema, destTable, opts, knownRowCount, uploadId, onProgress, stagingIsTyped, parseStats);
           }
         } else {
           // TDS path: small CSV or no blob storage configured
           phaseTimings.importMethod = smallCsv ? "tds-small-csv" : "tds-primary";
           try {
-            total = await tdsBulkCopy(pool, source, mapping, schema, destTable, opts, knownRowCount, uploadId, onProgress);
+            total = await tdsBulkCopy(pool, source, mapping, schema, destTable, opts, knownRowCount, uploadId, onProgress, true, parseStats);
           } catch (tdsErr) {
             const tdsMsg = tdsErr instanceof Error ? tdsErr.message : String(tdsErr);
             // 4815 = BCP protocol error (bad value mid-stream); fall back to blob-bulk if storage is available
@@ -442,7 +444,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
             catch { blobSrc = await downloadFile(upload.blobName); }
 
             const blobResult = await bulkInsertFromBlob(
-              uploadId, blobSrc, mapping, schema, destTable, opts, onProgress, false, knownRowCount,
+              uploadId, blobSrc, mapping, schema, destTable, opts, onProgress, false, knownRowCount, parseStats,
             );
             total = blobResult.total;
             phaseTimings.bulkBlob = blobResult;
@@ -626,10 +628,22 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
       create: { datasetId: upload.dataset.id, name: tableName, sqlName: tableName },
     });
 
+    const deltaMode = phase2 ? "phase2" : deltaReplace ? "delta-replace" : (upload.mode === "replace" || !targetExists) ? "full-replace" : upload.mode;
+    const totalMs = Date.now() - importStarted;
     phaseTimings.previewRows = knownRowCount;
     phaseTimings.parsedRows = total;
     phaseTimings.physicalRows = Number(actual);
-    phaseTimings.totalImportMs = Date.now() - importStarted;
+    phaseTimings.totalImportMs = totalMs;
+    phaseTimings.parseMethod = parseStats.parseMethod ?? null;
+    phaseTimings.parseMs = parseStats.parseMs ?? null;
+    phaseTimings.fileEncoding = parseStats.fileEncoding ?? null;
+    phaseTimings.fileSeparator = parseStats.fileSeparator ?? null;
+    phaseTimings.fallbackReason = parseStats.fallbackReason ?? null;
+    phaseTimings.deltaMode = deltaMode;
+    phaseTimings.toDeleteCount = updated;
+    phaseTimings.stagingWasPartial = stagingIsPartial;
+    phaseTimings.wasIdempotentRetry = stagingHasData;
+    phaseTimings.rowsPerSecond = totalMs > 0 ? Math.round(total / (totalMs / 1000)) : null;
     console.log("[importUpload:perf]", JSON.stringify({ uploadId: upload.id, file: upload.originalFilename, rows: Number(actual), ...phaseTimings }));
 
     // Batch column metadata inserts to stay under SQL Server 2100-parameter limit
