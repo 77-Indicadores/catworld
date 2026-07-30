@@ -75,7 +75,7 @@ model DatasetTable {
   versions  DatasetVersion[]
   uploads      Upload[]
   source       DatasetSource?
-  derivedTable DerivedTable? @relation("DerivedTarget")
+  derivedTables DerivedTable[] @relation("DerivedTarget")
 
   @@unique([datasetId, sqlName])
   @@map("cw_tables")
@@ -280,7 +280,7 @@ model AuditEvent {
 model DerivedTable {
   id              String        @id @default(uuid()) @db.UniqueIdentifier
   datasetId       String        @map("dataset_id") @db.UniqueIdentifier
-  targetTableId   String?       @unique @map("target_table_id") @db.UniqueIdentifier
+  targetTableId   String?       @map("target_table_id") @db.UniqueIdentifier
   name            String        @db.NVarChar(255)
   sqlName         String        @map("sql_name") @db.VarChar(128)
   querySql        String        @map("query_sql") @db.NVarChar(Max)
