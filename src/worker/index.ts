@@ -11,6 +11,7 @@ import { previewFile, type FilePreview } from "@/server/uploads/parser";
 import { importUpload } from "@/server/uploads/importer";
 import { queueImportUploadAuto } from "@/server/uploads/actions";
 import { enqueueDueSourceRefreshes, refreshDatasetSource } from "@/server/connections/sources";
+import { enqueueDueDerivedRefreshes, refreshDerivedTable } from "@/server/connections/derived";
 
 type Claimed = { id: string; type: string; upload_id: string | null; payload_json: string | null; attempts: number; max_attempts: number; weight: number };
 
@@ -87,6 +88,24 @@ async function work(job: Claimed) {
     );
     try {
       await refreshDatasetSource(payload.datasetSourceId);
+    } finally {
+      clearInterval(hb);
+    }
+    await prisma.job.update({ where: { id: job.id }, data: { status: "COMPLETED", lockedAt: null, lockedBy: null, heartbeatAt: null, lastError: null } });
+    return;
+  }
+
+  if (job.type === "DERIVED_REFRESH") {
+    const payload = JSON.parse(job.payload_json ?? "{}") as { derivedTableId?: string };
+    if (!payload.derivedTableId) throw new Error("DERIVED_REFRESH sem derivedTableId");
+    const hb = setInterval(
+      () => prisma.job.update({ where: { id: job.id }, data: { heartbeatAt: new Date() } }).catch(
+        (e) => console.warn("[heartbeat] falhou job=%s: %s", job.id, e instanceof Error ? e.message : e)
+      ),
+      15000,
+    );
+    try {
+      await refreshDerivedTable(payload.derivedTableId);
     } finally {
       clearInterval(hb);
     }
@@ -188,6 +207,7 @@ async function fail(job: Claimed, error: unknown) {
   }
 
   const sourceFailureUpdate = sourceRefreshFailureUpdate(job, message, retry);
+  const derivedFailureUpdate = derivedRefreshFailureUpdate(job, message, retry);
 
   await prisma.$transaction([
     prisma.job.update({
@@ -212,6 +232,7 @@ async function fail(job: Claimed, error: unknown) {
       }),
     ] : []),
     ...(sourceFailureUpdate ? [sourceFailureUpdate] : []),
+    ...(derivedFailureUpdate ? [derivedFailureUpdate] : []),
   ]);
 
   if (restoreRowCount !== undefined) console.log("[FAIL] rowCount=0 → restored %d from previewJson", restoreRowCount);
@@ -235,6 +256,24 @@ function sourceRefreshFailureUpdate(job: Claimed, message: string, retry: boolea
       lastStatus: retry ? "queued" : "failed",
       lastError: message,
       nextRefreshAt: retry ? undefined : new Date(),
+    },
+  });
+}
+
+function derivedRefreshFailureUpdate(job: Claimed, message: string, retry: boolean) {
+  if (job.type !== "DERIVED_REFRESH") return null;
+  let payload: { derivedTableId?: string };
+  try {
+    payload = JSON.parse(job.payload_json ?? "{}") as { derivedTableId?: string };
+  } catch {
+    return null;
+  }
+  if (!payload.derivedTableId) return null;
+  return prisma.derivedTable.updateMany({
+    where: { id: payload.derivedTableId },
+    data: {
+      lastStatus: retry ? "queued" : "failed",
+      lastError: message,
     },
   });
 }
@@ -350,6 +389,7 @@ async function main() {
   const rawTypes = env().CATWORLD_WORKER_JOB_TYPES;
   const allowedTypes = rawTypes ? rawTypes.split(",").map(t => t.trim()).filter(Boolean) : null;
   const handlesSourceRefresh = !allowedTypes || allowedTypes.includes("SOURCE_REFRESH");
+  const handlesDerivedRefresh = !allowedTypes || allowedTypes.includes("DERIVED_REFRESH");
   let lastRecovery = 0;
   const recoveryLoop = async () => {
     while (!stopping) {
@@ -357,6 +397,7 @@ async function main() {
         try {
           await recoverStale();
           if (handlesSourceRefresh) await enqueueDueSourceRefreshes();
+          if (handlesDerivedRefresh) await enqueueDueDerivedRefreshes();
         } catch (e) {
           console.warn("[recovery] erro (transiente): %s", e instanceof Error ? e.message : e);
         }

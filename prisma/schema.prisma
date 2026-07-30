@@ -52,7 +52,8 @@ model Dataset {
   tables      DatasetTable[]
   grants      AccessGrant[]
   uploads     Upload[]
-  sources     DatasetSource[]
+  sources       DatasetSource[]
+  derivedTables DerivedTable[]
 
   @@unique([projectId, slug])
   @@index([projectId, active])
@@ -72,8 +73,9 @@ model DatasetTable {
   dataset   Dataset          @relation(fields: [datasetId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   columns   DatasetColumn[]
   versions  DatasetVersion[]
-  uploads   Upload[]
-  source    DatasetSource?
+  uploads      Upload[]
+  source       DatasetSource?
+  derivedTable DerivedTable? @relation("DerivedTarget")
 
   @@unique([datasetId, sqlName])
   @@map("cw_tables")
@@ -273,6 +275,30 @@ model AuditEvent {
   @@index([createdAt])
   @@index([eventType, createdAt])
   @@map("cw_audit_events")
+}
+
+model DerivedTable {
+  id              String        @id @default(uuid()) @db.UniqueIdentifier
+  datasetId       String        @map("dataset_id") @db.UniqueIdentifier
+  targetTableId   String?       @unique @map("target_table_id") @db.UniqueIdentifier
+  name            String        @db.NVarChar(255)
+  sqlName         String        @map("sql_name") @db.VarChar(128)
+  querySql        String        @map("query_sql") @db.NVarChar(Max)
+  refreshCron     String?       @map("refresh_cron") @db.VarChar(100)
+  lastStatus      String?       @map("last_status") @db.VarChar(32)
+  lastRowCount    BigInt?       @map("last_row_count")
+  lastError       String?       @map("last_error") @db.NVarChar(Max)
+  lastRefreshedAt DateTime?     @map("last_refreshed_at") @db.DateTime2
+  nextRefreshAt   DateTime?     @map("next_refresh_at") @db.DateTime2
+  active          Boolean       @default(true)
+  createdAt       DateTime      @default(now()) @map("created_at") @db.DateTime2
+  updatedAt       DateTime      @updatedAt @map("updated_at") @db.DateTime2
+  dataset         Dataset       @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+  targetTable     DatasetTable? @relation("DerivedTarget", fields: [targetTableId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([datasetId, active])
+  @@index([nextRefreshAt])
+  @@map("cw_derived_tables")
 }
 
 model Job {
