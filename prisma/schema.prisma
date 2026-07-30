@@ -178,9 +178,7 @@ model DatasetSource {
   sourceSchema    String?       @map("source_schema") @db.NVarChar(128)
   sourceTable     String?       @map("source_table") @db.NVarChar(128)
   sourceSql       String?       @map("source_sql") @db.NVarChar(Max)
-  refreshPolicy   String        @default("manual") @map("refresh_policy") @db.VarChar(20)
-  refreshHour     Int?          @map("refresh_hour") @db.TinyInt
-  refreshWeekday  Int?          @map("refresh_weekday") @db.TinyInt
+  refreshCron     String?       @map("refresh_cron") @db.VarChar(100)
   keyColumn       String?       @map("key_column") @db.VarChar(128)
   deltaColumn     String?       @map("delta_column") @db.VarChar(128)
   lastDeltaValue  String?       @map("last_delta_value") @db.NVarChar(Max)
@@ -199,7 +197,7 @@ model DatasetSource {
   @@index([datasetId, active])
   @@index([connectionId])
   @@index([sourceGroupId])
-  @@index([mode, refreshPolicy, nextRefreshAt])
+  @@index([mode, refreshCron, nextRefreshAt])
   @@map("cw_dataset_sources")
 }
 

@@ -1,5 +1,6 @@
 "use client";
 import { useRef, useState } from "react";
+import { Cron } from "croner";
 import { Cable, ChevronDown, Database, DatabaseZap, Pencil, Plus, RefreshCw, Search, Table2, ToggleLeft, ToggleRight, Trash2, UploadCloud } from "lucide-react";
 import { CopyableId } from "@/components/ui/copyable-id";
 import { EditCatalogDialog } from "@/components/management/edit-catalog-dialog";
@@ -13,7 +14,7 @@ type Source = {
   id: string; name: string; mode: string; sourceKind: string;
   sourceGroupId: string | null;
   sourceSchema: string | null; sourceTable: string | null; sourceSql: string | null;
-  refreshPolicy: string; refreshHour: number | null; refreshWeekday: number | null;
+  refreshCron: string | null;
   keyColumn: string | null; deltaColumn: string | null; active: boolean;
   lastStatus: string | null; lastRowCount: string | null; lastError: string | null;
   lastRefreshedAt: string | null; nextRefreshAt: string | null;
@@ -55,7 +56,7 @@ function buildGroups(tables: Table[]): SourceGroup[] {
 
 function isOverdue(source: Source): boolean {
   if (source.lastStatus !== "completed" && source.lastStatus !== "ready") return false;
-  if (!source.nextRefreshAt || source.refreshPolicy === "manual") return false;
+  if (!source.nextRefreshAt || !source.refreshCron) return false;
   return new Date(source.nextRefreshAt) < new Date();
 }
 
@@ -79,8 +80,8 @@ function sourceBadge(source: Source) {
   };
 }
 
-function refreshText(policy: string) {
-  return { manual: "Manual", hourly: "A cada hora", daily: "Diária", weekly: "Semanal" }[policy] ?? policy;
+function refreshText(cron: string | null) {
+  return cron ?? "Manual";
 }
 
 function fmtRows(n: string | null) {
@@ -162,8 +163,8 @@ function BatchGroupRow({ groupId, datasetId, sources, tables, onSelectTable, onC
           </div>
           <p className="text-xs text-base-content/40">
             {tables.length} tabela{tables.length !== 1 ? "s" : ""}
-            {" · " + (rep.mode === "extract" ? refreshText(rep.refreshPolicy) : "Ao vivo")}
-            {rep.nextRefreshAt && rep.mode === "extract" && rep.refreshPolicy !== "manual" && (
+            {" · " + (rep.mode === "extract" ? refreshText(rep.refreshCron) : "Ao vivo")}
+            {rep.nextRefreshAt && rep.mode === "extract" && rep.refreshCron && (
               new Date(rep.nextRefreshAt) < new Date()
                 ? <span className="text-warning"> · próx. sync atrasado</span>
                 : <span> · próx. {new Date(rep.nextRefreshAt).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" })}</span>
@@ -212,7 +213,7 @@ function BatchGroupRow({ groupId, datasetId, sources, tables, onSelectTable, onC
 
       {/* Ações do grupo — mode/policy editados via GroupEditDialog */}
       <div className="mt-2 flex items-center gap-1">
-        <GroupEditDialog groupId={groupId} datasetId={datasetId} connectionId={rep.connection.id} connectionName={rep.connection.name} sourceSchema={rep.sourceSchema} mode={rep.mode} refreshPolicy={rep.refreshPolicy} initRefreshHour={rep.refreshHour ?? 0} initRefreshWeekday={rep.refreshWeekday ?? 0} sources={sources} tables={tables} onComplete={onChanged} />
+        <GroupEditDialog groupId={groupId} datasetId={datasetId} connectionId={rep.connection.id} connectionName={rep.connection.name} sourceSchema={rep.sourceSchema} mode={rep.mode} initRefreshCron={rep.refreshCron ?? ""} sources={sources} tables={tables} onComplete={onChanged} />
         <button onClick={toggleGroup} className="btn btn-ghost btn-xs gap-1">
           {allActive
             ? <ToggleRight size={13} className="text-success" />
@@ -233,17 +234,27 @@ function BatchGroupRow({ groupId, datasetId, sources, tables, onSelectTable, onC
   );
 }
 
-// ── Dialog to edit mode/policy + manage tables for a batch group ───────────
-function GroupEditDialog({ groupId, datasetId, connectionId, connectionName, sourceSchema, mode: initMode, refreshPolicy: initPolicy, initRefreshHour, initRefreshWeekday, sources, tables, onComplete }: {
+function CronPreview({ cron }: { cron: string }) {
+  try {
+    const c = new Cron(cron.trim(), { timezone: "UTC" });
+    const n1 = c.nextRun();
+    const n2 = n1 ? c.nextRun(n1) : null;
+    const fmt = (d: Date) => d.toLocaleString("pt-BR", { timeZone: "UTC", dateStyle: "short", timeStyle: "short" }) + " UTC";
+    return <span className="label-text-alt mt-1 text-base-content/55">Próximo: {n1 ? fmt(n1) : "—"}{n2 ? ` · depois: ${fmt(n2)}` : ""}</span>;
+  } catch {
+    return <span className="label-text-alt mt-1 text-warning">Expressão cron inválida</span>;
+  }
+}
+
+// ── Dialog to edit mode/cron + manage tables for a batch group ───────────
+function GroupEditDialog({ groupId, datasetId, connectionId, connectionName, sourceSchema, mode: initMode, initRefreshCron, sources, tables, onComplete }: {
   groupId: string; datasetId: string; connectionId: string; connectionName: string; sourceSchema: string | null;
-  mode: string; refreshPolicy: string; initRefreshHour: number; initRefreshWeekday: number;
+  mode: string; initRefreshCron: string;
   sources: Source[]; tables: Table[]; onComplete: () => void;
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [mode, setMode] = useState(initMode);
-  const [policy, setPolicy] = useState(initPolicy);
-  const [refreshHour, setRefreshHour] = useState(initRefreshHour);
-  const [refreshWeekday, setRefreshWeekday] = useState(initRefreshWeekday);
+  const [refreshCron, setRefreshCron] = useState(initRefreshCron);
   const [saving, setSaving] = useState(false);
 
   const [showPicker, setShowPicker] = useState(false);
@@ -254,8 +265,7 @@ function GroupEditDialog({ groupId, datasetId, connectionId, connectionName, sou
   const [adding, setAdding] = useState(false);
 
   function openDialog() {
-    setMode(initMode); setPolicy(initPolicy);
-    setRefreshHour(initRefreshHour); setRefreshWeekday(initRefreshWeekday);
+    setMode(initMode); setRefreshCron(initRefreshCron);
     setShowPicker(false); setSelectedNew([]); setAvailableTables([]); setPickerSearch("");
     dialogRef.current?.showModal();
   }
@@ -283,9 +293,7 @@ function GroupEditDialog({ groupId, datasetId, connectionId, connectionName, sou
       body: JSON.stringify({
         connectionId, mode, sourceKind: "table", sourceSchema,
         sourceTables: selectedNew,
-        refreshPolicy: mode === "live" ? "manual" : policy,
-        refreshHour: mode === "live" ? null : refreshHour,
-        refreshWeekday: mode === "live" || policy !== "weekly" ? null : refreshWeekday,
+        refreshCron: mode === "live" ? null : (refreshCron.trim() || null),
         sourceGroupId: groupId,
       }),
     });
@@ -304,9 +312,7 @@ function GroupEditDialog({ groupId, datasetId, connectionId, connectionName, sou
       method: "PATCH", headers: { "content-type": "application/json" },
       body: JSON.stringify({
         mode,
-        refreshPolicy: mode === "live" ? "manual" : policy,
-        refreshHour: mode === "live" ? null : refreshHour,
-        refreshWeekday: mode === "live" || policy !== "weekly" ? null : refreshWeekday,
+        refreshCron: mode === "live" ? null : (refreshCron.trim() || null),
       }),
     });
     setSaving(false); closeDialog(); onComplete();
@@ -334,40 +340,20 @@ function GroupEditDialog({ groupId, datasetId, connectionId, connectionName, sou
               </select>
             </label>
             <label className="form-control w-full">
-              <span className="label-text font-medium">Atualização automática</span>
-              <select className="select mt-1 w-full" disabled={mode === "live"} value={policy} onChange={e => setPolicy(e.target.value)}>
-                <option value="manual">Manual</option>
-                <option value="hourly">A cada hora</option>
-                <option value="daily">Diária</option>
-                <option value="weekly">Semanal</option>
-              </select>
+              <span className="label-text font-medium">Agendamento (cron UTC)</span>
+              <input
+                className="input mt-1 w-full font-mono text-sm"
+                placeholder="ex: 0 7-19/2 * * *  —  vazio = manual"
+                value={refreshCron}
+                onChange={e => setRefreshCron(e.target.value)}
+                disabled={mode === "live"}
+              />
+              {mode !== "live" && refreshCron.trim() && <CronPreview cron={refreshCron} />}
+              {mode !== "live" && !refreshCron.trim() && (
+                <span className="label-text-alt mt-1 text-base-content/55">Vazio = sem agendamento automático</span>
+              )}
+              {mode === "live" && <span className="label-text-alt mt-1 text-base-content/55">Fontes ao vivo sempre consultam a origem na hora.</span>}
             </label>
-            {mode !== "live" && (policy === "daily" || policy === "weekly") && (
-              <div className="flex flex-wrap gap-3">
-                {policy === "weekly" && (
-                  <label className="form-control flex-1 min-w-[140px]">
-                    <span className="label-text font-medium">Dia da semana</span>
-                    <select className="select mt-1 w-full" value={refreshWeekday} onChange={e => setRefreshWeekday(Number(e.target.value))}>
-                      <option value={0}>Domingo</option>
-                      <option value={1}>Segunda-feira</option>
-                      <option value={2}>Terça-feira</option>
-                      <option value={3}>Quarta-feira</option>
-                      <option value={4}>Quinta-feira</option>
-                      <option value={5}>Sexta-feira</option>
-                      <option value={6}>Sábado</option>
-                    </select>
-                  </label>
-                )}
-                <label className="form-control flex-1 min-w-[120px]">
-                  <span className="label-text font-medium">Horário (UTC)</span>
-                  <select className="select mt-1 w-full" value={refreshHour} onChange={e => setRefreshHour(Number(e.target.value))}>
-                    {Array.from({ length: 24 }, (_, h) => (
-                      <option key={h} value={h}>{String(h).padStart(2, "0")}:00</option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-            )}
           </div>
 
           <p className="mt-5 text-[11px] font-semibold uppercase tracking-wider text-base-content/40">Tabelas</p>
@@ -499,7 +485,7 @@ function SingleSourceRow({ source: s, table: t, onSelectTable, onChanged }: {
           </div>
           <p className="truncate text-xs text-base-content/40">
             {s.connection.name} · Consulta personalizada
-            {s.mode === "extract" && " · " + refreshText(s.refreshPolicy)}
+            {s.mode === "extract" && " · " + refreshText(s.refreshCron)}
             {fmtRows(s.lastRowCount) && " · " + fmtRows(s.lastRowCount) + " linhas"}
           </p>
         </div>

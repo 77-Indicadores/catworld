@@ -4,7 +4,7 @@ import { Cable, Columns3, DatabaseZap, RefreshCw, Rows3, Trash2, TriangleAlert }
 import { StatusBadge } from "@/components/ui/primitives";
 import { UploadFlow } from "./upload-flow";
 
-type Source = { id: string; mode: string; sourceKind: string; sourceSchema: string | null; sourceTable: string | null; refreshPolicy: string; lastStatus: string | null; lastError: string | null; lastRefreshedAt: string | null; nextRefreshAt: string | null; connection: { name: string } };
+type Source = { id: string; mode: string; sourceKind: string; sourceSchema: string | null; sourceTable: string | null; refreshCron: string | null; lastStatus: string | null; lastError: string | null; lastRefreshedAt: string | null; nextRefreshAt: string | null; connection: { name: string } };
 type Table = { id: string; name: string; sqlName: string; rowCount: string; lastDataAt: string | null; source: Source | null; columns: { id: string; sqlName: string; originalName: string; sqlType: string; nullable: boolean }[] };
 
 function sourceStatus(status: string | null): "healthy" | "warning" | "error" | "inactive" {

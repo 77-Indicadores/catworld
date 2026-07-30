@@ -10,7 +10,7 @@ import { QueryPanel } from "./query-panel";
 import { DatasetPanel } from "./dataset-panel";
 
 type Column = { id: string; sqlName: string; originalName: string; sqlType: string; nullable: boolean };
-type TableSource = { id: string; name: string; mode: string; sourceKind: string; sourceGroupId: string | null; sourceSchema: string | null; sourceTable: string | null; sourceSql: string | null; refreshPolicy: string; refreshHour: number | null; refreshWeekday: number | null; keyColumn: string | null; deltaColumn: string | null; active: boolean; lastStatus: string | null; lastRowCount: string | null; lastError: string | null; lastRefreshedAt: string | null; nextRefreshAt: string | null; connection: { id: string; name: string } };
+type TableSource = { id: string; name: string; mode: string; sourceKind: string; sourceGroupId: string | null; sourceSchema: string | null; sourceTable: string | null; sourceSql: string | null; refreshCron: string | null; keyColumn: string | null; deltaColumn: string | null; active: boolean; lastStatus: string | null; lastRowCount: string | null; lastError: string | null; lastRefreshedAt: string | null; nextRefreshAt: string | null; connection: { id: string; name: string } };
 type Table = { id: string; name: string; sqlName: string; rowCount: string; lastDataAt: string | null; source: TableSource | null; columns: Column[] };
 type Dataset = { id: string; slug: string; name: string; description: string | null; active: boolean; schemaName: string; tables: Table[] };
 type Project = { id: string; slug: string; name: string; description: string | null; active: boolean; datasets: Dataset[] };
@@ -41,7 +41,7 @@ function sourceStatus(source: TableSource): "healthy" | "warning" | "error" | "i
   if (source.lastStatus === "failed") return "error";
   if (source.lastStatus === "queued" || source.lastStatus === "running") return "warning";
   if (source.lastStatus === "completed" || source.lastStatus === "ready") {
-    if (source.nextRefreshAt && source.refreshPolicy !== "manual" && new Date(source.nextRefreshAt) < new Date()) return "warning";
+    if (source.nextRefreshAt && source.refreshCron && new Date(source.nextRefreshAt) < new Date()) return "warning";
     return "healthy";
   }
   return "inactive";

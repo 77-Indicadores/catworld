@@ -283,9 +283,7 @@ async function recoverStale() {
      SET last_status='failed',
          last_error='Processamento interrompido',
          next_refresh_at=CASE
-           WHEN s.refresh_policy='hourly' THEN DATEADD(HOUR,1,SYSUTCDATETIME())
-           WHEN s.refresh_policy='daily' THEN DATEADD(DAY,1,SYSUTCDATETIME())
-           WHEN s.refresh_policy='weekly' THEN DATEADD(DAY,7,SYSUTCDATETIME())
+           WHEN s.refresh_cron IS NOT NULL THEN DATEADD(MINUTE,10,SYSUTCDATETIME())
            ELSE NULL
          END,
          updated_at=SYSUTCDATETIME()

@@ -1,6 +1,19 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
+import { Cron } from "croner";
 import { Cable, CheckCircle2, DatabaseZap, Play, Plus, RefreshCw, Search, Table2 } from "lucide-react";
+
+function CronPreview({ cron }: { cron: string }) {
+  try {
+    const c = new Cron(cron.trim(), { timezone: "UTC" });
+    const n1 = c.nextRun();
+    const n2 = n1 ? c.nextRun(n1) : null;
+    const fmt = (d: Date) => d.toLocaleString("pt-BR", { timeZone: "UTC", dateStyle: "short", timeStyle: "short" }) + " UTC";
+    return <span className="label-text-alt mt-1 text-base-content/55">Próximo: {n1 ? fmt(n1) : "—"}{n2 ? ` · depois: ${fmt(n2)}` : ""}</span>;
+  } catch {
+    return <span className="label-text-alt mt-1 text-warning">Expressão cron inválida</span>;
+  }
+}
 
 type Connection = { id: string; name: string; provider: string; server: string; databaseName: string };
 type SchemaRow = { schema: string };
@@ -30,9 +43,7 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
   const [queryStatus, setQueryStatus] = useState<"idle" | "ok" | "error">("idle");
   const [sourceKind, setSourceKind] = useState<"table" | "query">("table");
   const [mode, setMode] = useState<"extract" | "live">("extract");
-  const [refreshPolicy, setRefreshPolicy] = useState("manual");
-  const [refreshHour, setRefreshHour] = useState(0);
-  const [refreshWeekday, setRefreshWeekday] = useState(0);
+  const [refreshCron, setRefreshCron] = useState("");
   const [queryName, setQueryName] = useState("");
   const [sourceSql, setSourceSql] = useState("SELECT *\nFROM ");
   const [tableSearch, setTableSearch] = useState("");
@@ -41,7 +52,7 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
   const [error, setError] = useState("");
 
   async function open() {
-    setStep("origin"); setError(""); setColumns([]); setSelectedTables([]); setQueryStatus("idle"); setQueryTestedSql(""); setTableSearch("");
+    setStep("origin"); setError(""); setColumns([]); setSelectedTables([]); setQueryStatus("idle"); setQueryTestedSql(""); setTableSearch(""); setRefreshCron("");
     ref.current?.showModal();
     setLoadingMeta(true);
     const response = await fetch("/api/v1/connections");
@@ -111,18 +122,14 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
           sourceKind,
           sourceSchema: schema,
           sourceTables: selectedTables,
-          refreshPolicy: mode === "live" ? "manual" : refreshPolicy,
-          refreshHour: mode === "live" ? null : refreshHour,
-          refreshWeekday: mode === "live" || refreshPolicy !== "weekly" ? null : refreshWeekday,
+          refreshCron: mode === "live" ? null : (refreshCron.trim() || null),
         } : {
           connectionId,
           name: queryName,
           mode,
           sourceKind,
           sourceSql,
-          refreshPolicy: mode === "live" ? "manual" : refreshPolicy,
-          refreshHour: mode === "live" ? null : refreshHour,
-          refreshWeekday: mode === "live" || refreshPolicy !== "weekly" ? null : refreshWeekday,
+          refreshCron: mode === "live" ? null : (refreshCron.trim() || null),
         }),
       });
       const body = await response.json();
@@ -227,26 +234,15 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
             <div className="mt-5 grid gap-4 lg:grid-cols-2">
               <button type="button" onClick={() => setMode("extract")} className={`rounded-box border p-4 text-left ${mode === "extract" ? "border-primary bg-primary/10" : "border-base-300 bg-base-100"}`}><DatabaseZap className="text-primary" size={22} /><h4 className="mt-3 font-semibold">Copiar para o Catworld</h4><p className="mt-1 text-sm text-base-content/60">Cria tabela(s) fisicas no dataset com o mesmo nome das tabelas selecionadas.</p></button>
               <button type="button" onClick={() => setMode("live")} className={`rounded-box border p-4 text-left ${mode === "live" ? "border-primary bg-primary/10" : "border-base-300 bg-base-100"}`}><Cable className="text-primary" size={22} /><h4 className="mt-3 font-semibold">Consultar direto no {providerLabel}</h4><p className="mt-1 text-sm text-base-content/60">Nao copia dados. Cada visualizacao consulta a origem.</p></button>
-              <Field label="Atualizacao" hint={mode === "live" ? "Fontes ao vivo sempre consultam a origem na hora." : "Define quando o Catworld deve copiar os dados novamente."} wide>
-                <select disabled={mode === "live"} className="select w-full" value={refreshPolicy} onChange={(e) => setRefreshPolicy(e.target.value)}>
-                  <option value="manual">Manual</option>
-                  <option value="hourly">A cada hora</option>
-                  <option value="daily">Diaria</option>
-                  <option value="weekly">Semanal</option>
-                </select>
-                {mode !== "live" && (refreshPolicy === "daily" || refreshPolicy === "weekly") && (
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {refreshPolicy === "weekly" && (
-                      <select className="select select-sm flex-1 min-w-[140px]" value={refreshWeekday} onChange={e => setRefreshWeekday(Number(e.target.value))}>
-                        <option value={0}>Domingo</option><option value={1}>Segunda-feira</option><option value={2}>Terça-feira</option>
-                        <option value={3}>Quarta-feira</option><option value={4}>Quinta-feira</option><option value={5}>Sexta-feira</option><option value={6}>Sábado</option>
-                      </select>
-                    )}
-                    <select className="select select-sm flex-1 min-w-[110px]" value={refreshHour} onChange={e => setRefreshHour(Number(e.target.value))}>
-                      {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{String(h).padStart(2, "0")}:00 UTC</option>)}
-                    </select>
-                  </div>
-                )}
+              <Field label="Agendamento (cron UTC)" hint={mode === "live" ? "Fontes ao vivo sempre consultam a origem na hora." : "Vazio = manual. Ex: 0 7-19/2 * * * (a cada 2h das 7-19h)"} wide>
+                <input
+                  disabled={mode === "live"}
+                  className="input w-full font-mono text-sm"
+                  placeholder="ex: 0 7-19/2 * * *  —  vazio = manual"
+                  value={refreshCron}
+                  onChange={(e) => setRefreshCron(e.target.value)}
+                />
+                {mode !== "live" && refreshCron.trim() && <CronPreview cron={refreshCron} />}
               </Field>
             </div>
           )}

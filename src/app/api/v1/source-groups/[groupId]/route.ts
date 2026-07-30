@@ -4,7 +4,7 @@ import { prisma } from "@/server/db";
 import { resolveActor } from "@/server/auth/actor";
 import { canAccess } from "@/server/auth/permissions";
 import { ApiError, handleApiError, ok } from "@/server/http";
-import { nextRefresh, queueSourceRefresh } from "@/server/connections/sources";
+import { nextRefreshFromCron, queueSourceRefresh } from "@/server/connections/sources";
 import { deleteDatasetSourceGroup } from "@/server/data/catalog";
 
 async function authoriseGroup(request: NextRequest, groupId: string) {
@@ -23,9 +23,7 @@ async function authoriseGroup(request: NextRequest, groupId: string) {
 
 const patchSchema = z.object({
   mode: z.enum(["extract", "live"]).optional(),
-  refreshPolicy: z.enum(["manual", "hourly", "daily", "weekly"]).optional(),
-  refreshHour: z.number().int().min(0).max(23).nullable().optional(),
-  refreshWeekday: z.number().int().min(0).max(6).nullable().optional(),
+  refreshCron: z.string().max(100).nullable().optional(),
   active: z.boolean().optional(),
 });
 
@@ -35,27 +33,22 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     const { sources } = await authoriseGroup(request, groupId);
     const input = patchSchema.parse(await request.json());
 
-    const effectivePolicy = input.mode === "live" ? "manual" : input.refreshPolicy;
-    const hour = input.refreshHour ?? 0;
-    const weekday = input.refreshWeekday ?? 0;
-    const nextAt = effectivePolicy && effectivePolicy !== "manual"
-      ? nextRefresh(effectivePolicy, new Date(), hour, weekday)
-      : effectivePolicy === "manual" ? null : undefined;
+    const effectiveCron = input.mode === "live" ? null : input.refreshCron;
+    const nextAt = effectiveCron !== undefined
+      ? (effectiveCron ? nextRefreshFromCron(effectiveCron) : null)
+      : undefined;
 
     await prisma.datasetSource.updateMany({
       where: { sourceGroupId: groupId },
       data: {
         ...(input.mode !== undefined ? { mode: input.mode } : {}),
-        ...(input.mode === "live" ? { refreshPolicy: "manual", nextRefreshAt: null } : {}),
-        ...(effectivePolicy !== undefined && input.mode !== "live" ? { refreshPolicy: effectivePolicy } : {}),
-        ...(input.refreshHour !== undefined ? { refreshHour: input.refreshHour } : {}),
-        ...(input.refreshWeekday !== undefined ? { refreshWeekday: input.refreshWeekday } : {}),
+        ...(effectiveCron !== undefined ? { refreshCron: effectiveCron } : {}),
+        ...(input.mode === "live" ? { refreshCron: null, nextRefreshAt: null } : {}),
         ...(nextAt !== undefined && input.mode !== "live" ? { nextRefreshAt: nextAt } : {}),
         ...(input.active !== undefined ? { active: input.active } : {}),
       },
     });
 
-    // If activating extract sources, queue refresh for each
     if (input.active === true) {
       for (const s of sources) await queueSourceRefresh(s.id).catch(() => undefined);
     }

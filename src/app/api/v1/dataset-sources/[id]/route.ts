@@ -4,7 +4,7 @@ import { prisma } from "@/server/db";
 import { resolveActor } from "@/server/auth/actor";
 import { canAccess } from "@/server/auth/permissions";
 import { ApiError, handleApiError, ok } from "@/server/http";
-import { nextRefresh } from "@/server/connections/sources";
+import { nextRefreshFromCron } from "@/server/connections/sources";
 import { deleteDatasetSource } from "@/server/data/catalog";
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -27,9 +27,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 const patchSchema = z.object({
   name: z.string().min(1).max(255).optional(),
   mode: z.enum(["extract", "live"]).optional(),
-  refreshPolicy: z.enum(["manual", "hourly", "daily", "weekly"]).optional(),
-  refreshHour: z.number().int().min(0).max(23).nullable().optional(),
-  refreshWeekday: z.number().int().min(0).max(6).nullable().optional(),
+  refreshCron: z.string().max(100).nullable().optional(),
   keyColumn: z.string().max(128).nullable().optional(),
   deltaColumn: z.string().max(128).nullable().optional(),
   sourceSql: z.string().min(1).nullable().optional(),
@@ -40,7 +38,7 @@ async function authorise(request: NextRequest, id: string) {
   const actor = await resolveActor(request);
   const source = await prisma.datasetSource.findUniqueOrThrow({
     where: { id },
-    select: { datasetId: true, refreshHour: true, refreshWeekday: true, dataset: { select: { projectId: true } } },
+    select: { datasetId: true, dataset: { select: { projectId: true } } },
   });
   if (actor.role !== "ADMIN" && !await canAccess(actor, "WRITE", source.dataset.projectId, source.datasetId)) {
     throw new ApiError(403, "FORBIDDEN", "Sem permissão para modificar esta fonte");
@@ -51,20 +49,20 @@ async function authorise(request: NextRequest, id: string) {
 export async function PATCH(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const id = (await params).id;
-    const { source: current } = await authorise(request, id);
+    await authorise(request, id);
     const input = patchSchema.parse(await request.json());
 
-    const effectivePolicy = input.mode === "live" ? "manual" : (input.refreshPolicy ?? undefined);
-    const hour = input.refreshHour !== undefined ? (input.refreshHour ?? 0) : (current.refreshHour ?? 0);
-    const weekday = input.refreshWeekday !== undefined ? (input.refreshWeekday ?? 0) : (current.refreshWeekday ?? 0);
-    const nextAt = effectivePolicy && effectivePolicy !== "manual" ? nextRefresh(effectivePolicy, new Date(), hour, weekday) : (effectivePolicy === "manual" ? null : undefined);
+    const effectiveCron = input.mode === "live" ? null : input.refreshCron;
+    const nextAt = effectiveCron !== undefined
+      ? (effectiveCron ? nextRefreshFromCron(effectiveCron) : null)
+      : undefined;
 
     return ok(await prisma.datasetSource.update({
       where: { id },
       data: {
         ...input,
-        ...(input.mode === "live" ? { refreshPolicy: "manual", nextRefreshAt: null } : {}),
-        ...(effectivePolicy !== undefined && input.mode !== "live" && nextAt !== undefined ? { nextRefreshAt: nextAt } : {}),
+        ...(effectiveCron !== undefined ? { refreshCron: effectiveCron, nextRefreshAt: nextAt } : {}),
+        ...(input.mode === "live" ? { refreshCron: null, nextRefreshAt: null } : {}),
       },
     }));
   } catch (e) {

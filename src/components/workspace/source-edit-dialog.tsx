@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
+import { Cron } from "croner";
 import { Pencil, Play } from "lucide-react";
 
 type Column = { originalName: string; sqlName: string; sqlType: string };
@@ -8,9 +9,7 @@ type Source = {
   id: string;
   name: string;
   mode: string;
-  refreshPolicy: string;
-  refreshHour: number | null;
-  refreshWeekday: number | null;
+  refreshCron: string | null;
   keyColumn: string | null;
   deltaColumn: string | null;
   sourceKind: string;
@@ -18,13 +17,28 @@ type Source = {
   connection: { id: string; name: string };
 };
 
+function CronPreview({ cron }: { cron: string }) {
+  try {
+    const c = new Cron(cron.trim(), { timezone: "UTC" });
+    const n1 = c.nextRun();
+    const n2 = n1 ? c.nextRun(n1) : null;
+    const fmt = (d: Date) =>
+      d.toLocaleString("pt-BR", { timeZone: "UTC", dateStyle: "short", timeStyle: "short" }) + " UTC";
+    return (
+      <span className="label-text-alt mt-1 text-base-content/55">
+        Próximo: {n1 ? fmt(n1) : "—"}{n2 ? ` · depois: ${fmt(n2)}` : ""}
+      </span>
+    );
+  } catch {
+    return <span className="label-text-alt mt-1 text-warning">Expressão cron inválida</span>;
+  }
+}
+
 export function SourceEditDialog({ source, onComplete }: { source: Source; onComplete: () => void }) {
   const ref = useRef<HTMLDialogElement>(null);
   const [name, setName] = useState(source.name);
   const [mode, setMode] = useState(source.mode);
-  const [policy, setPolicy] = useState(source.refreshPolicy);
-  const [refreshHour, setRefreshHour] = useState(source.refreshHour ?? 0);
-  const [refreshWeekday, setRefreshWeekday] = useState(source.refreshWeekday ?? 0);
+  const [refreshCron, setRefreshCron] = useState(source.refreshCron ?? "");
   const [keyColumn, setKeyColumn] = useState(source.keyColumn ?? "");
   const [deltaColumn, setDeltaColumn] = useState(source.deltaColumn ?? "");
   const [sql, setSql] = useState(source.sourceSql ?? "");
@@ -38,9 +52,7 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
   function open() {
     setName(source.name);
     setMode(source.mode);
-    setPolicy(source.refreshPolicy);
-    setRefreshHour(source.refreshHour ?? 0);
-    setRefreshWeekday(source.refreshWeekday ?? 0);
+    setRefreshCron(source.refreshCron ?? "");
     setKeyColumn(source.keyColumn ?? "");
     setDeltaColumn(source.deltaColumn ?? "");
     setSql(source.sourceSql ?? "");
@@ -70,9 +82,7 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
     const body: Record<string, unknown> = {
       name: name.trim(),
       mode,
-      refreshPolicy: mode === "live" ? "manual" : policy,
-      refreshHour: mode === "live" ? null : refreshHour,
-      refreshWeekday: mode === "live" || policy !== "weekly" ? null : refreshWeekday,
+      refreshCron: mode === "live" ? null : (refreshCron.trim() || null),
       keyColumn: keyColumn.trim() || null,
       deltaColumn: deltaColumn.trim() || null,
     };
@@ -101,13 +111,11 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
           <p className="mt-1 text-xs text-base-content/50">{source.connection.name} · {source.sourceKind === "query" ? "Consulta personalizada" : "Tabela"}</p>
 
           <div className="mt-5 space-y-4">
-            {/* Nome */}
             <label className="form-control w-full">
               <span className="label-text font-medium">Nome</span>
               <input className="input mt-1 w-full" value={name} onChange={(e) => setName(e.target.value)} />
             </label>
 
-            {/* SQL query — só para fontes de consulta */}
             {source.sourceKind === "query" && (
               <div>
                 <span className="label-text font-medium">Consulta SQL</span>
@@ -118,12 +126,7 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
                   spellCheck={false}
                 />
                 <div className="mt-2 flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    className="btn btn-outline btn-sm"
-                    onClick={testQuery}
-                    disabled={testing || !sql.trim()}
-                  >
+                  <button type="button" className="btn btn-outline btn-sm" onClick={testQuery} disabled={testing || !sql.trim()}>
                     <Play size={13} />{testing ? "Testando..." : "Testar consulta"}
                   </button>
                   {sqlStatus === "ok" && !sqlChanged && (
@@ -142,7 +145,6 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
               </div>
             )}
 
-            {/* Mode */}
             <label className="form-control w-full">
               <span className="label-text font-medium">Modo</span>
               <select className="select mt-1 w-full" value={mode} onChange={(e) => setMode(e.target.value)}>
@@ -151,75 +153,35 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
               </select>
             </label>
 
-            {/* Refresh policy */}
             <label className="form-control w-full">
-              <span className="label-text font-medium">Atualização automática</span>
-              <select className="select mt-1 w-full" disabled={mode === "live"} value={policy} onChange={(e) => setPolicy(e.target.value)}>
-                <option value="manual">Manual</option>
-                <option value="hourly">A cada hora</option>
-                <option value="daily">Diária</option>
-                <option value="weekly">Semanal</option>
-              </select>
+              <span className="label-text font-medium">Agendamento (cron UTC)</span>
+              <input
+                className="input mt-1 w-full font-mono text-sm"
+                placeholder="ex: 0 7-19/2 * * *  —  vazio = manual"
+                value={refreshCron}
+                onChange={(e) => setRefreshCron(e.target.value)}
+                disabled={mode === "live"}
+              />
+              {mode !== "live" && refreshCron.trim() && <CronPreview cron={refreshCron} />}
+              {mode !== "live" && !refreshCron.trim() && (
+                <span className="label-text-alt mt-1 text-base-content/55">Vazio = sem agendamento automático</span>
+              )}
               {mode === "live" && <span className="label-text-alt mt-1 text-base-content/55">Fontes ao vivo sempre consultam a origem na hora.</span>}
             </label>
 
-            {/* Horário / dia — só para daily e weekly */}
-            {mode !== "live" && (policy === "daily" || policy === "weekly") && (
-              <div className="flex flex-wrap gap-3">
-                {policy === "weekly" && (
-                  <label className="form-control flex-1 min-w-[140px]">
-                    <span className="label-text font-medium">Dia da semana</span>
-                    <select className="select mt-1 w-full" value={refreshWeekday} onChange={(e) => setRefreshWeekday(Number(e.target.value))}>
-                      <option value={0}>Domingo</option>
-                      <option value={1}>Segunda-feira</option>
-                      <option value={2}>Terça-feira</option>
-                      <option value={3}>Quarta-feira</option>
-                      <option value={4}>Quinta-feira</option>
-                      <option value={5}>Sexta-feira</option>
-                      <option value={6}>Sábado</option>
-                    </select>
-                  </label>
-                )}
-                <label className="form-control flex-1 min-w-[120px]">
-                  <span className="label-text font-medium">Horário (UTC)</span>
-                  <select className="select mt-1 w-full" value={refreshHour} onChange={(e) => setRefreshHour(Number(e.target.value))}>
-                    {Array.from({ length: 24 }, (_, h) => (
-                      <option key={h} value={h}>{String(h).padStart(2, "0")}:00</option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-            )}
-
-            {/* Key column — only for extract mode */}
             {mode === "extract" && (
               <label className="form-control w-full">
                 <span className="label-text font-medium">Coluna-chave para upsert <span className="font-normal text-base-content/50">(opcional)</span></span>
-                <input
-                  className="input mt-1 w-full font-mono text-sm"
-                  placeholder="ex: id"
-                  value={keyColumn}
-                  onChange={(e) => setKeyColumn(e.target.value)}
-                />
-                <span className="label-text-alt mt-1 text-base-content/55">
-                  Se definida, cada atualização faz upsert pela chave em vez de substituir a tabela inteira.
-                </span>
+                <input className="input mt-1 w-full font-mono text-sm" placeholder="ex: id" value={keyColumn} onChange={(e) => setKeyColumn(e.target.value)} />
+                <span className="label-text-alt mt-1 text-base-content/55">Se definida, cada atualização faz upsert pela chave em vez de substituir a tabela inteira.</span>
               </label>
             )}
 
-            {/* Delta column — only for extract table sources */}
             {mode === "extract" && source.sourceKind === "table" && (
               <label className="form-control w-full">
                 <span className="label-text font-medium">Coluna delta (incremental) <span className="font-normal text-base-content/50">(opcional)</span></span>
-                <input
-                  className="input mt-1 w-full font-mono text-sm"
-                  placeholder="ex: updated_at"
-                  value={deltaColumn}
-                  onChange={(e) => setDeltaColumn(e.target.value)}
-                />
-                <span className="label-text-alt mt-1 text-base-content/55">
-                  Requer coluna-chave. Cada carga busca apenas registros com valor maior que o último carregado.
-                </span>
+                <input className="input mt-1 w-full font-mono text-sm" placeholder="ex: updated_at" value={deltaColumn} onChange={(e) => setDeltaColumn(e.target.value)} />
+                <span className="label-text-alt mt-1 text-base-content/55">Requer coluna-chave. Cada carga busca apenas registros com valor maior que o último carregado.</span>
               </label>
             )}
           </div>
