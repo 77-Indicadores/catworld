@@ -3,6 +3,7 @@ import { PageHeader } from "@/components/ui/primitives";
 import { CancelQueueButton } from "@/components/dashboard/cancel-queue";
 import { UploadPoller } from "@/components/uploads/upload-poller";
 import { QueueLane, type QueueItem } from "@/components/uploads/queue-lane";
+import { FailedActions } from "@/components/uploads/failed-actions";
 import { fmtBytes } from "@/lib/fmt";
 
 export const dynamic = "force-dynamic";
@@ -139,6 +140,8 @@ export default async function UploadsPage() {
   const previewItems = previewJobs.map(uploadToItem);
   const importItems  = importJobs.map(uploadToItem);
 
+  const failedCount = [...previewItems, ...importItems, ...syncItems].filter(i => i.status === "FAILED").length;
+
   const allStatuses = [
     ...previewItems.map(i => i.status),
     ...importItems.map(i => i.status),
@@ -155,6 +158,8 @@ export default async function UploadsPage() {
       />
 
       <UploadPoller statuses={allStatuses} />
+
+      <FailedActions count={failedCount} />
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <QueueLane
