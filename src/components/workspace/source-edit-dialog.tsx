@@ -9,6 +9,8 @@ type Source = {
   name: string;
   mode: string;
   refreshPolicy: string;
+  refreshHour: number | null;
+  refreshWeekday: number | null;
   keyColumn: string | null;
   deltaColumn: string | null;
   sourceKind: string;
@@ -21,6 +23,8 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
   const [name, setName] = useState(source.name);
   const [mode, setMode] = useState(source.mode);
   const [policy, setPolicy] = useState(source.refreshPolicy);
+  const [refreshHour, setRefreshHour] = useState(source.refreshHour ?? 0);
+  const [refreshWeekday, setRefreshWeekday] = useState(source.refreshWeekday ?? 0);
   const [keyColumn, setKeyColumn] = useState(source.keyColumn ?? "");
   const [deltaColumn, setDeltaColumn] = useState(source.deltaColumn ?? "");
   const [sql, setSql] = useState(source.sourceSql ?? "");
@@ -35,6 +39,8 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
     setName(source.name);
     setMode(source.mode);
     setPolicy(source.refreshPolicy);
+    setRefreshHour(source.refreshHour ?? 0);
+    setRefreshWeekday(source.refreshWeekday ?? 0);
     setKeyColumn(source.keyColumn ?? "");
     setDeltaColumn(source.deltaColumn ?? "");
     setSql(source.sourceSql ?? "");
@@ -65,6 +71,8 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
       name: name.trim(),
       mode,
       refreshPolicy: mode === "live" ? "manual" : policy,
+      refreshHour: mode === "live" ? null : refreshHour,
+      refreshWeekday: mode === "live" || policy !== "weekly" ? null : refreshWeekday,
       keyColumn: keyColumn.trim() || null,
       deltaColumn: deltaColumn.trim() || null,
     };
@@ -154,6 +162,34 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
               </select>
               {mode === "live" && <span className="label-text-alt mt-1 text-base-content/55">Fontes ao vivo sempre consultam a origem na hora.</span>}
             </label>
+
+            {/* Horário / dia — só para daily e weekly */}
+            {mode !== "live" && (policy === "daily" || policy === "weekly") && (
+              <div className="flex flex-wrap gap-3">
+                {policy === "weekly" && (
+                  <label className="form-control flex-1 min-w-[140px]">
+                    <span className="label-text font-medium">Dia da semana</span>
+                    <select className="select mt-1 w-full" value={refreshWeekday} onChange={(e) => setRefreshWeekday(Number(e.target.value))}>
+                      <option value={0}>Domingo</option>
+                      <option value={1}>Segunda-feira</option>
+                      <option value={2}>Terça-feira</option>
+                      <option value={3}>Quarta-feira</option>
+                      <option value={4}>Quinta-feira</option>
+                      <option value={5}>Sexta-feira</option>
+                      <option value={6}>Sábado</option>
+                    </select>
+                  </label>
+                )}
+                <label className="form-control flex-1 min-w-[120px]">
+                  <span className="label-text font-medium">Horário (UTC)</span>
+                  <select className="select mt-1 w-full" value={refreshHour} onChange={(e) => setRefreshHour(Number(e.target.value))}>
+                    {Array.from({ length: 24 }, (_, h) => (
+                      <option key={h} value={h}>{String(h).padStart(2, "0")}:00</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+            )}
 
             {/* Key column — only for extract mode */}
             {mode === "extract" && (

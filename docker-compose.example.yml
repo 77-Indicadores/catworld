@@ -9,12 +9,27 @@ services:
     volumes:
       - uploads:/data/uploads
     restart: unless-stopped
-  worker:
+
+  worker-uploads:
     build: .
     command: ["./node_modules/.bin/tsx", "src/worker/index.ts"]
     env_file: .env
     environment:
       CATWORLD_UPLOAD_DIR: /data/uploads
+      CATWORLD_WORKER_ID: worker-uploads
+      CATWORLD_WORKER_JOB_TYPES: "PREVIEW_UPLOAD,IMPORT_UPLOAD"
+    volumes:
+      - uploads:/data/uploads
+    restart: unless-stopped
+
+  worker-sync:
+    build: .
+    command: ["./node_modules/.bin/tsx", "src/worker/index.ts"]
+    env_file: .env
+    environment:
+      CATWORLD_UPLOAD_DIR: /data/uploads
+      CATWORLD_WORKER_ID: worker-sync
+      CATWORLD_WORKER_JOB_TYPES: "SOURCE_REFRESH"
     volumes:
       - uploads:/data/uploads
     restart: unless-stopped

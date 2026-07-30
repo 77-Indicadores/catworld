@@ -9,10 +9,22 @@ import { queryColumnsMssql, quotedMssqlTable, streamMssqlRows, tableColumnsMssql
 
 export type RefreshPolicy = "manual" | "hourly" | "daily" | "weekly";
 
-export function nextRefresh(policy: string, from = new Date()) {
+export function nextRefresh(policy: string, from = new Date(), refreshHour = 0, refreshWeekday = 0) {
   if (policy === "hourly") return new Date(from.getTime() + 60 * 60_000);
-  if (policy === "daily") return new Date(from.getTime() + 24 * 60 * 60_000);
-  if (policy === "weekly") return new Date(from.getTime() + 7 * 24 * 60 * 60_000);
+  if (policy === "daily") {
+    const next = new Date(from);
+    next.setUTCHours(refreshHour, 0, 0, 0);
+    if (next <= from) next.setUTCDate(next.getUTCDate() + 1);
+    return next;
+  }
+  if (policy === "weekly") {
+    const next = new Date(from);
+    next.setUTCHours(refreshHour, 0, 0, 0);
+    const daysUntil = (refreshWeekday - next.getUTCDay() + 7) % 7;
+    if (daysUntil === 0 && next <= from) next.setUTCDate(next.getUTCDate() + 7);
+    else next.setUTCDate(next.getUTCDate() + daysUntil);
+    return next;
+  }
   return null;
 }
 
@@ -60,6 +72,8 @@ export async function createDatasetSource(input: {
   sourceTable?: string | null;
   sourceSql?: string | null;
   refreshPolicy: RefreshPolicy;
+  refreshHour?: number | null;
+  refreshWeekday?: number | null;
   keyColumn?: string | null;
   sourceGroupId?: string;
 }) {
@@ -101,8 +115,10 @@ export async function createDatasetSource(input: {
       sourceSql: input.sourceSql ?? null,
       keyColumn: input.keyColumn ?? null,
       refreshPolicy: input.mode === "live" ? "manual" : input.refreshPolicy,
+      refreshHour: input.refreshHour ?? null,
+      refreshWeekday: input.refreshWeekday ?? null,
       lastStatus: input.mode === "live" ? "ready" : "queued",
-      nextRefreshAt: input.mode === "extract" ? nextRefresh(input.refreshPolicy) : null,
+      nextRefreshAt: input.mode === "extract" ? nextRefresh(input.refreshPolicy, new Date(), input.refreshHour ?? 0, input.refreshWeekday ?? 0) : null,
     },
     include: { connection: true, targetTable: { include: { columns: { orderBy: { ordinal: "asc" } } } } },
   });
@@ -117,6 +133,8 @@ export async function createDatasetSources(input: {
   sourceSchema: string;
   sourceTables: string[];
   refreshPolicy: RefreshPolicy;
+  refreshHour?: number | null;
+  refreshWeekday?: number | null;
   sourceGroupId?: string;
 }) {
   const sourceGroupId = input.sourceGroupId ?? randomUUID();
@@ -130,6 +148,8 @@ export async function createDatasetSources(input: {
       sourceSchema: input.sourceSchema,
       sourceTable: table,
       refreshPolicy: input.refreshPolicy,
+      refreshHour: input.refreshHour,
+      refreshWeekday: input.refreshWeekday,
       sourceGroupId,
     }));
   }
@@ -219,7 +239,7 @@ export async function refreshDatasetSource(datasetSourceId: string) {
         lastRowCount: rowCount,
         lastError: null,
         lastRefreshedAt: new Date(),
-        nextRefreshAt: nextRefresh(source.refreshPolicy),
+        nextRefreshAt: nextRefresh(source.refreshPolicy, new Date(), source.refreshHour ?? 0, source.refreshWeekday ?? 0),
         ...(newDeltaValue !== undefined ? { lastDeltaValue: newDeltaValue } : {}),
       },
     });
@@ -227,7 +247,7 @@ export async function refreshDatasetSource(datasetSourceId: string) {
   } catch (e) {
     await pool.request().query(`IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL DROP TABLE ${staging}`).catch(() => undefined);
     const message = e instanceof Error ? e.message : String(e);
-    await prisma.datasetSource.update({ where: { id: source.id }, data: { lastStatus: "failed", lastError: message, nextRefreshAt: nextRefresh(source.refreshPolicy) } });
+    await prisma.datasetSource.update({ where: { id: source.id }, data: { lastStatus: "failed", lastError: message, nextRefreshAt: nextRefresh(source.refreshPolicy, new Date(), source.refreshHour ?? 0, source.refreshWeekday ?? 0) } });
     throw e;
   }
 }

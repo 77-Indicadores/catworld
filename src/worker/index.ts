@@ -18,7 +18,10 @@ let stopping = false;
 process.on("SIGTERM", () => { stopping = true; });
 process.on("SIGINT", () => { stopping = true; });
 
-async function claim(lockedBy: string, maxHeavy: number): Promise<Claimed | null> {
+async function claim(lockedBy: string, maxHeavy: number, allowedTypes: string[] | null): Promise<Claimed | null> {
+  const typeFilter = allowedTypes && allowedTypes.length > 0
+    ? `AND type IN (${allowedTypes.map(t => `'${t.replace(/'/g, "''")}'`).join(",")})`
+    : "";
   const rows = await prisma.$queryRawUnsafe<Claimed[]>(
     `DECLARE @job TABLE(id uniqueidentifier,type varchar(50),upload_id uniqueidentifier,payload_json nvarchar(max),attempts int,max_attempts int,weight tinyint);
      UPDATE dbo.cw_jobs WITH (UPDLOCK,READPAST,ROWLOCK)
@@ -27,6 +30,7 @@ async function claim(lockedBy: string, maxHeavy: number): Promise<Claimed | null
      WHERE id=(
        SELECT TOP(1) id FROM dbo.cw_jobs WITH (UPDLOCK,READPAST)
        WHERE status='QUEUED' AND available_at<=SYSUTCDATETIME()
+         ${typeFilter}
          AND (weight<2 OR (SELECT COUNT(*) FROM dbo.cw_jobs WHERE status='RUNNING' AND weight=2)<@P2)
        ORDER BY weight ASC,available_at ASC
      );
@@ -299,10 +303,20 @@ async function recoverStale() {
 
 async function loop(concurrencyId: number) {
   const workerLabel = `${env().CATWORLD_WORKER_ID}-${concurrencyId}@${hostname()}`;
-  console.log(`[worker] ${workerLabel} iniciado`);
+  const rawTypes = env().CATWORLD_WORKER_JOB_TYPES;
+  const allowedTypes = rawTypes ? rawTypes.split(",").map(t => t.trim()).filter(Boolean) : null;
+  if (allowedTypes) console.log(`[worker] ${workerLabel} restrito a tipos: ${allowedTypes.join(", ")}`);
+  else console.log(`[worker] ${workerLabel} iniciado`);
   const maxHeavy = env().CATWORLD_MAX_HEAVY_JOBS;
   while (!stopping) {
-    const job = await claim(workerLabel, maxHeavy);
+    let job: Claimed | null;
+    try {
+      job = await claim(workerLabel, maxHeavy, allowedTypes);
+    } catch (e) {
+      console.warn("[worker] claim falhou (transiente): %s", e instanceof Error ? e.message : e);
+      await new Promise(r => setTimeout(r, env().CATWORLD_JOB_POLL_MS));
+      continue;
+    }
     if (!job) {
       await new Promise(r => setTimeout(r, env().CATWORLD_JOB_POLL_MS));
       continue;
@@ -339,8 +353,12 @@ async function main() {
   const recoveryLoop = async () => {
     while (!stopping) {
       if (Date.now() - lastRecovery > 60000) {
-        await recoverStale();
-        await enqueueDueSourceRefreshes();
+        try {
+          await recoverStale();
+          await enqueueDueSourceRefreshes();
+        } catch (e) {
+          console.warn("[recovery] erro (transiente): %s", e instanceof Error ? e.message : e);
+        }
         lastRecovery = Date.now();
       }
       await new Promise(r => setTimeout(r, 1000));

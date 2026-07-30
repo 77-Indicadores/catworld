@@ -42,6 +42,8 @@ export default async function ProjectPage({ params }: { params: Promise<{ projec
           sourceTable: t.source.sourceTable,
           sourceSql: t.source.sourceSql,
           refreshPolicy: t.source.refreshPolicy,
+          refreshHour: t.source.refreshHour,
+          refreshWeekday: t.source.refreshWeekday,
           keyColumn: t.source.keyColumn,
           deltaColumn: t.source.deltaColumn,
           lastStatus: t.source.lastStatus,

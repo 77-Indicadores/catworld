@@ -24,6 +24,8 @@ async function authoriseGroup(request: NextRequest, groupId: string) {
 const patchSchema = z.object({
   mode: z.enum(["extract", "live"]).optional(),
   refreshPolicy: z.enum(["manual", "hourly", "daily", "weekly"]).optional(),
+  refreshHour: z.number().int().min(0).max(23).nullable().optional(),
+  refreshWeekday: z.number().int().min(0).max(6).nullable().optional(),
   active: z.boolean().optional(),
 });
 
@@ -34,8 +36,10 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     const input = patchSchema.parse(await request.json());
 
     const effectivePolicy = input.mode === "live" ? "manual" : input.refreshPolicy;
+    const hour = input.refreshHour ?? 0;
+    const weekday = input.refreshWeekday ?? 0;
     const nextAt = effectivePolicy && effectivePolicy !== "manual"
-      ? nextRefresh(effectivePolicy)
+      ? nextRefresh(effectivePolicy, new Date(), hour, weekday)
       : effectivePolicy === "manual" ? null : undefined;
 
     await prisma.datasetSource.updateMany({
@@ -44,6 +48,8 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
         ...(input.mode !== undefined ? { mode: input.mode } : {}),
         ...(input.mode === "live" ? { refreshPolicy: "manual", nextRefreshAt: null } : {}),
         ...(effectivePolicy !== undefined && input.mode !== "live" ? { refreshPolicy: effectivePolicy } : {}),
+        ...(input.refreshHour !== undefined ? { refreshHour: input.refreshHour } : {}),
+        ...(input.refreshWeekday !== undefined ? { refreshWeekday: input.refreshWeekday } : {}),
         ...(nextAt !== undefined && input.mode !== "live" ? { nextRefreshAt: nextAt } : {}),
         ...(input.active !== undefined ? { active: input.active } : {}),
       },

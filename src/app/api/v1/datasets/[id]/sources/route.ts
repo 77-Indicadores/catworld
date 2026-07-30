@@ -36,6 +36,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       sourceTables: z.array(z.string().min(1)).optional(),
       sourceSql: z.string().optional().nullable(),
       refreshPolicy: z.enum(["manual", "hourly", "daily", "weekly"]).default("manual"),
+      refreshHour: z.number().int().min(0).max(23).nullable().optional(),
+      refreshWeekday: z.number().int().min(0).max(6).nullable().optional(),
       keyColumn: z.string().max(128).nullable().optional(),
       sourceGroupId: z.string().uuid().optional(),
     }).parse(await request.json());
@@ -47,6 +49,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         sourceSchema: input.sourceSchema ?? "",
         sourceTables: input.sourceTables,
         refreshPolicy: input.refreshPolicy,
+        refreshHour: input.refreshHour,
+        refreshWeekday: input.refreshWeekday,
         sourceGroupId: input.sourceGroupId,
       }), undefined, 201);
     }

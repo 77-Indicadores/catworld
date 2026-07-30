@@ -10,7 +10,7 @@ import { QueryPanel } from "./query-panel";
 import { DatasetPanel } from "./dataset-panel";
 
 type Column = { id: string; sqlName: string; originalName: string; sqlType: string; nullable: boolean };
-type TableSource = { id: string; name: string; mode: string; sourceKind: string; sourceGroupId: string | null; sourceSchema: string | null; sourceTable: string | null; sourceSql: string | null; refreshPolicy: string; keyColumn: string | null; deltaColumn: string | null; active: boolean; lastStatus: string | null; lastRowCount: string | null; lastError: string | null; lastRefreshedAt: string | null; nextRefreshAt: string | null; connection: { id: string; name: string } };
+type TableSource = { id: string; name: string; mode: string; sourceKind: string; sourceGroupId: string | null; sourceSchema: string | null; sourceTable: string | null; sourceSql: string | null; refreshPolicy: string; refreshHour: number | null; refreshWeekday: number | null; keyColumn: string | null; deltaColumn: string | null; active: boolean; lastStatus: string | null; lastRowCount: string | null; lastError: string | null; lastRefreshedAt: string | null; nextRefreshAt: string | null; connection: { id: string; name: string } };
 type Table = { id: string; name: string; sqlName: string; rowCount: string; lastDataAt: string | null; source: TableSource | null; columns: Column[] };
 type Dataset = { id: string; slug: string; name: string; description: string | null; active: boolean; schemaName: string; tables: Table[] };
 type Project = { id: string; slug: string; name: string; description: string | null; active: boolean; datasets: Dataset[] };
@@ -37,10 +37,13 @@ function CopyId({ label, id, className }: { label: string; id: string; className
   );
 }
 
-function sourceStatus(status: string | null): "healthy" | "warning" | "error" | "inactive" {
-  if (status === "completed" || status === "ready") return "healthy";
-  if (status === "failed") return "error";
-  if (status === "queued" || status === "running") return "warning";
+function sourceStatus(source: TableSource): "healthy" | "warning" | "error" | "inactive" {
+  if (source.lastStatus === "failed") return "error";
+  if (source.lastStatus === "queued" || source.lastStatus === "running") return "warning";
+  if (source.lastStatus === "completed" || source.lastStatus === "ready") {
+    if (source.nextRefreshAt && source.refreshPolicy !== "manual" && new Date(source.nextRefreshAt) < new Date()) return "warning";
+    return "healthy";
+  }
   return "inactive";
 }
 
@@ -102,7 +105,7 @@ function MetadataPanel({ table, dataset, onChanged }: { table: Table; dataset: D
         {table.source && (
           <div className="flex justify-between gap-2">
             <span className="text-base-content/50">Status</span>
-            <StatusBadge status={sourceStatus(table.source.lastStatus)} label={table.source.lastStatus ?? "Pronta"} />
+            <StatusBadge status={sourceStatus(table.source)} label={sourceStatus(table.source) === "warning" && table.source.lastStatus === "completed" ? "Atrasado" : (table.source.lastStatus ?? "Pronta")} />
           </div>
         )}
       </div>

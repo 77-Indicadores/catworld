@@ -13,7 +13,8 @@ type Source = {
   id: string; name: string; mode: string; sourceKind: string;
   sourceGroupId: string | null;
   sourceSchema: string | null; sourceTable: string | null; sourceSql: string | null;
-  refreshPolicy: string; keyColumn: string | null; deltaColumn: string | null; active: boolean;
+  refreshPolicy: string; refreshHour: number | null; refreshWeekday: number | null;
+  keyColumn: string | null; deltaColumn: string | null; active: boolean;
   lastStatus: string | null; lastRowCount: string | null; lastError: string | null;
   lastRefreshedAt: string | null; nextRefreshAt: string | null;
   connection: { id: string; name: string };
@@ -52,17 +53,30 @@ function buildGroups(tables: Table[]): SourceGroup[] {
   return groups;
 }
 
-function statusKind(status: string | null): "healthy" | "warning" | "error" | "inactive" {
-  if (status === "completed" || status === "ready") return "healthy";
-  if (status === "failed") return "error";
-  if (status === "running" || status === "queued") return "warning";
+function isOverdue(source: Source): boolean {
+  if (source.lastStatus !== "completed" && source.lastStatus !== "ready") return false;
+  if (!source.nextRefreshAt || source.refreshPolicy === "manual") return false;
+  return new Date(source.nextRefreshAt) < new Date();
+}
+
+function statusKind(source: Source): "healthy" | "warning" | "error" | "inactive" {
+  if (source.lastStatus === "failed") return "error";
+  if (source.lastStatus === "running" || source.lastStatus === "queued") return "warning";
+  if (source.lastStatus === "completed" || source.lastStatus === "ready") {
+    if (isOverdue(source)) return "warning";
+    return "healthy";
+  }
   return "inactive";
 }
 
 function sourceBadge(source: Source) {
   if (!source.active) return { status: "inactive" as const, label: "Pausado" };
-  const kind = statusKind(source.lastStatus);
-  return { status: kind, label: kind === "error" ? "Erro" : kind === "warning" ? "Processando" : kind === "healthy" ? "Pronto" : "Pendente" };
+  const kind = statusKind(source);
+  const overdue = isOverdue(source);
+  return {
+    status: kind,
+    label: kind === "error" ? "Erro" : kind === "warning" ? (overdue ? "Atrasado" : "Processando") : kind === "healthy" ? "Pronto" : "Pendente",
+  };
 }
 
 function refreshText(policy: string) {
@@ -149,6 +163,11 @@ function BatchGroupRow({ groupId, datasetId, sources, tables, onSelectTable, onC
           <p className="text-xs text-base-content/40">
             {tables.length} tabela{tables.length !== 1 ? "s" : ""}
             {" · " + (rep.mode === "extract" ? refreshText(rep.refreshPolicy) : "Ao vivo")}
+            {rep.nextRefreshAt && rep.mode === "extract" && rep.refreshPolicy !== "manual" && (
+              new Date(rep.nextRefreshAt) < new Date()
+                ? <span className="text-warning"> · próx. sync atrasado</span>
+                : <span> · próx. {new Date(rep.nextRefreshAt).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" })}</span>
+            )}
             {" · " + groupSummary}
           </p>
         </div>
@@ -193,7 +212,7 @@ function BatchGroupRow({ groupId, datasetId, sources, tables, onSelectTable, onC
 
       {/* Ações do grupo — mode/policy editados via GroupEditDialog */}
       <div className="mt-2 flex items-center gap-1">
-        <GroupEditDialog groupId={groupId} datasetId={datasetId} connectionId={rep.connection.id} connectionName={rep.connection.name} sourceSchema={rep.sourceSchema} mode={rep.mode} refreshPolicy={rep.refreshPolicy} sources={sources} tables={tables} onComplete={onChanged} />
+        <GroupEditDialog groupId={groupId} datasetId={datasetId} connectionId={rep.connection.id} connectionName={rep.connection.name} sourceSchema={rep.sourceSchema} mode={rep.mode} refreshPolicy={rep.refreshPolicy} initRefreshHour={rep.refreshHour ?? 0} initRefreshWeekday={rep.refreshWeekday ?? 0} sources={sources} tables={tables} onComplete={onChanged} />
         <button onClick={toggleGroup} className="btn btn-ghost btn-xs gap-1">
           {allActive
             ? <ToggleRight size={13} className="text-success" />
@@ -215,13 +234,16 @@ function BatchGroupRow({ groupId, datasetId, sources, tables, onSelectTable, onC
 }
 
 // ── Dialog to edit mode/policy + manage tables for a batch group ───────────
-function GroupEditDialog({ groupId, datasetId, connectionId, connectionName, sourceSchema, mode: initMode, refreshPolicy: initPolicy, sources, tables, onComplete }: {
+function GroupEditDialog({ groupId, datasetId, connectionId, connectionName, sourceSchema, mode: initMode, refreshPolicy: initPolicy, initRefreshHour, initRefreshWeekday, sources, tables, onComplete }: {
   groupId: string; datasetId: string; connectionId: string; connectionName: string; sourceSchema: string | null;
-  mode: string; refreshPolicy: string; sources: Source[]; tables: Table[]; onComplete: () => void;
+  mode: string; refreshPolicy: string; initRefreshHour: number; initRefreshWeekday: number;
+  sources: Source[]; tables: Table[]; onComplete: () => void;
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [mode, setMode] = useState(initMode);
   const [policy, setPolicy] = useState(initPolicy);
+  const [refreshHour, setRefreshHour] = useState(initRefreshHour);
+  const [refreshWeekday, setRefreshWeekday] = useState(initRefreshWeekday);
   const [saving, setSaving] = useState(false);
 
   const [showPicker, setShowPicker] = useState(false);
@@ -233,6 +255,7 @@ function GroupEditDialog({ groupId, datasetId, connectionId, connectionName, sou
 
   function openDialog() {
     setMode(initMode); setPolicy(initPolicy);
+    setRefreshHour(initRefreshHour); setRefreshWeekday(initRefreshWeekday);
     setShowPicker(false); setSelectedNew([]); setAvailableTables([]); setPickerSearch("");
     dialogRef.current?.showModal();
   }
@@ -261,6 +284,8 @@ function GroupEditDialog({ groupId, datasetId, connectionId, connectionName, sou
         connectionId, mode, sourceKind: "table", sourceSchema,
         sourceTables: selectedNew,
         refreshPolicy: mode === "live" ? "manual" : policy,
+        refreshHour: mode === "live" ? null : refreshHour,
+        refreshWeekday: mode === "live" || policy !== "weekly" ? null : refreshWeekday,
         sourceGroupId: groupId,
       }),
     });
@@ -277,7 +302,12 @@ function GroupEditDialog({ groupId, datasetId, connectionId, connectionName, sou
     setSaving(true);
     await fetch("/api/v1/source-groups/" + groupId, {
       method: "PATCH", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ mode, refreshPolicy: mode === "live" ? "manual" : policy }),
+      body: JSON.stringify({
+        mode,
+        refreshPolicy: mode === "live" ? "manual" : policy,
+        refreshHour: mode === "live" ? null : refreshHour,
+        refreshWeekday: mode === "live" || policy !== "weekly" ? null : refreshWeekday,
+      }),
     });
     setSaving(false); closeDialog(); onComplete();
   }
@@ -312,6 +342,32 @@ function GroupEditDialog({ groupId, datasetId, connectionId, connectionName, sou
                 <option value="weekly">Semanal</option>
               </select>
             </label>
+            {mode !== "live" && (policy === "daily" || policy === "weekly") && (
+              <div className="flex flex-wrap gap-3">
+                {policy === "weekly" && (
+                  <label className="form-control flex-1 min-w-[140px]">
+                    <span className="label-text font-medium">Dia da semana</span>
+                    <select className="select mt-1 w-full" value={refreshWeekday} onChange={e => setRefreshWeekday(Number(e.target.value))}>
+                      <option value={0}>Domingo</option>
+                      <option value={1}>Segunda-feira</option>
+                      <option value={2}>Terça-feira</option>
+                      <option value={3}>Quarta-feira</option>
+                      <option value={4}>Quinta-feira</option>
+                      <option value={5}>Sexta-feira</option>
+                      <option value={6}>Sábado</option>
+                    </select>
+                  </label>
+                )}
+                <label className="form-control flex-1 min-w-[120px]">
+                  <span className="label-text font-medium">Horário (UTC)</span>
+                  <select className="select mt-1 w-full" value={refreshHour} onChange={e => setRefreshHour(Number(e.target.value))}>
+                    {Array.from({ length: 24 }, (_, h) => (
+                      <option key={h} value={h}>{String(h).padStart(2, "0")}:00</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+            )}
           </div>
 
           <p className="mt-5 text-[11px] font-semibold uppercase tracking-wider text-base-content/40">Tabelas</p>
