@@ -12,7 +12,8 @@ import { DatasetPanel } from "./dataset-panel";
 type Column = { id: string; sqlName: string; originalName: string; sqlType: string; nullable: boolean };
 type TableSource = { id: string; name: string; mode: string; sourceKind: string; sourceGroupId: string | null; sourceSchema: string | null; sourceTable: string | null; sourceSql: string | null; refreshCron: string | null; keyColumn: string | null; deltaColumn: string | null; active: boolean; lastStatus: string | null; lastRowCount: string | null; lastError: string | null; lastRefreshedAt: string | null; nextRefreshAt: string | null; connection: { id: string; name: string } };
 type Table = { id: string; name: string; sqlName: string; rowCount: string; lastDataAt: string | null; source: TableSource | null; columns: Column[] };
-type Dataset = { id: string; slug: string; name: string; description: string | null; active: boolean; schemaName: string; tables: Table[] };
+type DerivedTable = { id: string; name: string; sqlName: string; querySql: string; refreshCron: string | null; active: boolean; lastStatus: string | null; lastRowCount: string | null; lastError: string | null; lastRefreshedAt: string | null; nextRefreshAt: string | null; targetTable: { id: string; rowCount: string; lastDataAt: string | null } | null };
+type Dataset = { id: string; slug: string; name: string; description: string | null; active: boolean; schemaName: string; tables: Table[]; derivedTables: DerivedTable[] };
 type Project = { id: string; slug: string; name: string; description: string | null; active: boolean; datasets: Dataset[] };
 
 type Tab =
@@ -192,7 +193,10 @@ export function ProjectWorkspace({ project, publicOrigin }: { project: Project; 
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState("");
   const hasActiveRefresh = useMemo(
-    () => project.datasets.some(d => d.tables.some(t => t.source?.mode === "extract" && (t.source.lastStatus === "queued" || t.source.lastStatus === "running"))),
+    () => project.datasets.some(d =>
+      d.tables.some(t => t.source?.mode === "extract" && (t.source.lastStatus === "queued" || t.source.lastStatus === "running")) ||
+      d.derivedTables.some(dt => dt.lastStatus === "queued" || dt.lastStatus === "running"),
+    ),
     [project.datasets],
   );
 

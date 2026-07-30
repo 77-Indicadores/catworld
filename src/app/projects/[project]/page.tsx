@@ -10,7 +10,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ projec
   const actor = await resolveActor(), ids = await visibleProjectIds(actor);
   const p = await prisma.project.findFirst({
     where: { slug: (await params).project, ...(ids ? { id: { in: ids } } : {}) },
-    include: { datasets: { where: { active: true }, include: { tables: { include: { columns: { orderBy: { ordinal: "asc" } }, source: { include: { connection: true } } } } } } },
+    include: { datasets: { where: { active: true }, include: { tables: { include: { columns: { orderBy: { ordinal: "asc" } }, source: { include: { connection: true } } } }, derivedTables: { where: { active: true }, orderBy: { createdAt: "asc" }, include: { targetTable: { select: { id: true, rowCount: true, lastDataAt: true } } } } } } },
   });
   if (!p) notFound();
   const project = {
@@ -53,6 +53,20 @@ export default async function ProjectPage({ params }: { params: Promise<{ projec
           connection: { id: t.source.connection.id, name: t.source.connection.name },
         } : null,
         columns: t.columns.map((c) => ({ id: c.id, sqlName: c.sqlName, originalName: c.originalName, sqlType: c.sqlType, nullable: c.nullable })),
+      })),
+      derivedTables: d.derivedTables.map((dt) => ({
+        id: dt.id,
+        name: dt.name,
+        sqlName: dt.sqlName,
+        querySql: dt.querySql,
+        refreshCron: dt.refreshCron,
+        active: dt.active,
+        lastStatus: dt.lastStatus,
+        lastRowCount: dt.lastRowCount ? String(dt.lastRowCount) : null,
+        lastError: dt.lastError,
+        lastRefreshedAt: dt.lastRefreshedAt?.toISOString() ?? null,
+        nextRefreshAt: dt.nextRefreshAt?.toISOString() ?? null,
+        targetTable: dt.targetTable ? { id: dt.targetTable.id, rowCount: String(dt.targetTable.rowCount), lastDataAt: dt.targetTable.lastDataAt?.toISOString() ?? null } : null,
       })),
     })),
   };

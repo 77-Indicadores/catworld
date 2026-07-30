@@ -1,7 +1,7 @@
 "use client";
 import { useRef, useState } from "react";
 import { Cron } from "croner";
-import { Cable, ChevronDown, Database, DatabaseZap, Pencil, Plus, RefreshCw, Search, Table2, ToggleLeft, ToggleRight, Trash2, UploadCloud } from "lucide-react";
+import { Cable, ChevronDown, Code2, Database, DatabaseZap, Pencil, Plus, RefreshCw, Search, Table2, ToggleLeft, ToggleRight, Trash2, UploadCloud } from "lucide-react";
 import { CopyableId } from "@/components/ui/copyable-id";
 import { EditCatalogDialog } from "@/components/management/edit-catalog-dialog";
 import { StatusBadge } from "@/components/ui/primitives";
@@ -21,7 +21,8 @@ type Source = {
   connection: { id: string; name: string };
 };
 type Table = { id: string; name: string; lastDataAt: string | null; source: Source | null };
-type Dataset = { id: string; slug: string; name: string; description: string | null; active: boolean; tables: Table[] };
+type DerivedTable = { id: string; name: string; sqlName: string; querySql: string; refreshCron: string | null; active: boolean; lastStatus: string | null; lastRowCount: string | null; lastError: string | null; lastRefreshedAt: string | null; nextRefreshAt: string | null; targetTable: { id: string; rowCount: string; lastDataAt: string | null } | null };
+type Dataset = { id: string; slug: string; name: string; description: string | null; active: boolean; schemaName: string; tables: Table[]; derivedTables: DerivedTable[] };
 
 // A group is either:
 //   - Multiple table sources that share a sourceGroupId (batch import)
@@ -520,6 +521,249 @@ function SingleSourceRow({ source: s, table: t, onSelectTable, onChanged }: {
   );
 }
 
+// ── Derived tables helpers ─────────────────────────────────────────────────
+function derivedStatusKind(dt: DerivedTable): "healthy" | "warning" | "error" | "inactive" {
+  if (!dt.active) return "inactive";
+  if (dt.lastStatus === "failed") return "error";
+  if (dt.lastStatus === "queued" || dt.lastStatus === "running") return "warning";
+  if (dt.lastStatus === "ok") return "healthy";
+  return "inactive";
+}
+function derivedStatusLabel(dt: DerivedTable): string {
+  if (!dt.active) return "Pausado";
+  if (dt.lastStatus === "failed") return "Erro";
+  if (dt.lastStatus === "running") return "Processando";
+  if (dt.lastStatus === "queued") return "Na fila";
+  if (dt.lastStatus === "ok") return "Pronto";
+  return "Pendente";
+}
+
+function DerivedCreateDialog({ datasetId, onComplete }: { datasetId: string; onComplete: () => void }) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const [name, setName] = useState("");
+  const [querySql, setQuerySql] = useState("");
+  const [refreshCron, setRefreshCron] = useState("");
+  const [runNow, setRunNow] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  function open() {
+    setName(""); setQuerySql(""); setRefreshCron(""); setRunNow(true); setError("");
+    dialogRef.current?.showModal();
+  }
+  function close() { dialogRef.current?.close(); }
+
+  async function create() {
+    setSaving(true); setError("");
+    const r = await fetch(`/api/v1/datasets/${datasetId}/derived-tables`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name, querySql, refreshCron: refreshCron.trim() || null, triggerNow: runNow }),
+    });
+    setSaving(false);
+    if (!r.ok) { const b = await r.json().catch(() => ({})); setError(b.error ?? "Erro ao criar"); return; }
+    close(); onComplete();
+  }
+
+  return (
+    <>
+      <button className="flex items-center gap-1 text-[10px] font-medium text-primary hover:underline" onClick={open}>
+        <Plus size={12} />Nova derivada
+      </button>
+      <dialog ref={dialogRef} className="modal">
+        <div className="modal-box max-w-lg">
+          <h3 className="font-bold text-base">Nova tabela derivada</h3>
+          <p className="mt-0.5 text-xs text-base-content/50">Tabela materializada a partir de uma consulta SQL</p>
+          <div className="mt-4 space-y-3">
+            <label className="form-control w-full">
+              <span className="label-text font-medium">Nome da tabela</span>
+              <input className="input mt-1 w-full" placeholder="ex: vendas_resumo" value={name} onChange={e => setName(e.target.value)} />
+            </label>
+            <label className="form-control w-full">
+              <span className="label-text font-medium">SQL (SELECT)</span>
+              <textarea
+                className="textarea mt-1 w-full font-mono text-xs leading-relaxed"
+                rows={8}
+                placeholder={"SELECT ...\nFROM [schema].[tabela]"}
+                value={querySql}
+                onChange={e => setQuerySql(e.target.value)}
+              />
+            </label>
+            <label className="form-control w-full">
+              <span className="label-text font-medium">Agendamento (cron UTC)</span>
+              <input
+                className="input mt-1 w-full font-mono text-sm"
+                placeholder="ex: 0 5 * * *  —  vazio = manual"
+                value={refreshCron}
+                onChange={e => setRefreshCron(e.target.value)}
+              />
+              {refreshCron.trim() ? <CronPreview cron={refreshCron} /> : (
+                <span className="label-text-alt mt-1 text-base-content/55">Vazio = sem agendamento automático</span>
+              )}
+            </label>
+            <label className="flex cursor-pointer items-center gap-2 text-sm select-none">
+              <input type="checkbox" className="checkbox checkbox-sm" checked={runNow} onChange={e => setRunNow(e.target.checked)} />
+              Executar agora após criar
+            </label>
+          </div>
+          {error && <p className="mt-3 text-xs text-error">{error}</p>}
+          <div className="modal-action">
+            <button className="btn btn-ghost btn-sm" onClick={close}>Cancelar</button>
+            <button className="btn btn-primary btn-sm" disabled={saving || !name.trim() || !querySql.trim()} onClick={create}>
+              {saving ? <><span className="loading loading-spinner loading-xs" />Criando…</> : "Criar tabela"}
+            </button>
+          </div>
+        </div>
+        <form method="dialog" className="modal-backdrop"><button onClick={close}>fechar</button></form>
+      </dialog>
+    </>
+  );
+}
+
+function DerivedEditDialog({ dt, onComplete }: { dt: DerivedTable; onComplete: () => void }) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const [name, setName] = useState(dt.name);
+  const [querySql, setQuerySql] = useState(dt.querySql);
+  const [refreshCron, setRefreshCron] = useState(dt.refreshCron ?? "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  function open() {
+    setName(dt.name); setQuerySql(dt.querySql); setRefreshCron(dt.refreshCron ?? ""); setError("");
+    dialogRef.current?.showModal();
+  }
+  function close() { dialogRef.current?.close(); }
+
+  async function save() {
+    setSaving(true); setError("");
+    const r = await fetch(`/api/v1/derived-tables/${dt.id}`, {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name, querySql, refreshCron: refreshCron.trim() || null }),
+    });
+    setSaving(false);
+    if (!r.ok) { const b = await r.json().catch(() => ({})); setError(b.error ?? "Erro ao salvar"); return; }
+    close(); onComplete();
+  }
+
+  return (
+    <>
+      <button className="btn btn-ghost btn-xs gap-1" onClick={open}><Pencil size={13} />Editar</button>
+      <dialog ref={dialogRef} className="modal">
+        <div className="modal-box max-w-lg">
+          <h3 className="font-bold text-base">Editar tabela derivada</h3>
+          <p className="mt-0.5 font-mono text-xs text-base-content/40">{dt.sqlName}</p>
+          <div className="mt-4 space-y-3">
+            <label className="form-control w-full">
+              <span className="label-text font-medium">Nome</span>
+              <input className="input mt-1 w-full" value={name} onChange={e => setName(e.target.value)} />
+            </label>
+            <label className="form-control w-full">
+              <span className="label-text font-medium">SQL</span>
+              <textarea
+                className="textarea mt-1 w-full font-mono text-xs leading-relaxed"
+                rows={10}
+                value={querySql}
+                onChange={e => setQuerySql(e.target.value)}
+              />
+            </label>
+            <label className="form-control w-full">
+              <span className="label-text font-medium">Agendamento (cron UTC)</span>
+              <input
+                className="input mt-1 w-full font-mono text-sm"
+                placeholder="ex: 0 5 * * *  —  vazio = manual"
+                value={refreshCron}
+                onChange={e => setRefreshCron(e.target.value)}
+              />
+              {refreshCron.trim() ? <CronPreview cron={refreshCron} /> : (
+                <span className="label-text-alt mt-1 text-base-content/55">Vazio = sem agendamento automático</span>
+              )}
+            </label>
+          </div>
+          {error && <p className="mt-3 text-xs text-error">{error}</p>}
+          <div className="modal-action">
+            <button className="btn btn-ghost btn-sm" onClick={close}>Cancelar</button>
+            <button className="btn btn-primary btn-sm" disabled={saving || !name.trim() || !querySql.trim()} onClick={save}>
+              {saving ? <><span className="loading loading-spinner loading-xs" />Salvando…</> : "Salvar"}
+            </button>
+          </div>
+        </div>
+        <form method="dialog" className="modal-backdrop"><button onClick={close}>fechar</button></form>
+      </dialog>
+    </>
+  );
+}
+
+function DerivedRow({ dt, schemaName, onSelectTable, onChanged }: {
+  dt: DerivedTable; schemaName: string; onSelectTable: (id: string) => void; onChanged: () => void;
+}) {
+  const [refreshing, setRefreshing] = useState(false);
+  const status = derivedStatusKind(dt);
+  const label = derivedStatusLabel(dt);
+  const rowCount = dt.targetTable?.rowCount ?? dt.lastRowCount;
+
+  async function triggerRefresh() {
+    setRefreshing(true);
+    await fetch(`/api/v1/derived-tables/${dt.id}/refresh`, { method: "POST" });
+    setRefreshing(false);
+    onChanged();
+  }
+
+  async function deleteDerived() {
+    if (!confirm(`Excluir "${dt.name}"? A tabela materializada será removida do Catworld.`)) return;
+    await fetch(`/api/v1/derived-tables/${dt.id}`, { method: "DELETE" });
+    onChanged();
+  }
+
+  return (
+    <div className="px-5 py-3">
+      <div className="flex items-center gap-3">
+        <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-base-200 text-base-content/50">
+          <Code2 size={13} />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="truncate font-medium text-base-content">{dt.name}</span>
+            <StatusBadge status={status} label={label} />
+          </div>
+          <p className="truncate text-xs text-base-content/40">
+            <span className="font-mono">{schemaName}.{dt.sqlName}</span>
+            {fmtRows(rowCount) && <span> · {fmtRows(rowCount)} linhas</span>}
+            {dt.refreshCron ? <span> · {dt.refreshCron}</span> : <span> · Manual</span>}
+            {dt.nextRefreshAt && dt.refreshCron && (
+              new Date(dt.nextRefreshAt) < new Date()
+                ? <span className="text-warning"> · próx. sync atrasado</span>
+                : <span> · próx. {new Date(dt.nextRefreshAt).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" })}</span>
+            )}
+          </p>
+        </div>
+        {dt.targetTable && (
+          <button onClick={() => onSelectTable(dt.targetTable!.id)} className="btn btn-ghost btn-xs gap-1 shrink-0">
+            <Table2 size={12} />Abrir
+          </button>
+        )}
+      </div>
+
+      {dt.lastError && (
+        <div className="mt-2 rounded bg-error/8 px-2 py-1 font-mono text-[11px] text-error">{dt.lastError}</div>
+      )}
+
+      <div className="mt-2 flex items-center gap-1">
+        <DerivedEditDialog dt={dt} onComplete={onChanged} />
+        <button
+          onClick={triggerRefresh}
+          disabled={refreshing || dt.lastStatus === "running" || dt.lastStatus === "queued"}
+          className="btn btn-ghost btn-xs gap-1"
+        >
+          <RefreshCw size={12} className={(refreshing || dt.lastStatus === "running") ? "animate-spin" : ""} />
+          {refreshing ? "..." : dt.lastStatus === "failed" ? "Tentar novamente" : "Atualizar"}
+        </button>
+        <button onClick={deleteDerived} className="btn btn-ghost btn-xs text-error/60 hover:text-error ml-auto" title="Excluir derivada">
+          <Trash2 size={12} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ── Main panel ─────────────────────────────────────────────────────────────
 export function DatasetPanel({ dataset, projectSlug, publicOrigin, onSelectTable, onChanged }: {
   dataset: Dataset; projectSlug: string; publicOrigin: string;
@@ -571,6 +815,25 @@ export function DatasetPanel({ dataset, projectSlug, publicOrigin, onSelectTable
               ? <BatchGroupRow key={g.groupId} {...g} datasetId={dataset.id} onSelectTable={onSelectTable} onChanged={onChanged} />
               : <SingleSourceRow key={g.source.id} {...g} onSelectTable={onSelectTable} onChanged={onChanged} />
           )}
+        </div>
+      )}
+
+      {/* ── Derivadas ── */}
+      <SectionHeader
+        label={"Derivadas" + (dataset.derivedTables.length ? ` (${dataset.derivedTables.length})` : "")}
+        action={<DerivedCreateDialog datasetId={dataset.id} onComplete={onChanged} />}
+      />
+
+      {dataset.derivedTables.length === 0 ? (
+        <div className="flex items-center gap-3 px-5 py-4 text-xs text-base-content/40">
+          <Code2 size={14} />
+          <span>Nenhuma tabela derivada. Crie uma a partir de uma consulta SQL.</span>
+        </div>
+      ) : (
+        <div className="divide-y divide-base-300">
+          {dataset.derivedTables.map(dt => (
+            <DerivedRow key={dt.id} dt={dt} schemaName={dataset.schemaName} onSelectTable={onSelectTable} onChanged={onChanged} />
+          ))}
         </div>
       )}
 
