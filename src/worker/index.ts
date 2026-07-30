@@ -336,6 +336,23 @@ async function recoverStale() {
            AND JSON_VALUE(j.payload_json,'$.datasetSourceId') = CONVERT(nvarchar(36),s.id)
        )`,
   );
+
+  // Fix derived tables stuck in 'running' with no active job
+  await prisma.$executeRawUnsafe(
+    `UPDATE d
+     SET last_status='failed',
+         last_error='Processamento interrompido',
+         updated_at=SYSUTCDATETIME()
+     FROM dbo.cw_derived_tables d
+     WHERE d.last_status='running'
+       AND NOT EXISTS (
+         SELECT 1
+         FROM dbo.cw_jobs j
+         WHERE j.type='DERIVED_REFRESH'
+           AND j.status IN ('QUEUED','RUNNING')
+           AND JSON_VALUE(j.payload_json,'$.derivedTableId') = CONVERT(nvarchar(36),d.id)
+       )`,
+  );
 }
 
 async function loop(concurrencyId: number) {

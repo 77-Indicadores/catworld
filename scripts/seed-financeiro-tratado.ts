@@ -122,10 +122,10 @@ async function main() {
   const derivedTableId = newId[0].id;
   console.log("Tabela derivada criada:", derivedTableId);
 
-  // Enqueue refresh job
+  // Enqueue refresh job (created_at/updated_at are application-managed, not via DB DEFAULT)
   await prisma.$executeRawUnsafe(`
-    INSERT INTO dbo.cw_jobs (type, status, payload_json, max_attempts, weight, available_at)
-    VALUES ('DERIVED_REFRESH', 'QUEUED', @P1, 2, 2, SYSUTCDATETIME())
+    INSERT INTO dbo.cw_jobs (id, type, status, payload_json, max_attempts, weight, available_at, created_at, updated_at)
+    VALUES (NEWID(), 'DERIVED_REFRESH', 'QUEUED', @P1, 2, 2, SYSUTCDATETIME(), SYSUTCDATETIME(), SYSUTCDATETIME())
   `,
     JSON.stringify({ derivedTableId }),
   );
