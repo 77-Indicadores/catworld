@@ -769,7 +769,8 @@ export function DatasetPanel({ dataset, projectSlug, publicOrigin, onSelectTable
   dataset: Dataset; projectSlug: string; publicOrigin: string;
   onSelectTable: (tableId: string) => void; onChanged: () => void;
 }) {
-  const uploadTables = dataset.tables.filter(t => !t.source);
+  const derivedTargetIds = new Set(dataset.derivedTables.map(dt => dt.targetTable?.id).filter(Boolean));
+  const uploadTables = dataset.tables.filter(t => !t.source && !derivedTargetIds.has(t.id));
   const sourceGroups = buildGroups(dataset.tables);
   const [uploadOpen, setUploadOpen] = useState(false);
 
