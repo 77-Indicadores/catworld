@@ -154,7 +154,9 @@ async function tdsBulkCopy(
       vals.push(rh);
       bulk.rows.add(...(vals as Parameters<typeof bulk.rows.add>));
     }
-    await new sql.Request(pool).bulk(bulk, { tableLock: true });
+    const bulkReq = new sql.Request(pool);
+    (bulkReq as unknown as { overrides: { requestTimeout: number } }).overrides.requestTimeout = 7_200_000;
+    await bulkReq.bulk(bulk, { tableLock: true });
     total += batch.length;
     batch = [];
     if (batchDelay > 0) await new Promise(r => setTimeout(r, batchDelay));

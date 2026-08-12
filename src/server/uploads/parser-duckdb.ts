@@ -32,7 +32,9 @@ export async function* rowsFromCsvDuckDB(
   // Get actual column names from DuckDB to build originalName → sqlName mapping
   // parallel=false is required when null_padding=true and the file has quoted newlines;
   // without it DuckDB throws "parallel scanner does not support null_padding with quoted newlines".
-  const csvOpts = `sample_size=-1, null_padding=true, parallel=false, all_varchar=true`;
+  // sample_size omitted (default 20480 rows): with all_varchar=true there are no types to infer,
+  // so sample_size=-1 (full-file scan) was wasted I/O — especially painful for 100–200 MB CSVs.
+  const csvOpts = `null_padding=true, parallel=false, all_varchar=true`;
   const headerResult = await conn.runAndReadAll(
     `SELECT * FROM read_csv_auto('${safeFilePath}', ${csvOpts}) LIMIT 0`,
   );
