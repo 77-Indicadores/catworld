@@ -470,15 +470,20 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
       }
 
       // Index staging._cw_rh so NOT EXISTS lookups are O(n log n) instead of O(n²)
+      // Large staging tables can take >10 min to index — needs explicit 2h timeout.
       if (!stagingHasData) {
-        await pool.request().query(
+        const idxReq = pool.request();
+        (idxReq as unknown as { overrides: { requestTimeout: number } }).overrides.requestTimeout = 7_200_000;
+        await idxReq.query(
           `IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL
              CREATE NONCLUSTERED INDEX [IX_stage_rh] ON ${staging} ([_cw_rh])`,
         );
       }
       // Ensure target also has the _cw_rh index (older tables may predate it)
       if (deltaReplace && targetExists) {
-        await pool.request().query(
+        const idxReq2 = pool.request();
+        (idxReq2 as unknown as { overrides: { requestTimeout: number } }).overrides.requestTimeout = 7_200_000;
+        await idxReq2.query(
           `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id=OBJECT_ID(N'${schema}.${tableName}') AND name=N'IX__cw_rh')
              CREATE NONCLUSTERED INDEX [IX__cw_rh] ON ${target} ([_cw_rh])`,
         );
