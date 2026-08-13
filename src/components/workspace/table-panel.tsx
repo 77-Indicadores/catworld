@@ -1,8 +1,9 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { Cable, Columns3, DatabaseZap, RefreshCw, Rows3, Trash2, TriangleAlert } from "lucide-react";
+import { Cable, Columns3, DatabaseZap, Download, FileSpreadsheet, FileText, RefreshCw, Rows3, Trash2, TriangleAlert } from "lucide-react";
 import { StatusBadge } from "@/components/ui/primitives";
 import { UploadFlow } from "./upload-flow";
+import { fmtCellStr } from "@/lib/fmt-cell";
 
 type Source = { id: string; mode: string; sourceKind: string; sourceSchema: string | null; sourceTable: string | null; refreshCron: string | null; lastStatus: string | null; lastError: string | null; lastRefreshedAt: string | null; nextRefreshAt: string | null; connection: { name: string } };
 type Table = { id: string; name: string; sqlName: string; rowCount: string; lastDataAt: string | null; source: Source | null; columns: { id: string; sqlName: string; originalName: string; sqlType: string; nullable: boolean }[] };
@@ -14,14 +15,6 @@ function sourceStatus(status: string | null): "healthy" | "warning" | "error" | 
   return "inactive";
 }
 
-function fmtCell(v: unknown): string {
-  if (v === null || v === undefined) return "NULL";
-  const s = String(v);
-  // mssql driver returns TIME columns as 1970-01-01T<HH:MM:SS>.000Z
-  const m = s.match(/^1970-01-01T(\d{2}:\d{2}:\d{2})/);
-  if (m) return m[1]!;
-  return s;
-}
 
 function sourceMode(source: Source) {
   return source.mode === "live" ? "Consulta ao vivo" : "Cópia no Catworld";
@@ -55,6 +48,49 @@ function DeleteTableDialog({ id, name, onDeleted }: { id: string; name: string; 
         <form method="dialog" className="modal-backdrop"><button onClick={close}>fechar</button></form>
       </dialog>
     </>
+  );
+}
+
+function ExportMenu({ tableId, tableName, tab }: { tableId: string; tableName: string; tab: "data" | "columns" }) {
+  const [loading, setLoading] = useState<string | null>(null);
+
+  async function doExport(format: "csv" | "xlsx", what: "data" | "columns") {
+    const key = `${what}-${format}`;
+    setLoading(key);
+    try {
+      const url = `/api/v1/tables/${tableId}/export?format=${format}&what=${what}`;
+      const res = await fetch(url);
+      if (!res.ok) { const body = await res.json().catch(() => ({})); alert(body.error?.message ?? "Falha ao exportar"); return; }
+      const blob = await res.blob();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = res.headers.get("content-disposition")?.match(/filename="([^"]+)"/)?.[1] ?? `${tableName}.${format}`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Falha de rede ao exportar");
+    } finally {
+      setLoading(null);
+    }
+  }
+
+  const busy = loading !== null;
+  return (
+    <div className="dropdown dropdown-end">
+      <button tabIndex={0} disabled={busy} className="btn btn-outline btn-sm gap-1">
+        {busy ? <span className="loading loading-spinner loading-xs" /> : <Download size={14} />}
+        Exportar
+      </button>
+      <ul tabIndex={0} className="dropdown-content menu rounded-box z-50 mt-1 w-52 border border-base-300 bg-base-100 p-1 shadow-lg text-sm">
+        {tab === "data" && <>
+          <li><button onClick={() => doExport("csv", "data")} disabled={busy}><FileText size={14} />Dados — CSV</button></li>
+          <li><button onClick={() => doExport("xlsx", "data")} disabled={busy}><FileSpreadsheet size={14} />Dados — Excel (.xlsx)</button></li>
+          <li className="divider my-0.5" />
+        </>}
+        <li><button onClick={() => doExport("csv", "columns")} disabled={busy}><FileText size={14} />Colunas — CSV</button></li>
+        <li><button onClick={() => doExport("xlsx", "columns")} disabled={busy}><FileSpreadsheet size={14} />Colunas — Excel (.xlsx)</button></li>
+      </ul>
+    </div>
   );
 }
 
@@ -100,6 +136,9 @@ export function TablePanel({ datasetId, table, onChanged, compact }: { datasetId
       <div className="flex h-full flex-col">
         {notice && <div className="alert alert-success alert-soft m-3 text-xs p-2">{notice}</div>}
         {(error || table.source?.lastError) && <div className="alert alert-error alert-soft m-3 text-xs p-2">{error || table.source?.lastError}</div>}
+        <div className="flex items-center justify-end px-3 py-1.5 border-b border-base-300">
+          <ExportMenu tableId={table.id} tableName={table.name} tab={tab} />
+        </div>
         <div className="flex-1 overflow-auto">
           {loading ? (
             <div className="flex h-40 items-center justify-center"><span className="loading loading-spinner" /></div>
@@ -108,7 +147,7 @@ export function TablePanel({ datasetId, table, onChanged, compact }: { datasetId
           ) : (
             <table className="table table-zebra data-grid w-full">
               <thead><tr>{table.columns.map(c => <th key={c.id} className="whitespace-nowrap">{c.sqlName}</th>)}</tr></thead>
-              <tbody>{rows.map((row, i) => <tr key={i}>{table.columns.map(c => <td className="whitespace-nowrap" key={c.id}>{fmtCell(row[c.sqlName])}</td>)}</tr>)}</tbody>
+              <tbody>{rows.map((row, i) => <tr key={i}>{table.columns.map(c => <td className="whitespace-nowrap" key={c.id}>{fmtCellStr(row[c.sqlName])}</td>)}</tr>)}</tbody>
             </table>
           )}
         </div>
@@ -125,7 +164,7 @@ export function TablePanel({ datasetId, table, onChanged, compact }: { datasetId
           <p className="text-xs text-base-content/45">{table.source?.mode === "live" ? "Dados consultados na origem" : `${Number(table.rowCount).toLocaleString("pt-BR")} linhas`} · {table.columns.length} colunas{table.lastDataAt ? ` · atualizado ${new Date(table.lastDataAt).toLocaleString("pt-BR")}` : ""}</p>
           {table.source && <div className="mt-3 rounded-box border border-base-300 bg-base-200/40 p-3 text-xs"><div className="flex flex-wrap items-center gap-2"><span className="badge badge-outline gap-1">{table.source.mode === "live" ? <Cable size={12} /> : <DatabaseZap size={12} />}{sourceMode(table.source)}</span><StatusBadge status={sourceStatus(table.source.lastStatus)} label={table.source.lastStatus ?? "Pronta"} /><span className="text-base-content/60">{table.source.connection.name}</span></div><div className="mt-2 text-base-content/60">Origem: {table.source.sourceKind === "table" ? `${table.source.sourceSchema}.${table.source.sourceTable}` : "consulta personalizada"}{table.source.nextRefreshAt ? ` · próxima ${new Date(table.source.nextRefreshAt).toLocaleString("pt-BR")}` : ""}</div></div>}
         </div>
-        <div className="flex flex-wrap justify-end gap-2">{table.source?.mode === "extract" ? <button onClick={refreshSource} disabled={refreshing} className="btn btn-outline btn-sm"><RefreshCw size={14} className={refreshing ? "animate-spin" : ""} />{refreshing ? "Enfileirando..." : "Atualizar agora"}</button> : <UpdateDataDialog datasetId={datasetId} table={table} onComplete={onChanged} />}<DeleteTableDialog id={table.id} name={table.name} onDeleted={onChanged} /></div>
+        <div className="flex flex-wrap justify-end gap-2"><ExportMenu tableId={table.id} tableName={table.name} tab={tab} />{table.source?.mode === "extract" ? <button onClick={refreshSource} disabled={refreshing} className="btn btn-outline btn-sm"><RefreshCw size={14} className={refreshing ? "animate-spin" : ""} />{refreshing ? "Enfileirando..." : "Atualizar agora"}</button> : <UpdateDataDialog datasetId={datasetId} table={table} onComplete={onChanged} />}<DeleteTableDialog id={table.id} name={table.name} onDeleted={onChanged} /></div>
       </div>
       {notice && <div className="alert alert-success alert-soft m-4">{notice}</div>}
       {(error || table.source?.lastError) && <div className="alert alert-error alert-soft m-4">{error || table.source?.lastError}</div>}
@@ -133,7 +172,7 @@ export function TablePanel({ datasetId, table, onChanged, compact }: { datasetId
         <button className={`tab gap-2 ${tab === "data" ? "tab-active" : ""}`} onClick={() => setTab("data")}><Rows3 size={14} />Dados</button>
         <button className={`tab gap-2 ${tab === "columns" ? "tab-active" : ""}`} onClick={() => setTab("columns")}><Columns3 size={14} />Colunas</button>
       </div>
-      {tab === "data" ? <div className="overflow-x-auto">{loading ? <div className="p-10 text-center"><span className="loading loading-spinner" /></div> : rows.length === 0 ? <div className="p-10 text-center text-sm text-base-content/50">Nenhuma linha para exibir.</div> : <table className="table table-zebra data-grid"><thead><tr>{table.columns.map((c) => <th key={c.id}>{c.sqlName}</th>)}</tr></thead><tbody>{rows.map((row, i) => <tr key={i}>{table.columns.map((c) => <td className="whitespace-nowrap" key={c.id}>{fmtCell(row[c.sqlName])}</td>)}</tr>)}</tbody></table>}</div> : <div className="overflow-x-auto"><table className="table"><thead><tr><th>Coluna</th><th>Original</th><th>Tipo</th><th>Nulável</th></tr></thead><tbody>{table.columns.map((c) => <tr key={c.id}><td className="font-mono text-xs">{c.sqlName}</td><td>{c.originalName}</td><td>{c.sqlType}</td><td>{c.nullable ? "Sim" : "Não"}</td></tr>)}</tbody></table></div>}
+      {tab === "data" ? <div className="overflow-x-auto">{loading ? <div className="p-10 text-center"><span className="loading loading-spinner" /></div> : rows.length === 0 ? <div className="p-10 text-center text-sm text-base-content/50">Nenhuma linha para exibir.</div> : <table className="table table-zebra data-grid"><thead><tr>{table.columns.map((c) => <th key={c.id}>{c.sqlName}</th>)}</tr></thead><tbody>{rows.map((row, i) => <tr key={i}>{table.columns.map((c) => <td className="whitespace-nowrap" key={c.id}>{fmtCellStr(row[c.sqlName])}</td>)}</tr>)}</tbody></table>}</div> : <div className="overflow-x-auto"><table className="table"><thead><tr><th>Coluna</th><th>Original</th><th>Tipo</th><th>Nulável</th></tr></thead><tbody>{table.columns.map((c) => <tr key={c.id}><td className="font-mono text-xs">{c.sqlName}</td><td>{c.originalName}</td><td>{c.sqlType}</td><td>{c.nullable ? "Sim" : "Não"}</td></tr>)}</tbody></table></div>}
     </div>
   );
 }

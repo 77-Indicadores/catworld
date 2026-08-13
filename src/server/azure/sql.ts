@@ -94,7 +94,7 @@ export async function revokeSchema(principal: string, schema: string) {
   for (const grant of ["SELECT", "INSERT", "UPDATE", "DELETE"]) await (await sqlPool()).request().query(`IF DATABASE_PRINCIPAL_ID(N'${escapeSqlLiteral(principal)}') IS NOT NULL REVOKE ${grant} ON SCHEMA::${target} FROM ${user}`);
 }
 
-export async function executeReadOnly(principal: string, query: string, timeout = 30, limit = 10_000, schemas: string[] = [], offset = 0) {
+export async function executeReadOnly(principal: string, query: string, timeout = 30, limit = 10_000, schemas: string[] = [], offset = 0, maxTimeoutSeconds = 120) {
   const validated = validateReadOnlySql(query);
   if (!validated.safe) throw new ApiError(400, "UNSAFE_SQL", validated.reason);
 
@@ -134,7 +134,10 @@ const tableMap = new Map<string, string[]>();
 
   const pool = await sqlPool();
   const request = new sql.Request(pool);
-  (request as unknown as { timeout: number }).timeout = Math.min(Math.max(timeout, 1), 120) * 1000;
+  const timeoutMs = Math.min(Math.max(timeout, 1), maxTimeoutSeconds) * 1000;
+  // .timeout is a no-op in mssql v12; overrides.requestTimeout is the real field.
+  (request as unknown as { timeout: number }).timeout = timeoutMs;
+  (request as unknown as { overrides: { requestTimeout: number } }).overrides.requestTimeout = timeoutMs;
   const started = Date.now();
   try {
     const hasCte = /^\s*WITH\b/i.test(statement);
