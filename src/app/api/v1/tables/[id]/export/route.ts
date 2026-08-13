@@ -10,8 +10,9 @@ import { quoteIdentifier } from "@/server/security/naming";
 import { fmtCell } from "@/lib/fmt-cell";
 
 const EXPORT_LIMIT = 500_000;
+const BOM = "﻿";
 
-function buildCsv(columns: string[], rows: Record<string, unknown>[]): Uint8Array {
+function buildCsv(columns: string[], rows: Record<string, unknown>[]): Blob {
   const sep = ";";
   const lines: string[] = [columns.join(sep)];
   for (const row of rows) {
@@ -25,10 +26,10 @@ function buildCsv(columns: string[], rows: Record<string, unknown>[]): Uint8Arra
       }).join(sep),
     );
   }
-  return new TextEncoder().encode("\uFEFF" + lines.join("\r\n"));
+  return new Blob([new TextEncoder().encode(BOM + lines.join("\r\n"))], { type: "text/csv; charset=utf-8" });
 }
 
-async function buildXlsx(tableName: string, columns: string[], rows: Record<string, unknown>[]): Promise<Uint8Array> {
+async function buildXlsx(tableName: string, columns: string[], rows: Record<string, unknown>[]): Promise<Blob> {
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet(tableName.slice(0, 31));
   ws.columns = columns.map((col) => ({ header: col, key: col, width: Math.min(Math.max(col.length + 2, 10), 40) }));
@@ -39,19 +40,19 @@ async function buildXlsx(tableName: string, columns: string[], rows: Record<stri
     ws.addRow(columns.map((col) => fmtCell(row[col])));
   }
   ws.autoFilter = { from: "A1", to: { row: 1, column: columns.length } };
-  return new Uint8Array(await wb.xlsx.writeBuffer());
+  return new Blob([await wb.xlsx.writeBuffer()], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
 }
 
-function buildColumnsCsv(columns: { sqlName: string; originalName: string; sqlType: string; nullable: boolean }[]): Uint8Array {
+function buildColumnsCsv(columns: { sqlName: string; originalName: string; sqlType: string; nullable: boolean }[]): Blob {
   const sep = ";";
   const header = ["Coluna SQL", "Nome original", "Tipo", "Nulável"].join(sep);
   const lines = columns.map((c) =>
     [c.sqlName, c.originalName, c.sqlType, c.nullable ? "Sim" : "Não"].join(sep),
   );
-  return new TextEncoder().encode("\uFEFF" + [header, ...lines].join("\r\n"));
+  return new Blob([new TextEncoder().encode(BOM + [header, ...lines].join("\r\n"))], { type: "text/csv; charset=utf-8" });
 }
 
-async function buildColumnsXlsx(tableName: string, columns: { sqlName: string; originalName: string; sqlType: string; nullable: boolean }[]): Promise<Uint8Array> {
+async function buildColumnsXlsx(tableName: string, columns: { sqlName: string; originalName: string; sqlType: string; nullable: boolean }[]): Promise<Blob> {
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet("Colunas");
   ws.columns = [
@@ -66,7 +67,7 @@ async function buildColumnsXlsx(tableName: string, columns: { sqlName: string; o
     ws.addRow({ sqlName: c.sqlName, originalName: c.originalName, sqlType: c.sqlType, nullable: c.nullable ? "Sim" : "Não" });
   }
   ws.autoFilter = { from: "A1", to: { row: 1, column: 4 } };
-  return new Uint8Array(await wb.xlsx.writeBuffer());
+  return new Blob([await wb.xlsx.writeBuffer()], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
 }
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -94,16 +95,16 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     // ── Export columns list ──────────────────────────────────────────────────
     if (what === "columns") {
       if (format === "xlsx") {
-        const buf = await buildColumnsXlsx(table.name, table.columns);
-        return new Response(buf, {
+        const blob = await buildColumnsXlsx(table.name, table.columns);
+        return new Response(blob, {
           headers: {
             "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             "Content-Disposition": `attachment; filename="${safeName}_colunas_${dateStr}.xlsx"`,
           },
         });
       }
-      const buf = buildColumnsCsv(table.columns);
-      return new Response(buf, {
+      const blob = buildColumnsCsv(table.columns);
+      return new Response(blob, {
         headers: {
           "Content-Type": "text/csv; charset=utf-8",
           "Content-Disposition": `attachment; filename="${safeName}_colunas_${dateStr}.csv"`,
@@ -143,8 +144,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     }
 
     if (format === "xlsx") {
-      const buf = await buildXlsx(table.name, columnNames, rows);
-      return new Response(buf, {
+      const blob = await buildXlsx(table.name, columnNames, rows);
+      return new Response(blob, {
         headers: {
           "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
           "Content-Disposition": `attachment; filename="${safeName}_${dateStr}.xlsx"`,
@@ -152,8 +153,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       });
     }
 
-    const buf = buildCsv(columnNames, rows);
-    return new Response(buf, {
+    const blob = buildCsv(columnNames, rows);
+    return new Response(blob, {
       headers: {
         "Content-Type": "text/csv; charset=utf-8",
         "Content-Disposition": `attachment; filename="${safeName}_${dateStr}.csv"`,
