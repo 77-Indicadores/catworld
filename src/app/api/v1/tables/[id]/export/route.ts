@@ -81,7 +81,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       include: {
         dataset: true,
         source: { include: { connection: true } },
-        columns: { orderBy: { position: "asc" } },
+        columns: { orderBy: { ordinal: "asc" } },
       },
     });
 
