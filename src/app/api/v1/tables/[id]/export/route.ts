@@ -28,7 +28,7 @@ function buildCsv(columns: string[], rows: Record<string, unknown>[]): Uint8Arra
   return new TextEncoder().encode("\uFEFF" + lines.join("\r\n"));
 }
 
-async function buildXlsx(tableName: string, columns: string[], rows: Record<string, unknown>[]): Promise<Buffer> {
+async function buildXlsx(tableName: string, columns: string[], rows: Record<string, unknown>[]): Promise<Uint8Array> {
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet(tableName.slice(0, 31));
   ws.columns = columns.map((col) => ({ header: col, key: col, width: Math.min(Math.max(col.length + 2, 10), 40) }));
@@ -39,7 +39,7 @@ async function buildXlsx(tableName: string, columns: string[], rows: Record<stri
     ws.addRow(columns.map((col) => fmtCell(row[col])));
   }
   ws.autoFilter = { from: "A1", to: { row: 1, column: columns.length } };
-  return Buffer.from(await wb.xlsx.writeBuffer());
+  return new Uint8Array(await wb.xlsx.writeBuffer());
 }
 
 function buildColumnsCsv(columns: { sqlName: string; originalName: string; sqlType: string; nullable: boolean }[]): Uint8Array {
@@ -51,7 +51,7 @@ function buildColumnsCsv(columns: { sqlName: string; originalName: string; sqlTy
   return new TextEncoder().encode("\uFEFF" + [header, ...lines].join("\r\n"));
 }
 
-async function buildColumnsXlsx(tableName: string, columns: { sqlName: string; originalName: string; sqlType: string; nullable: boolean }[]): Promise<Buffer> {
+async function buildColumnsXlsx(tableName: string, columns: { sqlName: string; originalName: string; sqlType: string; nullable: boolean }[]): Promise<Uint8Array> {
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet("Colunas");
   ws.columns = [
@@ -66,7 +66,7 @@ async function buildColumnsXlsx(tableName: string, columns: { sqlName: string; o
     ws.addRow({ sqlName: c.sqlName, originalName: c.originalName, sqlType: c.sqlType, nullable: c.nullable ? "Sim" : "Não" });
   }
   ws.autoFilter = { from: "A1", to: { row: 1, column: 4 } };
-  return Buffer.from(await wb.xlsx.writeBuffer());
+  return new Uint8Array(await wb.xlsx.writeBuffer());
 }
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
