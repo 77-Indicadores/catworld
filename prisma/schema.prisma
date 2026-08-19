@@ -4,19 +4,19 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "sqlserver"
   url      = env("CATWORLD_DATABASE_URL")
 }
 
 model User {
-  id           String        @id @default(uuid()) @db.Uuid
-  name         String        @db.VarChar(160)
-  email        String        @unique @db.VarChar(320)
-  passwordHash String        @map("password_hash") @db.VarChar(500)
+  id           String        @id @default(uuid()) @db.UniqueIdentifier
+  name         String        @db.NVarChar(160)
+  email        String        @unique @db.NVarChar(320)
+  passwordHash String        @map("password_hash") @db.NVarChar(500)
   role         String        @default("VIEWER") @db.VarChar(32)
   active       Boolean       @default(true)
-  createdAt    DateTime      @default(now()) @map("created_at")
-  updatedAt    DateTime      @updatedAt @map("updated_at")
+  createdAt    DateTime      @default(now()) @map("created_at") @db.DateTime2
+  updatedAt    DateTime      @updatedAt @map("updated_at") @db.DateTime2
   grants       AccessGrant[]
   savedQueries SavedQuery[]
   auditEvents  AuditEvent[]
@@ -25,59 +25,35 @@ model User {
 }
 
 model Project {
-  id          String        @id @default(uuid()) @db.Uuid
-  name        String        @db.VarChar(255)
+  id          String        @id @default(uuid()) @db.UniqueIdentifier
+  name        String        @db.NVarChar(255)
   slug        String        @unique @db.VarChar(100)
-  description String?       @db.VarChar(1000)
+  description String?       @db.NVarChar(1000)
   active      Boolean       @default(true)
-  createdAt   DateTime      @default(now()) @map("created_at")
-  updatedAt   DateTime      @updatedAt @map("updated_at")
+  createdAt   DateTime      @default(now()) @map("created_at") @db.DateTime2
+  updatedAt   DateTime      @updatedAt @map("updated_at") @db.DateTime2
   datasets    Dataset[]
   grants      AccessGrant[]
 
   @@map("cw_projects")
 }
 
-model StorageServer {
-  id                   String    @id @default(uuid()) @db.Uuid
-  name                 String    @db.VarChar(120)
-  provider             String    @db.VarChar(32)
-  server               String    @db.VarChar(255)
-  port                 Int?
-  databaseName         String    @map("database_name") @db.VarChar(128)
-  encryptedCredentials String    @map("encrypted_credentials") @db.Text
-  sslMode              String    @default("require") @map("ssl_mode") @db.VarChar(32)
-  encrypt              Boolean   @default(true)
-  isDefault            Boolean   @default(false) @map("is_default")
-  active               Boolean   @default(true)
-  lastStatus           String?   @map("last_status") @db.VarChar(32)
-  lastLatencyMs        Int?      @map("last_latency_ms")
-  lastCheckedAt        DateTime? @map("last_checked_at")
-  createdAt            DateTime  @default(now()) @map("created_at")
-  updatedAt            DateTime  @updatedAt @map("updated_at")
-  datasets             Dataset[]
-
-  @@map("cw_storage_servers")
-}
-
 model Dataset {
-  id              String         @id @default(uuid()) @db.Uuid
-  projectId       String         @map("project_id") @db.Uuid
-  storageServerId String?        @map("storage_server_id") @db.Uuid
-  name            String         @db.VarChar(255)
-  slug            String         @db.VarChar(100)
-  description     String?        @db.VarChar(1000)
-  schemaName      String         @unique @map("schema_name") @db.VarChar(128)
-  active          Boolean        @default(true)
-  createdAt       DateTime       @default(now()) @map("created_at")
-  updatedAt       DateTime       @updatedAt @map("updated_at")
-  project         Project        @relation(fields: [projectId], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  storageServer   StorageServer? @relation(fields: [storageServerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  tables          DatasetTable[]
-  grants          AccessGrant[]
-  uploads         Upload[]
-  sources         DatasetSource[]
-  derivedTables   DerivedTable[]
+  id          String         @id @default(uuid()) @db.UniqueIdentifier
+  projectId   String         @map("project_id") @db.UniqueIdentifier
+  name        String         @db.NVarChar(255)
+  slug        String         @db.VarChar(100)
+  description String?        @db.NVarChar(1000)
+  schemaName  String         @unique @map("schema_name") @db.VarChar(128)
+  active      Boolean        @default(true)
+  createdAt   DateTime       @default(now()) @map("created_at") @db.DateTime2
+  updatedAt   DateTime       @updatedAt @map("updated_at") @db.DateTime2
+  project     Project        @relation(fields: [projectId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  tables      DatasetTable[]
+  grants      AccessGrant[]
+  uploads     Upload[]
+  sources       DatasetSource[]
+  derivedTables DerivedTable[]
 
   @@unique([projectId, slug])
   @@index([projectId, active])
@@ -85,31 +61,31 @@ model Dataset {
 }
 
 model DatasetTable {
-  id            String           @id @default(uuid()) @db.Uuid
-  datasetId     String           @map("dataset_id") @db.Uuid
-  name          String           @db.VarChar(255)
-  sqlName       String           @map("sql_name") @db.VarChar(128)
-  rowCount      BigInt           @default(0) @map("row_count")
-  sizeBytes     BigInt           @default(0) @map("size_bytes")
-  lastDataAt    DateTime?        @map("last_data_at")
-  createdAt     DateTime         @default(now()) @map("created_at")
-  updatedAt     DateTime         @updatedAt @map("updated_at")
-  dataset       Dataset          @relation(fields: [datasetId], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  columns       DatasetColumn[]
-  versions      DatasetVersion[]
-  uploads       Upload[]
-  source        DatasetSource?
-  derivedTables DerivedTable[]   @relation("DerivedTarget")
+  id        String           @id @default(uuid()) @db.UniqueIdentifier
+  datasetId String           @map("dataset_id") @db.UniqueIdentifier
+  name      String           @db.NVarChar(255)
+  sqlName   String           @map("sql_name") @db.VarChar(128)
+  rowCount   BigInt           @default(0) @map("row_count")
+  sizeBytes  BigInt           @default(0) @map("size_bytes")
+  lastDataAt DateTime?        @map("last_data_at") @db.DateTime2
+  createdAt  DateTime         @default(now()) @map("created_at") @db.DateTime2
+  updatedAt  DateTime         @updatedAt @map("updated_at") @db.DateTime2
+  dataset   Dataset          @relation(fields: [datasetId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  columns   DatasetColumn[]
+  versions  DatasetVersion[]
+  uploads      Upload[]
+  source       DatasetSource?
+  derivedTables DerivedTable[] @relation("DerivedTarget")
 
   @@unique([datasetId, sqlName])
   @@map("cw_tables")
 }
 
 model DatasetColumn {
-  id           String       @id @default(uuid()) @db.Uuid
-  tableId      String       @map("table_id") @db.Uuid
+  id           String       @id @default(uuid()) @db.UniqueIdentifier
+  tableId      String       @map("table_id") @db.UniqueIdentifier
   ordinal      Int
-  originalName String       @map("original_name") @db.VarChar(255)
+  originalName String       @map("original_name") @db.NVarChar(255)
   sqlName      String       @map("sql_name") @db.VarChar(128)
   sqlType      String       @map("sql_type") @db.VarChar(100)
   nullable     Boolean      @default(true)
@@ -121,42 +97,42 @@ model DatasetColumn {
 }
 
 model ApiToken {
-  id         String        @id @default(uuid()) @db.Uuid
-  name       String        @db.VarChar(160)
+  id         String        @id @default(uuid()) @db.UniqueIdentifier
+  name       String        @db.NVarChar(160)
   prefix     String        @unique @db.VarChar(24)
   tokenHash  String        @unique @map("token_hash") @db.Char(64)
   active     Boolean       @default(true)
-  expiresAt  DateTime?     @map("expires_at")
-  lastUsedAt DateTime?     @map("last_used_at")
-  createdAt  DateTime      @default(now()) @map("created_at")
+  expiresAt  DateTime?     @map("expires_at") @db.DateTime2
+  lastUsedAt DateTime?     @map("last_used_at") @db.DateTime2
+  createdAt  DateTime      @default(now()) @map("created_at") @db.DateTime2
   grants     AccessGrant[]
 
   @@map("cw_tokens")
 }
 
 model DatabaseUser {
-  id                String        @id @default(uuid()) @db.Uuid
+  id                String        @id @default(uuid()) @db.UniqueIdentifier
   name              String        @unique @db.VarChar(128)
   kind              String        @db.VarChar(32)
-  encryptedPassword String        @map("encrypted_password") @db.Text
+  encryptedPassword String        @map("encrypted_password") @db.NVarChar(1000)
   active            Boolean       @default(true)
-  lastUsedAt        DateTime?     @map("last_used_at")
-  createdAt         DateTime      @default(now()) @map("created_at")
+  lastUsedAt        DateTime?     @map("last_used_at") @db.DateTime2
+  createdAt         DateTime      @default(now()) @map("created_at") @db.DateTime2
   grants            AccessGrant[]
 
   @@map("cw_database_users")
 }
 
 model AccessGrant {
-  id             String        @id @default(uuid()) @db.Uuid
-  userId         String?       @map("user_id") @db.Uuid
-  tokenId        String?       @map("token_id") @db.Uuid
-  databaseUserId String?       @map("database_user_id") @db.Uuid
+  id             String        @id @default(uuid()) @db.UniqueIdentifier
+  userId         String?       @map("user_id") @db.UniqueIdentifier
+  tokenId        String?       @map("token_id") @db.UniqueIdentifier
+  databaseUserId String?       @map("database_user_id") @db.UniqueIdentifier
   scopeType      String        @map("scope_type") @db.VarChar(20)
-  projectId      String?       @map("project_id") @db.Uuid
-  datasetId      String?       @map("dataset_id") @db.Uuid
+  projectId      String?       @map("project_id") @db.UniqueIdentifier
+  datasetId      String?       @map("dataset_id") @db.UniqueIdentifier
   permission     String        @db.VarChar(20)
-  createdAt      DateTime      @default(now()) @map("created_at")
+  createdAt      DateTime      @default(now()) @map("created_at") @db.DateTime2
   user           User?         @relation(fields: [userId], references: [id], onDelete: Cascade)
   token          ApiToken?     @relation(fields: [tokenId], references: [id], onDelete: Cascade)
   databaseUser   DatabaseUser? @relation(fields: [databaseUserId], references: [id], onDelete: Cascade)
@@ -170,53 +146,52 @@ model AccessGrant {
 }
 
 model Connection {
-  id                   String          @id @default(uuid()) @db.Uuid
-  name                 String          @db.VarChar(120)
-  provider             String          @default("postgres") @db.VarChar(32)
-  environment          String          @db.VarChar(32)
-  server               String          @db.VarChar(255)
+  id                   String    @id @default(uuid()) @db.UniqueIdentifier
+  name                 String    @db.NVarChar(120)
+  provider             String    @default("postgres") @db.VarChar(32)
+  environment          String    @db.VarChar(32)
+  server               String    @db.NVarChar(255)
   port                 Int?
-  databaseName         String          @map("database_name") @db.VarChar(128)
-  sslMode              String          @default("require") @map("ssl_mode") @db.VarChar(32)
-  encrypt              Boolean         @default(true)
-  username             String          @db.VarChar(255)
-  encryptedCredentials String          @map("encrypted_credentials") @db.Text
-  metadataJson         String?         @map("metadata_json") @db.Text
-  active               Boolean         @default(true)
-  lastStatus           String?         @map("last_status") @db.VarChar(32)
-  lastLatencyMs        Int?            @map("last_latency_ms")
-  lastCheckedAt        DateTime?       @map("last_checked_at")
-  createdAt            DateTime        @default(now()) @map("created_at")
-  updatedAt            DateTime        @updatedAt @map("updated_at")
+  databaseName         String    @map("database_name") @db.NVarChar(128)
+  sslMode              String    @default("require") @map("ssl_mode") @db.VarChar(32)
+  username             String    @db.NVarChar(255)
+  encryptedCredentials String    @map("encrypted_credentials") @db.NVarChar(2000)
+  metadataJson         String?   @map("metadata_json") @db.NVarChar(Max)
+  active               Boolean   @default(true)
+  lastStatus           String?   @map("last_status") @db.VarChar(32)
+  lastLatencyMs        Int?      @map("last_latency_ms")
+  lastCheckedAt        DateTime? @map("last_checked_at") @db.DateTime2
+  createdAt            DateTime  @default(now()) @map("created_at") @db.DateTime2
+  updatedAt            DateTime  @updatedAt @map("updated_at") @db.DateTime2
   sources              DatasetSource[]
 
   @@map("cw_connections")
 }
 
 model DatasetSource {
-  id              String        @id @default(uuid()) @db.Uuid
-  datasetId       String        @map("dataset_id") @db.Uuid
-  connectionId    String        @map("connection_id") @db.Uuid
-  targetTableId   String?       @unique @map("target_table_id") @db.Uuid
-  name            String        @db.VarChar(255)
+  id              String        @id @default(uuid()) @db.UniqueIdentifier
+  datasetId       String        @map("dataset_id") @db.UniqueIdentifier
+  connectionId    String        @map("connection_id") @db.UniqueIdentifier
+  targetTableId   String?       @unique @map("target_table_id") @db.UniqueIdentifier
+  name            String        @db.NVarChar(255)
   mode            String        @db.VarChar(20)
   sourceKind      String        @map("source_kind") @db.VarChar(20)
-  sourceGroupId   String?       @map("source_group_id") @db.Uuid
-  sourceSchema    String?       @map("source_schema") @db.VarChar(128)
-  sourceTable     String?       @map("source_table") @db.VarChar(128)
-  sourceSql       String?       @map("source_sql") @db.Text
+  sourceGroupId   String?       @map("source_group_id") @db.UniqueIdentifier
+  sourceSchema    String?       @map("source_schema") @db.NVarChar(128)
+  sourceTable     String?       @map("source_table") @db.NVarChar(128)
+  sourceSql       String?       @map("source_sql") @db.NVarChar(Max)
   refreshCron     String?       @map("refresh_cron") @db.VarChar(100)
   keyColumn       String?       @map("key_column") @db.VarChar(128)
   deltaColumn     String?       @map("delta_column") @db.VarChar(128)
-  lastDeltaValue  String?       @map("last_delta_value") @db.Text
+  lastDeltaValue  String?       @map("last_delta_value") @db.NVarChar(Max)
   lastStatus      String?       @map("last_status") @db.VarChar(32)
   lastRowCount    BigInt?       @map("last_row_count")
-  lastError       String?       @map("last_error") @db.Text
-  lastRefreshedAt DateTime?     @map("last_refreshed_at")
-  nextRefreshAt   DateTime?     @map("next_refresh_at")
+  lastError       String?       @map("last_error") @db.NVarChar(Max)
+  lastRefreshedAt DateTime?     @map("last_refreshed_at") @db.DateTime2
+  nextRefreshAt   DateTime?     @map("next_refresh_at") @db.DateTime2
   active          Boolean       @default(true)
-  createdAt       DateTime      @default(now()) @map("created_at")
-  updatedAt       DateTime      @updatedAt @map("updated_at")
+  createdAt       DateTime      @default(now()) @map("created_at") @db.DateTime2
+  updatedAt       DateTime      @updatedAt @map("updated_at") @db.DateTime2
   dataset         Dataset       @relation(fields: [datasetId], references: [id], onDelete: Cascade)
   connection      Connection    @relation(fields: [connectionId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   targetTable     DatasetTable? @relation(fields: [targetTableId], references: [id], onDelete: NoAction, onUpdate: NoAction)
@@ -229,26 +204,26 @@ model DatasetSource {
 }
 
 model Upload {
-  id               String        @id @default(uuid()) @db.Uuid
-  datasetId        String?       @map("dataset_id") @db.Uuid
-  tableId          String?       @map("table_id") @db.Uuid
-  originalFilename String        @map("original_filename") @db.VarChar(500)
-  blobName         String        @unique @map("blob_name") @db.VarChar(700)
+  id               String        @id @default(uuid()) @db.UniqueIdentifier
+  datasetId        String?       @map("dataset_id") @db.UniqueIdentifier
+  tableId          String?       @map("table_id") @db.UniqueIdentifier
+  originalFilename String        @map("original_filename") @db.NVarChar(500)
+  blobName         String        @unique @map("blob_name") @db.NVarChar(700)
   sizeBytes        BigInt        @map("size_bytes")
   mode             String        @default("replace") @db.VarChar(20)
   keyColumn        String?       @map("key_column") @db.VarChar(128)
   status           String        @default("PENDING_UPLOAD") @db.VarChar(32)
   progress         Int           @default(0)
-  previewJson      String?       @map("preview_json") @db.Text
-  mappingJson      String?       @map("mapping_json") @db.Text
+  previewJson      String?       @map("preview_json") @db.NVarChar(Max)
+  mappingJson      String?       @map("mapping_json") @db.NVarChar(Max)
   rowCount         BigInt?       @map("row_count")
   insertedCount    BigInt?       @map("inserted_count")
   updatedCount     BigInt?       @map("updated_count")
   fileHash         String?       @map("file_hash") @db.VarChar(32)
-  deltaJson        String?       @map("delta_json") @db.Text
-  errorMessage     String?       @map("error_message") @db.Text
-  createdAt        DateTime      @default(now()) @map("created_at")
-  updatedAt        DateTime      @updatedAt @map("updated_at")
+  deltaJson        String?       @map("delta_json") @db.NVarChar(Max)
+  errorMessage     String?       @map("error_message") @db.NVarChar(Max)
+  createdAt        DateTime      @default(now()) @map("created_at") @db.DateTime2
+  updatedAt        DateTime      @updatedAt @map("updated_at") @db.DateTime2
   dataset          Dataset?      @relation(fields: [datasetId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   table            DatasetTable? @relation(fields: [tableId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   jobs             Job[]
@@ -258,12 +233,12 @@ model Upload {
 }
 
 model DatasetVersion {
-  id         String       @id @default(uuid()) @db.Uuid
-  tableId    String       @map("table_id") @db.Uuid
-  uploadId   String?      @map("upload_id") @db.Uuid
+  id         String       @id @default(uuid()) @db.UniqueIdentifier
+  tableId    String       @map("table_id") @db.UniqueIdentifier
+  uploadId   String?      @map("upload_id") @db.UniqueIdentifier
   rowCount   BigInt       @map("row_count")
-  schemaJson String       @map("schema_json") @db.Text
-  createdAt  DateTime     @default(now()) @map("created_at")
+  schemaJson String       @map("schema_json") @db.NVarChar(Max)
+  createdAt  DateTime     @default(now()) @map("created_at") @db.DateTime2
   table      DatasetTable @relation(fields: [tableId], references: [id], onDelete: Cascade)
 
   @@index([tableId, createdAt])
@@ -271,13 +246,13 @@ model DatasetVersion {
 }
 
 model SavedQuery {
-  id          String   @id @default(uuid()) @db.Uuid
-  userId      String   @map("user_id") @db.Uuid
-  name        String   @db.VarChar(200)
-  description String?  @db.VarChar(1000)
-  sqlText     String   @map("sql_text") @db.Text
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  id          String   @id @default(uuid()) @db.UniqueIdentifier
+  userId      String   @map("user_id") @db.UniqueIdentifier
+  name        String   @db.NVarChar(200)
+  description String?  @db.NVarChar(1000)
+  sqlText     String   @map("sql_text") @db.NVarChar(Max)
+  createdAt   DateTime @default(now()) @map("created_at") @db.DateTime2
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.DateTime2
   user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, name])
@@ -285,16 +260,16 @@ model SavedQuery {
 }
 
 model AuditEvent {
-  id           String   @id @default(uuid()) @db.Uuid
-  userId       String?  @map("user_id") @db.Uuid
-  tokenId      String?  @map("token_id") @db.Uuid
+  id           String   @id @default(uuid()) @db.UniqueIdentifier
+  userId       String?  @map("user_id") @db.UniqueIdentifier
+  tokenId      String?  @map("token_id") @db.UniqueIdentifier
   eventType    String   @map("event_type") @db.VarChar(80)
   resourceType String?  @map("resource_type") @db.VarChar(80)
-  resourceId   String?  @map("resource_id") @db.VarChar(255)
-  detailJson   String?  @map("detail_json") @db.Text
+  resourceId   String?  @map("resource_id") @db.NVarChar(255)
+  detailJson   String?  @map("detail_json") @db.NVarChar(Max)
   ipAddress    String?  @map("ip_address") @db.VarChar(64)
   success      Boolean  @default(true)
-  createdAt    DateTime @default(now()) @map("created_at")
+  createdAt    DateTime @default(now()) @map("created_at") @db.DateTime2
   user         User?    @relation(fields: [userId], references: [id])
 
   @@index([createdAt])
@@ -303,21 +278,21 @@ model AuditEvent {
 }
 
 model DerivedTable {
-  id              String        @id @default(uuid()) @db.Uuid
-  datasetId       String        @map("dataset_id") @db.Uuid
-  targetTableId   String?       @map("target_table_id") @db.Uuid
-  name            String        @db.VarChar(255)
+  id              String        @id @default(uuid()) @db.UniqueIdentifier
+  datasetId       String        @map("dataset_id") @db.UniqueIdentifier
+  targetTableId   String?       @map("target_table_id") @db.UniqueIdentifier
+  name            String        @db.NVarChar(255)
   sqlName         String        @map("sql_name") @db.VarChar(128)
-  querySql        String        @map("query_sql") @db.Text
+  querySql        String        @map("query_sql") @db.NVarChar(Max)
   refreshCron     String?       @map("refresh_cron") @db.VarChar(100)
   lastStatus      String?       @map("last_status") @db.VarChar(32)
   lastRowCount    BigInt?       @map("last_row_count")
-  lastError       String?       @map("last_error") @db.Text
-  lastRefreshedAt DateTime?     @map("last_refreshed_at")
-  nextRefreshAt   DateTime?     @map("next_refresh_at")
+  lastError       String?       @map("last_error") @db.NVarChar(Max)
+  lastRefreshedAt DateTime?     @map("last_refreshed_at") @db.DateTime2
+  nextRefreshAt   DateTime?     @map("next_refresh_at") @db.DateTime2
   active          Boolean       @default(true)
-  createdAt       DateTime      @default(now()) @map("created_at")
-  updatedAt       DateTime      @updatedAt @map("updated_at")
+  createdAt       DateTime      @default(now()) @map("created_at") @db.DateTime2
+  updatedAt       DateTime      @updatedAt @map("updated_at") @db.DateTime2
   dataset         Dataset       @relation(fields: [datasetId], references: [id], onDelete: Cascade)
   targetTable     DatasetTable? @relation("DerivedTarget", fields: [targetTableId], references: [id], onDelete: NoAction, onUpdate: NoAction)
 
@@ -327,21 +302,21 @@ model DerivedTable {
 }
 
 model Job {
-  id          String    @id @default(uuid()) @db.Uuid
+  id          String    @id @default(uuid()) @db.UniqueIdentifier
   type        String    @db.VarChar(50)
   status      String    @default("QUEUED") @db.VarChar(20)
-  uploadId    String?   @map("upload_id") @db.Uuid
-  payloadJson String?   @map("payload_json") @db.Text
+  uploadId    String?   @map("upload_id") @db.UniqueIdentifier
+  payloadJson String?   @map("payload_json") @db.NVarChar(Max)
   attempts    Int       @default(0)
   maxAttempts Int       @default(3) @map("max_attempts")
-  availableAt DateTime  @default(now()) @map("available_at")
-  lockedAt    DateTime? @map("locked_at")
+  availableAt DateTime  @default(now()) @map("available_at") @db.DateTime2
+  lockedAt    DateTime? @map("locked_at") @db.DateTime2
   lockedBy    String?   @map("locked_by") @db.VarChar(120)
-  heartbeatAt DateTime? @map("heartbeat_at")
-  weight      Int       @default(0) @db.SmallInt
-  lastError   String?   @map("last_error") @db.Text
-  createdAt   DateTime  @default(now()) @map("created_at")
-  updatedAt   DateTime  @updatedAt @map("updated_at")
+  heartbeatAt DateTime? @map("heartbeat_at") @db.DateTime2
+  weight      Int       @default(0) @db.TinyInt
+  lastError   String?   @map("last_error") @db.NVarChar(Max)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.DateTime2
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.DateTime2
   upload      Upload?   @relation(fields: [uploadId], references: [id])
 
   @@index([status, availableAt])

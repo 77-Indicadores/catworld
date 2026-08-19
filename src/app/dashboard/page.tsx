@@ -1,9 +1,11 @@
 import Link from "next/link";
-import { ChevronRight, Database, FolderKanban, Timer } from "lucide-react";
+import { ChevronRight, Database, FolderKanban, Gauge, Timer } from "lucide-react";
 import { prisma } from "@/server/db";
+import { sqlPool } from "@/server/azure/sql";
 import { PageHeader, Panel, StatCard } from "@/components/ui/primitives";
 export const dynamic = "force-dynamic";
 
+type DtuRow = { avg_dtu_pct: number | null; peak_dtu_pct: number | null };
 type JobStatsRow = {
   running_count: number;
   queued_count: number;
@@ -15,27 +17,44 @@ type AvgRow = { avg_sec: number | null };
 export default async function DashboardPage() {
   const STALE_THRESHOLD = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
-  const [projectCount, datasetCount, avgRows, jobStatsRows, projectsData] =
+  const pool = await sqlPool();
+
+  const [projectCount, datasetCount, avgRows, jobStatsRows, dtuResult, projectsData] =
     await Promise.all([
       prisma.project.count({ where: { active: true } }),
       prisma.dataset.count({ where: { active: true } }),
       prisma.$queryRaw<AvgRow[]>`
-        SELECT AVG(EXTRACT(EPOCH FROM (updated_at - locked_at)))::int avg_sec
+        SELECT AVG(DATEDIFF(SECOND, locked_at, updated_at)) avg_sec
         FROM cw_jobs
         WHERE status = 'COMPLETED' AND type = 'SOURCE_REFRESH'
           AND locked_at IS NOT NULL
-          AND updated_at >= NOW() - INTERVAL '7 days'
+          AND updated_at >= DATEADD(DAY, -7, GETUTCDATE())
       `,
       prisma.$queryRaw<JobStatsRow[]>`
         SELECT
           SUM(CASE WHEN status = 'RUNNING' THEN 1 ELSE 0 END) running_count,
           SUM(CASE WHEN status = 'QUEUED'  THEN 1 ELSE 0 END) queued_count,
-          SUM(CASE WHEN status = 'COMPLETED' AND created_at >= NOW() - INTERVAL '1 day' THEN 1 ELSE 0 END) completed_today,
-          SUM(CASE WHEN status = 'FAILED'    AND created_at >= NOW() - INTERVAL '1 day' THEN 1 ELSE 0 END) failed_today
+          SUM(CASE WHEN status = 'COMPLETED' AND created_at >= DATEADD(DAY,-1,GETUTCDATE()) THEN 1 ELSE 0 END) completed_today,
+          SUM(CASE WHEN status = 'FAILED'    AND created_at >= DATEADD(DAY,-1,GETUTCDATE()) THEN 1 ELSE 0 END) failed_today
         FROM cw_jobs
         WHERE type = 'SOURCE_REFRESH'
-          AND (status IN ('RUNNING','QUEUED') OR created_at >= NOW() - INTERVAL '1 day')
+          AND (status IN ('RUNNING','QUEUED') OR created_at >= DATEADD(DAY,-1,GETUTCDATE()))
       `,
+      pool.request().query<DtuRow>(`
+        SELECT
+          AVG(CASE
+            WHEN avg_cpu_percent >= avg_data_io_percent AND avg_cpu_percent >= avg_log_write_percent THEN avg_cpu_percent
+            WHEN avg_data_io_percent >= avg_log_write_percent THEN avg_data_io_percent
+            ELSE avg_log_write_percent
+          END) AS avg_dtu_pct,
+          MAX(CASE
+            WHEN avg_cpu_percent >= avg_data_io_percent AND avg_cpu_percent >= avg_log_write_percent THEN avg_cpu_percent
+            WHEN avg_data_io_percent >= avg_log_write_percent THEN avg_data_io_percent
+            ELSE avg_log_write_percent
+          END) AS peak_dtu_pct
+        FROM sys.dm_db_resource_stats
+        WHERE end_time >= DATEADD(MINUTE, -60, GETUTCDATE())
+      `),
       prisma.project.findMany({
         where: { active: true },
         orderBy: { name: "asc" },
@@ -50,6 +69,7 @@ export default async function DashboardPage() {
     ]);
 
   const avgSec = avgRows[0]?.avg_sec ?? 0;
+  const dtu = dtuResult.recordset[0];
   const jobs = jobStatsRows[0] ?? { running_count: 0, queued_count: 0, completed_today: 0, failed_today: 0 };
   const tableCount = projectsData.reduce((n, p) => n + p.datasets.reduce((m, d) => m + d.tables.length, 0), 0);
 
@@ -65,6 +85,12 @@ export default async function DashboardPage() {
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard label="Projetos" value={String(projectCount)} hint="projetos ativos" icon={<FolderKanban size={20} />} />
         <StatCard label="Datasets" value={String(datasetCount)} hint={`${tableCount} tabelas`} icon={<Database size={20} />} />
+        <StatCard
+          label="DTU médio"
+          value={`${Math.round(dtu?.avg_dtu_pct ?? 0)} %`}
+          hint={`pico ${Math.round(dtu?.peak_dtu_pct ?? 0)} % · última hora`}
+          icon={<Gauge size={20} />}
+        />
         <StatCard
           label="Tempo de carga"
           value={formatDuration(avgSec)}
