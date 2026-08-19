@@ -24,18 +24,18 @@ async function claim(lockedBy: string, maxHeavy: number, allowedTypes: string[] 
     ? `AND type IN (${allowedTypes.map(t => `'${t.replace(/'/g, "''")}'`).join(",")})`
     : "";
   const rows = await prisma.$queryRawUnsafe<Claimed[]>(
-    `DECLARE @job TABLE(id uniqueidentifier,type varchar(50),upload_id uniqueidentifier,payload_json nvarchar(max),attempts int,max_attempts int,weight tinyint);
-     UPDATE dbo.cw_jobs WITH (UPDLOCK,READPAST,ROWLOCK)
-       SET status='RUNNING',locked_at=SYSUTCDATETIME(),heartbeat_at=SYSUTCDATETIME(),locked_by=@P1,attempts=attempts+1
-       OUTPUT inserted.id,inserted.type,inserted.upload_id,inserted.payload_json,inserted.attempts,inserted.max_attempts,inserted.weight INTO @job
+    `UPDATE cw_jobs
+       SET status='RUNNING', locked_at=NOW(), heartbeat_at=NOW(), locked_by=$1, attempts=attempts+1
      WHERE id=(
-       SELECT TOP(1) id FROM dbo.cw_jobs WITH (UPDLOCK,READPAST)
-       WHERE status='QUEUED' AND available_at<=SYSUTCDATETIME()
+       SELECT id FROM cw_jobs
+       WHERE status='QUEUED' AND available_at<=NOW()
          ${typeFilter}
-         AND (weight<2 OR (SELECT COUNT(*) FROM dbo.cw_jobs WHERE status='RUNNING' AND weight=2)<@P2)
-       ORDER BY weight ASC,available_at ASC
-     );
-     SELECT * FROM @job`,
+         AND (weight<2 OR (SELECT COUNT(*) FROM cw_jobs WHERE status='RUNNING' AND weight=2)<$2)
+       ORDER BY weight ASC, available_at ASC
+       LIMIT 1
+       FOR UPDATE SKIP LOCKED
+     )
+     RETURNING id, type, upload_id, payload_json, attempts, max_attempts, weight`,
     lockedBy,
     maxHeavy,
   );
@@ -283,74 +283,72 @@ async function recoverStale() {
   // Imports can legitimately spend several minutes inside Azure SQL/Bulk APIs,
   // so they get a longer stale window than preview/lightweight jobs.
   await prisma.$executeRawUnsafe(
-    `UPDATE dbo.cw_jobs
+    `UPDATE cw_jobs
      SET status='FAILED', locked_at=NULL, locked_by=NULL, heartbeat_at=NULL,
          last_error='Worker crashed (stale heartbeat, max attempts reached)'
      WHERE status='RUNNING'
        AND heartbeat_at < CASE
-         WHEN type='IMPORT_UPLOAD' THEN DATEADD(MINUTE,-90,SYSUTCDATETIME())
-         ELSE DATEADD(SECOND,-120,SYSUTCDATETIME())
+         WHEN type='IMPORT_UPLOAD' THEN NOW() - INTERVAL '90 minutes'
+         ELSE NOW() - INTERVAL '120 seconds'
        END
        AND attempts >= max_attempts`,
   );
 
   // Re-queue stale RUNNING jobs that still have retries left
   await prisma.$executeRawUnsafe(
-    `UPDATE dbo.cw_jobs
-     SET status='QUEUED', locked_at=NULL, locked_by=NULL, heartbeat_at=NULL, available_at=SYSUTCDATETIME()
+    `UPDATE cw_jobs
+     SET status='QUEUED', locked_at=NULL, locked_by=NULL, heartbeat_at=NULL, available_at=NOW()
      WHERE status='RUNNING'
        AND heartbeat_at < CASE
-         WHEN type='IMPORT_UPLOAD' THEN DATEADD(MINUTE,-90,SYSUTCDATETIME())
-         ELSE DATEADD(SECOND,-120,SYSUTCDATETIME())
+         WHEN type='IMPORT_UPLOAD' THEN NOW() - INTERVAL '90 minutes'
+         ELSE NOW() - INTERVAL '120 seconds'
        END
        AND attempts < max_attempts`,
   );
 
   // Fix IMPORTING uploads whose all jobs are now FAILED (no active job left)
   await prisma.$executeRawUnsafe(
-    `UPDATE u SET u.status='FAILED', u.error_message='Import interrompido (jobs esgotados)', u.updated_at=SYSUTCDATETIME()
-     FROM dbo.cw_uploads u
-     WHERE u.status='IMPORTING'
+    `UPDATE cw_uploads
+     SET status='FAILED', error_message='Import interrompido (jobs esgotados)', updated_at=NOW()
+     WHERE status='IMPORTING'
        AND NOT EXISTS (
-         SELECT 1 FROM dbo.cw_jobs j
-         WHERE j.upload_id=u.id AND j.status IN ('QUEUED','RUNNING','COMPLETED')
+         SELECT 1 FROM cw_jobs j
+         WHERE j.upload_id=cw_uploads.id AND j.status IN ('QUEUED','RUNNING','COMPLETED')
        )`,
   );
 
   await prisma.$executeRawUnsafe(
-    `UPDATE s
+    `UPDATE cw_dataset_sources
      SET last_status='failed',
          last_error='Processamento interrompido',
          next_refresh_at=CASE
-           WHEN s.refresh_cron IS NOT NULL THEN DATEADD(MINUTE,10,SYSUTCDATETIME())
+           WHEN refresh_cron IS NOT NULL THEN NOW() + INTERVAL '10 minutes'
            ELSE NULL
          END,
-         updated_at=SYSUTCDATETIME()
-     FROM dbo.cw_dataset_sources s
-     WHERE s.last_status='running'
+         updated_at=NOW()
+     WHERE last_status='running'
        AND NOT EXISTS (
          SELECT 1
-         FROM dbo.cw_jobs j
+         FROM cw_jobs j
          WHERE j.type='SOURCE_REFRESH'
            AND j.status IN ('QUEUED','RUNNING')
-           AND JSON_VALUE(j.payload_json,'$.datasetSourceId') = CONVERT(nvarchar(36),s.id)
+           AND j.payload_json::jsonb->>'datasetSourceId' = cw_dataset_sources.id::text
        )`,
   );
 
   // Fix derived tables stuck in 'running' with no active job
   await prisma.$executeRawUnsafe(
-    `UPDATE d
+    `UPDATE cw_derived_tables
      SET last_status='failed',
          last_error='Processamento interrompido',
-         updated_at=SYSUTCDATETIME()
-     FROM dbo.cw_derived_tables d
-     WHERE d.last_status='running'
+         updated_at=NOW()
+     WHERE last_status='running'
        AND NOT EXISTS (
          SELECT 1
-         FROM dbo.cw_jobs j
+         FROM cw_jobs j
          WHERE j.type='DERIVED_REFRESH'
            AND j.status IN ('QUEUED','RUNNING')
-           AND JSON_VALUE(j.payload_json,'$.derivedTableId') = CONVERT(nvarchar(36),d.id)
+           AND j.payload_json::jsonb->>'derivedTableId' = cw_derived_tables.id::text
        )`,
   );
 }
@@ -392,8 +390,8 @@ async function releaseSelf() {
     (_, i) => `locked_by LIKE '${workerId}-${i + 1}@%' OR locked_by='${workerId}-${i + 1}'`,
   ).join(" OR ");
   const released = await prisma.$executeRawUnsafe(
-    `UPDATE dbo.cw_jobs
-     SET status='QUEUED', locked_at=NULL, locked_by=NULL, heartbeat_at=NULL, available_at=SYSUTCDATETIME()
+    `UPDATE cw_jobs
+     SET status='QUEUED', locked_at=NULL, locked_by=NULL, heartbeat_at=NULL, available_at=NOW()
      WHERE status='RUNNING' AND (${likeConditions})`,
   );
   if (released > 0) console.log(`[worker] startup: ${released} job(s) do worker anterior liberados`);
