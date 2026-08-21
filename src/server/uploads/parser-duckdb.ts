@@ -9,15 +9,12 @@
  */
 import type { ParsedColumn } from "./parser";
 
-// Lazy singleton — one DuckDB instance per process, reused across imports
-let _instance: import("@duckdb/node-api").DuckDBInstance | null = null;
-
+// One DuckDB instance per concurrent import — avoids a singleton bottleneck when
+// multiple workers run simultaneously. Each instance gets its own thread pool so
+// parallel imports don't serialize on the same DuckDB process.
 async function getInstance(): Promise<import("@duckdb/node-api").DuckDBInstance> {
-  if (!_instance) {
-    const { DuckDBInstance } = await import("@duckdb/node-api");
-    _instance = await DuckDBInstance.create(":memory:", { threads: "2" });
-  }
-  return _instance;
+  const { DuckDBInstance } = await import("@duckdb/node-api");
+  return DuckDBInstance.create(":memory:", { threads: "2" });
 }
 
 export async function* rowsFromCsvDuckDB(
@@ -83,13 +80,16 @@ export async function* rowsFromCsvDuckDB(
     }
   } finally {
     conn.closeSync();
+    // Destroy the instance to free memory — each import gets its own instance
+    try { instance.closeSync?.(); } catch { /* best-effort */ }
   }
 }
 
 /** Detect if DuckDB is available — used to decide fast/slow path at runtime. */
 export async function isDuckDBAvailable(): Promise<boolean> {
   try {
-    await getInstance();
+    const inst = await getInstance();
+    try { inst.closeSync?.(); } catch { /* best-effort */ }
     return true;
   } catch {
     return false;
