@@ -40,7 +40,16 @@ async function _doSync(actor: Actor, scope?: SyncScope) {
   });
 
   if (mssqlDatasets.length > 0) {
-    await batchGrantSchemas(actor.principal, mssqlDatasets.map(d => ({ schema: d.schemaName, permission: d.permission })));
+    // Agrupa por storageServerId para usar o pool correto de cada servidor MSSQL
+    const byServer = new Map<string | null, typeof mssqlDatasets>();
+    for (const d of mssqlDatasets) {
+      const key = d.storageServerId;
+      if (!byServer.has(key)) byServer.set(key, []);
+      byServer.get(key)!.push(d);
+    }
+    for (const [serverId, group] of byServer) {
+      await batchGrantSchemas(actor.principal, group.map(d => ({ schema: d.schemaName, permission: d.permission })), serverId);
+    }
   }
 
   cache.set(cacheKey(actor.principal, scope), Date.now());

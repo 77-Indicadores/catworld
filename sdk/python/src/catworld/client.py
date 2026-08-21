@@ -181,7 +181,7 @@ class CatworldClient:
     def query(
         self,
         sql: str,
-        timeout: int = 30,
+        timeout: int = 60,
         limit: int | None = None,
         dataset_id: str | None = None,
         project_id: str | None = None,
@@ -190,26 +190,87 @@ class CatworldClient:
 
         Args:
             sql: SQL a executar (somente leitura).
-            timeout: Timeout em segundos por página (máx 120).
+            timeout: Timeout em segundos (máx 300). Padrão 60s.
             limit: Número máximo de linhas. ``None`` (padrão) retorna todas as linhas
-                   paginando automaticamente em blocos de 10.000.
+                   via streaming (1 request, sem paginação).
             dataset_id: Restringe ao schema do dataset informado.
             project_id: Restringe aos schemas do projeto informado.
         """
         if limit is None:
-            all_rows: list[dict[str, Any]] = []
-            columns: list[str] = []
-            for page in self._iter_query(sql, timeout=timeout, dataset_id=dataset_id, project_id=project_id):
-                if not columns and page.columns:
-                    columns = page.columns
-                all_rows.extend(page.rows)
-            return QueryResult({"rows": all_rows, "columns": columns, "rowCount": len(all_rows)})
+            live_source_id = self._resolve_live_source_for_query(sql, dataset_id, project_id)
+            if live_source_id:
+                all_rows: list[dict[str, Any]] = []
+                columns: list[str] = []
+                for page in self._iter_live_query(live_source_id, sql=sql, timeout=timeout):
+                    if not columns and page.columns:
+                        columns = page.columns
+                    all_rows.extend(page.rows)
+                return QueryResult({"rows": all_rows, "columns": columns, "rowCount": len(all_rows)})
+            return self._query_all_stream(sql, timeout=timeout, dataset_id=dataset_id, project_id=project_id)
 
         live_source_id = self._resolve_live_source_for_query(sql, dataset_id, project_id)
         if live_source_id:
             return self.live_query(live_source_id, sql=sql, timeout=timeout, limit=limit)
 
         return self._query_page(sql, timeout=timeout, limit=limit, offset=0, dataset_id=dataset_id, project_id=project_id)
+
+    def _query_all_stream(
+        self,
+        sql: str,
+        timeout: int = 60,
+        dataset_id: str | None = None,
+        project_id: str | None = None,
+    ) -> QueryResult:
+        """Busca todos os dados via NDJSON streaming (1 request, sem paginação)."""
+        payload: dict[str, Any] = {"sql": sql, "timeout": timeout, "stream": True}
+        if dataset_id:
+            payload["datasetId"] = dataset_id
+        if project_id:
+            payload["projectId"] = project_id
+
+        context = f"dataset={dataset_id}" if dataset_id else f"project={project_id}" if project_id else "sem contexto"
+        logger.info("Executando query em modo streaming [%s, timeout=%ss]", context, timeout)
+
+        columns: list[str] = []
+        rows: list[dict[str, Any]] = []
+        execution_time_ms: int = 0
+
+        with self._client.stream("POST", "/api/v1/queries", json=payload, timeout=None) as response:
+            if not response.is_success:
+                # Lê o corpo de erro normalmente
+                body = response.read()
+                try:
+                    error = _json.loads(body).get("error", {})
+                    code = error.get("code")
+                    message = error.get("message") or f"HTTP {response.status_code}"
+                except Exception:
+                    code = None
+                    message = body.decode(errors="replace") or f"HTTP {response.status_code}"
+                from .exceptions import from_api_error
+                raise from_api_error(code, message)
+
+            for raw_line in response.iter_lines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = _json.loads(line)
+                except _json.JSONDecodeError:
+                    continue
+
+                if "__columns__" in obj:
+                    columns = obj["__columns__"]
+                elif "__done__" in obj:
+                    execution_time_ms = obj.get("executionTimeMs", 0)
+                    logger.info("Stream concluído: %s linha(s) em %sms", obj.get("rowCount", "?"), execution_time_ms)
+                    break
+                elif "__error__" in obj:
+                    from .exceptions import from_api_error
+                    raise from_api_error(None, obj.get("message", "Erro desconhecido no stream"))
+                else:
+                    rows.append(obj)
+
+        return QueryResult({"rows": rows, "columns": columns, "rowCount": len(rows), "executionTimeMs": execution_time_ms})
 
     def iter_query(
         self,

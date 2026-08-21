@@ -3,7 +3,7 @@ import { z } from "zod";
 import * as Sentry from "@sentry/nextjs";
 import { resolveActor } from "@/server/auth/actor";
 import { syncActorGrants } from "@/server/auth/sync-grants";
-import { executeReadOnly } from "@/server/azure/sql";
+import { executeReadOnly, executeReadOnlyStream } from "@/server/azure/sql";
 import { ApiError, handleApiError, ok } from "@/server/http";
 import { audit } from "@/server/audit";
 import { prisma } from "@/server/db";
@@ -26,11 +26,12 @@ export async function POST(request: NextRequest) {
 
     const input = z.object({
       sql: z.string().min(1).max(50000),
-      timeout: z.number().int().min(1).max(120).default(30),
+      timeout: z.number().int().min(1).max(300).default(60),
       limit: z.number().int().min(1).max(10000).default(10000),
       offset: z.number().int().min(0).default(0),
       datasetId: z.string().uuid().optional(),
       projectId: z.string().uuid().optional(),
+      stream: z.boolean().default(false),
     }).parse(await request.json());
 
     let schemas: string[] = [];
@@ -59,6 +60,27 @@ export async function POST(request: NextRequest) {
     }
 
     await syncActorGrants(actor, syncScope);
+
+    // ── Modo streaming (sem limite de linhas, 1 request, NDJSON) ─────────────
+    if (input.stream) {
+      acquireQuerySlot();
+      try {
+        const conn = await getStorageConnection(storageServerId);
+        let ndjsonStream: ReadableStream<Uint8Array>;
+        if (conn.provider === "postgres") {
+          const { executeReadOnlyPgStream } = await import("@/server/storage/pg-query");
+          const { PgStorageConnection } = await import("@/server/storage/pg-storage");
+          ndjsonStream = await executeReadOnlyPgStream(conn as InstanceType<typeof PgStorageConnection>, input.sql, input.timeout, schemas);
+        } else {
+          ndjsonStream = await executeReadOnlyStream(actor.principal, input.sql, input.timeout, schemas, storageServerId);
+        }
+        return new Response(ndjsonStream, {
+          headers: { "Content-Type": "application/x-ndjson", "X-Cache": "MISS" },
+        });
+      } finally {
+        releaseQuerySlot();
+      }
+    }
 
     // Cache: verifica antes de executar
     const cacheKey = queryCacheKey(input.sql, input.datasetId, input.projectId, input.limit, input.offset);

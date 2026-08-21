@@ -48,10 +48,12 @@ export async function grantSchema(principal: string, schema: string, permission:
   for (const grant of grants) await (await sqlPool()).request().query(`GRANT ${grant} ON SCHEMA::${target} TO ${user}`);
 }
 
-export async function batchGrantSchemas(principal: string, items: { schema: string; permission: "READ" | "WRITE" }[]) {
+export async function batchGrantSchemas(principal: string, items: { schema: string; permission: "READ" | "WRITE" }[], storageServerId?: string | null) {
   if (items.length === 0) return;
-  await ensureInternalPrincipal(principal);
-  const pool = await sqlPool();
+  const pool = storageServerId ? await getStoragePool(storageServerId) : await sqlPool();
+  // Garante que o principal existe neste banco antes de grantar
+  const q = quoteIdentifier(principal);
+  await pool.request().query(`IF DATABASE_PRINCIPAL_ID(N'${escapeSqlLiteral(principal)}') IS NULL CREATE USER ${q} WITHOUT LOGIN`);
   const user = quoteIdentifier(principal);
   // Build one statement per schema to avoid saturating the connection pool
   // (previously fired one request per permission per schema via Promise.all)
@@ -71,6 +73,36 @@ export async function revokeSchema(principal: string, schema: string) {
   for (const grant of ["SELECT", "INSERT", "UPDATE", "DELETE"]) await (await sqlPool()).request().query(`IF DATABASE_PRINCIPAL_ID(N'${escapeSqlLiteral(principal)}') IS NOT NULL REVOKE ${grant} ON SCHEMA::${target} FROM ${user}`);
 }
 
+async function qualifyStatementMssql(statement: string, schemas: string[], pool: sql.ConnectionPool): Promise<string> {
+  const unqualified = extractUnqualifiedTableRefs(statement);
+  if (unqualified.length === 0) return statement;
+
+  const schemaList = schemas.map(s => `N'${escapeSqlLiteral(s)}'`).join(", ");
+  const tableList = unqualified.map(t => `N'${escapeSqlLiteral(t)}'`).join(", ");
+  const lookup = await pool.request().query(
+    `SELECT s.name AS schemaName, t.name AS tableName FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name IN (${schemaList}) AND t.name IN (${tableList})`
+  );
+
+  const tableMap = new Map<string, string[]>();
+  for (const row of lookup.recordset as { schemaName: string; tableName: string }[]) {
+    const key = row.tableName.toLowerCase();
+    if (!tableMap.has(key)) tableMap.set(key, []);
+    tableMap.get(key)!.push(row.schemaName);
+  }
+
+  let qualified = statement;
+  for (const table of unqualified) {
+    const found = tableMap.get(table.toLowerCase()) ?? [];
+    if (found.length > 1) {
+      throw new ApiError(400, "AMBIGUOUS_TABLE", `Tabela '${table}' existe em múltiplos datasets do contexto: ${found.join(", ")}. Use schema.tabela para qualificar.`);
+    }
+    if (found.length === 1) {
+      qualified = qualifyTable(qualified, table, found[0]!);
+    }
+  }
+  return qualified;
+}
+
 export async function executeReadOnly(principal: string, query: string, timeout = 30, limit = 10_000, schemas: string[] = [], offset = 0, maxTimeoutSeconds = 120, storageServerId?: string | null) {
   const validated = validateReadOnlySql(query);
   if (!validated.safe) throw new ApiError(400, "UNSAFE_SQL", validated.reason);
@@ -79,34 +111,7 @@ export async function executeReadOnly(principal: string, query: string, timeout 
 
   if (schemas.length > 0) {
     const pool = storageServerId ? await getStoragePool(storageServerId) : await sqlPool();
-    const unqualified = extractUnqualifiedTableRefs(statement);
-
-    if (unqualified.length > 0) {
-      const schemaList = schemas.map(s => `N'${escapeSqlLiteral(s)}'`).join(", ");
-      const tableList = unqualified.map(t => `N'${escapeSqlLiteral(t)}'`).join(", ");
-      const lookup = await pool.request().query(
-        `SELECT s.name AS schemaName, t.name AS tableName FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name IN (${schemaList}) AND t.name IN (${tableList})`
-      );
-
-const tableMap = new Map<string, string[]>();
-      for (const row of lookup.recordset as { schemaName: string; tableName: string }[]) {
-        const key = row.tableName.toLowerCase();
-        if (!tableMap.has(key)) tableMap.set(key, []);
-        tableMap.get(key)!.push(row.schemaName);
-      }
-
-      for (const table of unqualified) {
-        const found = tableMap.get(table.toLowerCase()) ?? [];
-        if (found.length > 1) {
-          throw new ApiError(400, "AMBIGUOUS_TABLE", `Tabela '${table}' existe em múltiplos datasets do contexto: ${found.join(", ")}. Use schema.tabela para qualificar.`);
-        }
-        if (found.length === 1) {
-          statement = qualifyTable(statement, table, found[0]!);
-        }
-        // found.length === 0: silently skip — it's a CTE alias, subquery alias, or
-        // temp table; SQL Server will produce the appropriate error if it's truly invalid.
-      }
-    }
+    statement = await qualifyStatementMssql(statement, schemas, pool);
   }
 
   const pool = storageServerId ? await getStoragePool(storageServerId) : await sqlPool();
@@ -137,6 +142,63 @@ const tableMap = new Map<string, string[]>();
     });
     throw error;
   }
+}
+
+/** Executa query em modo streaming NDJSON (sem limite de linhas, sem acumular no Node). */
+export async function executeReadOnlyStream(
+  principal: string,
+  query: string,
+  timeout = 60,
+  schemas: string[] = [],
+  storageServerId?: string | null,
+): Promise<ReadableStream<Uint8Array>> {
+  const validated = validateReadOnlySql(query);
+  if (!validated.safe) throw new ApiError(400, "UNSAFE_SQL", validated.reason);
+
+  let statement = validated.statement;
+
+  if (schemas.length > 0) {
+    const pool = storageServerId ? await getStoragePool(storageServerId) : await sqlPool();
+    statement = await qualifyStatementMssql(statement, schemas, pool);
+  }
+
+  const pool = storageServerId ? await getStoragePool(storageServerId) : await sqlPool();
+  const timeoutMs = Math.min(Math.max(timeout, 1), 300) * 1000;
+  const encoder = new TextEncoder();
+  const started = Date.now();
+
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      const request = new sql.Request(pool);
+      (request as unknown as { timeout: number }).timeout = timeoutMs;
+      (request as unknown as { overrides: { requestTimeout: number } }).overrides = { requestTimeout: timeoutMs };
+      request.stream = true;
+
+      let rowCount = 0;
+
+      request.on("recordset", (columns: Record<string, unknown>) => {
+        controller.enqueue(encoder.encode(JSON.stringify({ __columns__: Object.keys(columns) }) + "\n"));
+      });
+
+      request.on("row", (row: Record<string, unknown>) => {
+        rowCount++;
+        controller.enqueue(encoder.encode(JSON.stringify(row) + "\n"));
+      });
+
+      request.on("error", (err: Error) => {
+        Sentry.addBreadcrumb({ category: "db.query", message: "executeReadOnlyStream failed", level: "error", data: { sql: statement, principal, schemas } });
+        controller.enqueue(encoder.encode(JSON.stringify({ __error__: true, message: err.message }) + "\n"));
+        controller.close();
+      });
+
+      request.on("done", () => {
+        controller.enqueue(encoder.encode(JSON.stringify({ __done__: true, rowCount, executionTimeMs: Date.now() - started }) + "\n"));
+        controller.close();
+      });
+
+      request.query(statement);
+    },
+  });
 }
 
 function extractUnqualifiedTableRefs(sql: string): string[] {

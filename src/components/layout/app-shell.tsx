@@ -4,9 +4,9 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
-  Activity, ArrowUpFromLine, Bell, BookOpen, CheckCircle2, ChevronRight, CircleUserRound, CircleX, CloudCog, Database,
-  FileKey2, FolderKanban, Home, KeyRound, LayoutDashboard, Menu, Moon, Search,
-  Server, Settings, Sun, Trash2, UsersRound, X,
+  ArrowUpFromLine, Bell, BookOpen, CheckCircle2, ChevronRight, CircleUserRound, CircleX, CloudCog, Database,
+  FolderKanban, Home, LayoutDashboard, Menu, Moon, Search,
+  Settings, Sun, X,
 } from "lucide-react";
 
 type StorageStatus = { name: string; status: string | null; latencyMs: number | null } | null;
@@ -15,13 +15,7 @@ const nav = [
   { href: "/dashboard", label: "Visão geral", icon: LayoutDashboard },
   { href: "/projects", label: "Projetos", icon: FolderKanban },
   { href: "/uploads", label: "Uploads", icon: ArrowUpFromLine },
-  { href: "/users", label: "Usuários", icon: UsersRound },
-  { href: "/tokens", label: "Tokens", icon: KeyRound },
-  { href: "/database-users", label: "Usuários do banco", icon: FileKey2 },
-  { href: "/storage-servers", label: "Servidores SQL", icon: Server },
-  { href: "/audit", label: "Auditoria", icon: Activity },
-  { href: "/settings/connections", label: "Conexões", icon: Settings },
-  { href: "/settings/retention", label: "Retenção", icon: Trash2 },
+  { href: "/settings", label: "Configurações", icon: Settings },
 ];
 
 const navBottom = [
@@ -67,7 +61,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <p className="hidden px-3 pb-2 pt-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-base-content/40 xl:block">Workspace</p>
           <ul className="menu w-full gap-1 p-0">
             {nav.map((item) => {
-              const active = pathname === item.href || (item.href !== "/dashboard" && pathname.startsWith(`${item.href}/`));
+              const settingsSubpaths = ["/settings", "/storage-servers", "/users", "/tokens", "/database-users", "/audit"];
+              const active = item.href === "/settings"
+                ? settingsSubpaths.some(p => pathname === p || pathname.startsWith(`${p}/`))
+                : pathname === item.href || (item.href !== "/dashboard" && pathname.startsWith(`${item.href}/`));
               return (
                 <li key={item.href} className="tooltip tooltip-right xl:tooltip-right" data-tip={item.label}>
                   <Link href={item.href} onClick={() => setSidebarOpen(false)} className={`flex items-center gap-3 xl:gap-2 ${active ? "active font-medium" : "text-base-content/70"}`}>

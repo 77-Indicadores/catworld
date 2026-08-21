@@ -83,6 +83,57 @@ export async function executeReadOnlyPg(
   }
 }
 
+/** Streaming NDJSON sem limite de linhas — executa query completa e emite linha a linha. */
+export async function executeReadOnlyPgStream(
+  conn: PgStorageConnection,
+  sql: string,
+  timeout = 60,
+  schemas: string[] = [],
+): Promise<ReadableStream<Uint8Array>> {
+  const validated = validateReadOnlySql(sql);
+  if (!validated.safe) throw new ApiError(400, "UNSAFE_SQL", validated.reason);
+
+  const { sql: translated } = translateMssqlToPg(validated.statement);
+  let statement = translated;
+  if (schemas.length > 0) {
+    statement = await qualifyTablesForPg(conn, statement, schemas);
+  }
+
+  const timeoutMs = Math.min(Math.max(timeout, 1), 300) * 1000;
+  const encoder = new TextEncoder();
+  const started = Date.now();
+
+  // Executa a query completa e emite as linhas em stream
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      let client: PoolClient | null = null;
+      try {
+        client = await conn._pool.connect();
+        await client.query(`SET statement_timeout = ${timeoutMs}`);
+        if (schemas.length > 0) {
+          const searchPath = schemas.map((s) => `"${s.replace(/"/g, '""')}"`).join(", ");
+          await client.query(`SET search_path TO ${searchPath}, public`);
+        }
+        const result = await client.query(statement);
+        const columns = result.fields.map((f) => f.name);
+        controller.enqueue(encoder.encode(JSON.stringify({ __columns__: columns }) + "\n"));
+        let rowCount = 0;
+        for (const row of result.rows as Record<string, unknown>[]) {
+          controller.enqueue(encoder.encode(JSON.stringify(row) + "\n"));
+          rowCount++;
+        }
+        controller.enqueue(encoder.encode(JSON.stringify({ __done__: true, rowCount, executionTimeMs: Date.now() - started }) + "\n"));
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        controller.enqueue(encoder.encode(JSON.stringify({ __error__: true, message: msg }) + "\n"));
+      } finally {
+        client?.release();
+        controller.close();
+      }
+    },
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Qualificação de tabelas não qualificadas via information_schema
 // ---------------------------------------------------------------------------
