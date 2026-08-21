@@ -653,46 +653,53 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
     phaseTimings.rowsPerSecond = totalMs > 0 ? Math.round(total / (totalMs / 1000)) : null;
     console.log("[importUpload:perf]", JSON.stringify({ uploadId: upload.id, file: upload.originalFilename, rows: Number(actual), ...phaseTimings }));
 
-    // Batch column metadata inserts to stay under SQL Server 2100-parameter limit
-    const MAX_COLS_PER_BATCH = 500;
-    for (let batchStart = 0; batchStart < mapping.length; batchStart += MAX_COLS_PER_BATCH) {
-      const batch = mapping.slice(batchStart, batchStart + MAX_COLS_PER_BATCH);
-      const colReq = pool.request();
-      colReq.input("tableId", sql.UniqueIdentifier, table.id);
-      colReq.input("uploadId", sql.UniqueIdentifier, upload.id);
-      colReq.input("actual", sql.BigInt, actual);
-      colReq.input("inserted", sql.BigInt, inserted);
-      colReq.input("updated", sql.BigInt, updated);
-      colReq.input("schemaJson", sql.NVarChar(sql.MAX), JSON.stringify(mapping));
-      colReq.input("detailJson", sql.NVarChar(sql.MAX), JSON.stringify({ file: upload.originalFilename, rows: Number(actual), ...phaseTimings }));
-      const colValues = batch.map((c, i) => {
-        const gi = batchStart + i;
-        colReq.input(`orig${gi}`, sql.NVarChar(255), c.originalName);
-        colReq.input(`sqlName${gi}`, sql.VarChar(128), c.sqlName);
-        colReq.input(`sqlType${gi}`, sql.VarChar(100), c.sqlType);
-        colReq.input(`nullable${gi}`, sql.Bit, c.nullable);
-        return `(NEWID(),@tableId,${gi + 1},@orig${gi},@sqlName${gi},@sqlType${gi},@nullable${gi})`;
-      }).join(",");
-      const isFirst = batchStart === 0;
-      await colReq.query(`
-        BEGIN TRANSACTION
-        ${isFirst ? `DECLARE @lk INT
-        EXEC @lk=sp_getapplock @Resource='ColUpd_${table.id}',@LockMode='Exclusive',@LockTimeout=120000
-        IF @lk<0 THROW 50000,'lock timeout',1
-        DELETE FROM dbo.cw_columns WHERE table_id=@tableId` : ""}
-        INSERT INTO dbo.cw_columns(id,table_id,ordinal,original_name,sql_name,sql_type,nullable)
-          VALUES${colValues}
-        ${isFirst ? `UPDATE dbo.cw_tables SET row_count=@actual,last_data_at=SYSUTCDATETIME(),updated_at=SYSUTCDATETIME() WHERE id=@tableId
-        INSERT INTO dbo.cw_dataset_versions(id,table_id,upload_id,row_count,schema_json)
-          VALUES(NEWID(),@tableId,@uploadId,@actual,@schemaJson)
-        INSERT INTO dbo.cw_audit_events(id,event_type,resource_type,resource_id,detail_json,success)
-          VALUES(NEWID(),'UPLOAD_IMPORT_PERF','upload',@uploadId,@detailJson,1)
-        UPDATE dbo.cw_uploads SET table_id=@tableId,status='COMPLETED',progress=100,
-          row_count=@actual,inserted_count=@inserted,updated_count=@updated,
-          error_message=NULL,updated_at=SYSUTCDATETIME() WHERE id=@uploadId` : ""}
-        COMMIT
-      `);
-    }
+    // Update metadata in Postgres via Prisma (single transaction)
+    await prisma.$transaction([
+      prisma.datasetColumn.deleteMany({ where: { tableId: table.id } }),
+      prisma.datasetColumn.createMany({
+        data: mapping.map((c, i) => ({
+          tableId: table.id,
+          ordinal: i + 1,
+          originalName: c.originalName,
+          sqlName: c.sqlName,
+          sqlType: c.sqlType,
+          nullable: c.nullable,
+        })),
+      }),
+      prisma.datasetTable.update({
+        where: { id: table.id },
+        data: { rowCount: actual, lastDataAt: new Date() },
+      }),
+      prisma.datasetVersion.create({
+        data: {
+          tableId: table.id,
+          uploadId: upload.id,
+          rowCount: actual,
+          schemaJson: JSON.stringify(mapping),
+        },
+      }),
+      prisma.auditEvent.create({
+        data: {
+          eventType: "UPLOAD_IMPORT_PERF",
+          resourceType: "upload",
+          resourceId: upload.id,
+          detailJson: JSON.stringify({ file: upload.originalFilename, rows: Number(actual), ...phaseTimings }),
+          success: true,
+        },
+      }),
+      prisma.upload.update({
+        where: { id: upload.id },
+        data: {
+          tableId: table.id,
+          status: "COMPLETED",
+          progress: 100,
+          rowCount: actual,
+          insertedCount: inserted,
+          updatedCount: updated,
+          errorMessage: null,
+        },
+      }),
+    ]);
 
     return { tableId: table.id, inserted, updated, rowCount: actual };
   } catch (e) {
