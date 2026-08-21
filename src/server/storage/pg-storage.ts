@@ -18,7 +18,7 @@ function parsePgUrl(url: string): PoolConfig {
     database: u.pathname.slice(1) || undefined,
     user: decodeURIComponent(u.username),
     password: decodeURIComponent(u.password),
-    ssl: ssl === "disable" ? false : { rejectUnauthorized: ssl === "verify-full" },
+    ssl: (!ssl || ssl === "disable") ? false : { rejectUnauthorized: ssl === "verify-full" },
     max: 10,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 30_000,
