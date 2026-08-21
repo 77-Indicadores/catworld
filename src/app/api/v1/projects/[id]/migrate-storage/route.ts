@@ -59,7 +59,9 @@ async function copySchema(
 
       const bulkRows = rows.map(row => cols.map(c => {
         const v = row[c.name];
-        return v == null ? null : String(v);
+        if (v == null) return null;
+        if (v instanceof Date) return v.toISOString();
+        return String(v);
       }));
       await dst.bulkInsert(schema, table, colDefs, bulkRows);
 
