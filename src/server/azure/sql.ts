@@ -23,13 +23,14 @@ export async function ensureSchema(schema: string, pool?: sql.ConnectionPool) {
   await p.request().query(`IF SCHEMA_ID(N'${escapeSqlLiteral(schema)}') IS NULL EXEC(N'CREATE SCHEMA ${q}')`);
 }
 
-export async function dropTable(schema: string, table: string) {
+export async function dropTable(schema: string, table: string, storageServerId?: string | null) {
+  const pool = storageServerId ? await getStoragePool(storageServerId) : await sqlPool();
   const q = `${quoteIdentifier(schema)}.${quoteIdentifier(table)}`;
-  await (await sqlPool()).request().query(`IF OBJECT_ID(N'${escapeSqlLiteral(schema)}.${escapeSqlLiteral(table)}',N'U') IS NOT NULL DROP TABLE ${q}`);
+  await pool.request().query(`IF OBJECT_ID(N'${escapeSqlLiteral(schema)}.${escapeSqlLiteral(table)}',N'U') IS NOT NULL DROP TABLE ${q}`);
 }
 
-export async function dropSchema(schema: string) {
-  const pool = await sqlPool();
+export async function dropSchema(schema: string, storageServerId?: string | null) {
+  const pool = storageServerId ? await getStoragePool(storageServerId) : await sqlPool();
   const q = quoteIdentifier(schema);
   const tables = await pool.request().query(`SELECT t.name FROM sys.tables t JOIN sys.schemas s ON t.schema_id=s.schema_id WHERE s.name=N'${escapeSqlLiteral(schema)}'`);
   for (const row of tables.recordset as { name: string }[]) await pool.request().query(`DROP TABLE ${q}.${quoteIdentifier(row.name)}`);
@@ -70,9 +71,10 @@ export async function batchGrantSchemas(principal: string, items: { schema: stri
   }
 }
 
-export async function revokeSchema(principal: string, schema: string) {
+export async function revokeSchema(principal: string, schema: string, storageServerId?: string | null) {
+  const pool = storageServerId ? await getStoragePool(storageServerId) : await sqlPool();
   const user = quoteIdentifier(principal), target = quoteIdentifier(schema);
-  for (const grant of ["SELECT", "INSERT", "UPDATE", "DELETE"]) await (await sqlPool()).request().query(`IF DATABASE_PRINCIPAL_ID(N'${escapeSqlLiteral(principal)}') IS NOT NULL REVOKE ${grant} ON SCHEMA::${target} FROM ${user}`);
+  for (const grant of ["SELECT", "INSERT", "UPDATE", "DELETE"]) await pool.request().query(`IF DATABASE_PRINCIPAL_ID(N'${escapeSqlLiteral(principal)}') IS NOT NULL REVOKE ${grant} ON SCHEMA::${target} FROM ${user}`);
 }
 
 async function qualifyStatementMssql(statement: string, schemas: string[], pool: sql.ConnectionPool): Promise<string> {
@@ -249,14 +251,17 @@ function qualifyTable(sql: string, table: string, schema: string): string {
   }).join("");
 }
 
-export async function createExternalDatabaseUser(name: string, password: string) {
+export async function createExternalDatabaseUser(name: string, password: string, storageServerId?: string | null) {
+  const pool = storageServerId ? await getStoragePool(storageServerId) : await sqlPool();
   const q = quoteIdentifier(name);
-  await (await sqlPool()).request().query(`IF DATABASE_PRINCIPAL_ID(N'${escapeSqlLiteral(name)}') IS NOT NULL DROP USER ${q}; CREATE USER ${q} WITH PASSWORD = N'${escapeSqlLiteral(password)}'`);
+  await pool.request().query(`IF DATABASE_PRINCIPAL_ID(N'${escapeSqlLiteral(name)}') IS NOT NULL DROP USER ${q}; CREATE USER ${q} WITH PASSWORD = N'${escapeSqlLiteral(password)}'`);
 }
-export async function rotateExternalDatabaseUser(name: string, password: string) {
-  await (await sqlPool()).request().query(`ALTER USER ${quoteIdentifier(name)} WITH PASSWORD = N'${escapeSqlLiteral(password)}'`);
+export async function rotateExternalDatabaseUser(name: string, password: string, storageServerId?: string | null) {
+  const pool = storageServerId ? await getStoragePool(storageServerId) : await sqlPool();
+  await pool.request().query(`ALTER USER ${quoteIdentifier(name)} WITH PASSWORD = N'${escapeSqlLiteral(password)}'`);
 }
-export async function dropExternalDatabaseUser(name: string) {
-  await (await sqlPool()).request().query(`IF DATABASE_PRINCIPAL_ID(N'${escapeSqlLiteral(name)}') IS NOT NULL DROP USER ${quoteIdentifier(name)}`);
+export async function dropExternalDatabaseUser(name: string, storageServerId?: string | null) {
+  const pool = storageServerId ? await getStoragePool(storageServerId) : await sqlPool();
+  await pool.request().query(`IF DATABASE_PRINCIPAL_ID(N'${escapeSqlLiteral(name)}') IS NOT NULL DROP USER ${quoteIdentifier(name)}`);
 }
 export const escapeSqlLiteral = (value: string) => value.replaceAll("'", "''");

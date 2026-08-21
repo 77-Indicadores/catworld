@@ -18,7 +18,7 @@ export async function DELETE(r: NextRequest, { params }: { params: Promise<{ id:
     const principal = `cw_u_${userId.replaceAll("-", "").slice(0, 24)}`;
     for (const dataset of targets) {
       const stillGranted = remaining.some((g) => g.scopeType === "GLOBAL" || (g.scopeType === "PROJECT" && g.projectId === dataset.projectId) || (g.scopeType === "DATASET" && g.datasetId === dataset.id));
-      if (!stillGranted) await revokeSchema(principal, dataset.schemaName);
+      if (!stillGranted) await revokeSchema(principal, dataset.schemaName, dataset.storageServerId);
     }
     invalidateSyncCache(principal);
     return ok({ revoked: true });
