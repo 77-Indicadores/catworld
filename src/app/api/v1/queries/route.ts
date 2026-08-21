@@ -8,10 +8,22 @@ import { ApiError, handleApiError, ok } from "@/server/http";
 import { audit } from "@/server/audit";
 import { prisma } from "@/server/db";
 import { getStorageConnection } from "@/server/storage/connection";
+import {
+  acquireQuerySlot,
+  releaseQuerySlot,
+  checkRateLimit,
+  queryCacheKey,
+  getCachedResult,
+  setCachedResult,
+} from "@/server/query/protection";
 
 export async function POST(request: NextRequest) {
   try {
     const actor = await resolveActor(request);
+
+    // Rate limit: 60 req/min por token
+    checkRateLimit(actor.principal, "query");
+
     const input = z.object({
       sql: z.string().min(1).max(50000),
       timeout: z.number().int().min(1).max(120).default(30),
@@ -48,40 +60,62 @@ export async function POST(request: NextRequest) {
 
     await syncActorGrants(actor, syncScope);
 
+    // Cache: verifica antes de executar
+    const cacheKey = queryCacheKey(input.sql, input.datasetId, input.projectId, input.limit, input.offset);
+    const cached = getCachedResult(cacheKey);
+    if (cached) {
+      const res = ok(cached);
+      res.headers.set("X-Cache", "HIT");
+      res.headers.set("X-Cache-Hits", String(cached.cacheHits));
+      return res;
+    }
+
+    // Semáforo: limita concorrência global
+    acquireQuerySlot();
+
     let result: Awaited<ReturnType<typeof executeReadOnly>>;
 
-    // Roteia pelo provider do storage do dataset
-    const conn = await getStorageConnection(storageServerId);
+    try {
+      // Roteia pelo provider do storage do dataset
+      const conn = await getStorageConnection(storageServerId);
 
-    if (conn.provider === "postgres") {
-      const { executeReadOnlyPg } = await import("@/server/storage/pg-query");
-      const { PgStorageConnection } = await import("@/server/storage/pg-storage");
-      result = await executeReadOnlyPg(
-        conn as InstanceType<typeof PgStorageConnection>,
-        input.sql,
-        input.timeout,
-        input.limit,
-        schemas,
-        input.offset,
-      );
-    } else {
-      result = await executeReadOnly(
-        actor.principal,
-        input.sql,
-        input.timeout,
-        input.limit,
-        schemas,
-        input.offset,
-        120,
-        storageServerId,
-      );
+      if (conn.provider === "postgres") {
+        const { executeReadOnlyPg } = await import("@/server/storage/pg-query");
+        const { PgStorageConnection } = await import("@/server/storage/pg-storage");
+        result = await executeReadOnlyPg(
+          conn as InstanceType<typeof PgStorageConnection>,
+          input.sql,
+          input.timeout,
+          input.limit,
+          schemas,
+          input.offset,
+        );
+      } else {
+        result = await executeReadOnly(
+          actor.principal,
+          input.sql,
+          input.timeout,
+          input.limit,
+          schemas,
+          input.offset,
+          120,
+          storageServerId,
+        );
+      }
+    } finally {
+      releaseQuerySlot();
     }
+
+    // Salva no cache (só queries que retornaram sem erro)
+    setCachedResult(cacheKey, result);
 
     await audit(actor, "QUERY_EXECUTED", "query", undefined, {
       rowCount: result.rowCount,
       executionTimeMs: result.executionTimeMs,
     });
-    return ok(result);
+    const res = ok(result);
+    res.headers.set("X-Cache", "MISS");
+    return res;
   } catch (e) {
     if (e instanceof Error && "code" in e) {
       Sentry.captureException(e);
