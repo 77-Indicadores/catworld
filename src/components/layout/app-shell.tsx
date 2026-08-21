@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import {
   Activity, ArrowUpFromLine, Bell, BookOpen, ChevronRight, CircleUserRound, CloudCog, Database,
   FileKey2, FolderKanban, Home, KeyRound, LayoutDashboard, Menu, Moon, Search,
-  Settings, Sun, UsersRound, X,
+  Server, Settings, Sun, UsersRound, X,
 } from "lucide-react";
 
 const nav = [
@@ -16,6 +16,7 @@ const nav = [
   { href: "/users", label: "Usuários", icon: UsersRound },
   { href: "/tokens", label: "Tokens", icon: KeyRound },
   { href: "/database-users", label: "Usuários do banco", icon: FileKey2 },
+  { href: "/storage-servers", label: "Servidores SQL", icon: Server },
   { href: "/audit", label: "Auditoria", icon: Activity },
   { href: "/settings/connections", label: "Configurações", icon: Settings },
 ];
