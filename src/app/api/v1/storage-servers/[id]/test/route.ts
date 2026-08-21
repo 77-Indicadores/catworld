@@ -38,7 +38,7 @@ function parsePgUrl(url: string) {
     database: u.pathname.slice(1) || undefined,
     user: decodeURIComponent(u.username),
     password: decodeURIComponent(u.password),
-    ssl: ssl === "disable" ? false : { rejectUnauthorized: ssl === "verify-full" },
+    ssl: (!ssl || ssl === "disable") ? false : { rejectUnauthorized: ssl === "verify-full" },
     connectionTimeoutMillis: 15_000,
     statement_timeout: 10_000,
   };
