@@ -768,7 +768,9 @@ function DerivedRow({ dt, schemaName, onSelectTable, onChanged }: {
 
 // ── Storage Server badge (read-only) ──────────────────────────────────────
 function StorageServerBadge({ dataset, storageServers }: { dataset: Dataset; storageServers: StorageServerOption[] }) {
-  const current = storageServers.find(s => s.id === dataset.storageServerId);
+  const current = dataset.storageServerId
+    ? storageServers.find(s => s.id === dataset.storageServerId)
+    : storageServers.find(s => s.isDefault);
   return (
     <span className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-base-content/45" title="Servidor de armazenamento">
       <Server size={10} className="shrink-0" />

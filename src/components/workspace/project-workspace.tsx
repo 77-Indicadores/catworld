@@ -191,7 +191,17 @@ function ProjectMigrateStorageDialog({ project, storageServers, onChanged }: {
   project: Project; storageServers: StorageServerOption[]; onChanged: () => void;
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
-  const [targetId, setTargetId] = useState(storageServers[0]?.id ?? "");
+
+  // Servidor atual do projeto: storageServerId do primeiro dataset, ou o isDefault
+  const currentServerId = project.datasets[0]?.storageServerId
+    ?? storageServers.find(s => s.isDefault)?.id
+    ?? null;
+  const currentServer = storageServers.find(s => s.id === currentServerId);
+
+  // Servidores disponíveis como destino (exclui o atual)
+  const targetOptions = storageServers.filter(s => s.id !== currentServerId);
+
+  const [targetId, setTargetId] = useState(targetOptions[0]?.id ?? "");
   const [migrating, setMigrating] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -199,7 +209,7 @@ function ProjectMigrateStorageDialog({ project, storageServers, onChanged }: {
   if (storageServers.length < 2) return null;
 
   function open() {
-    setTargetId(storageServers[0]?.id ?? "");
+    setTargetId(targetOptions[0]?.id ?? "");
     setResult(null); setError(null);
     dialogRef.current?.showModal();
   }
@@ -233,13 +243,16 @@ function ProjectMigrateStorageDialog({ project, storageServers, onChanged }: {
       <dialog ref={dialogRef} className="modal">
         <div className="modal-box max-w-md">
           <h3 className="font-bold text-base">Migrar projeto</h3>
-          <p className="mt-0.5 text-xs text-base-content/50">Move todos os datasets de <strong>{project.name}</strong> para outro SQL Server.</p>
+          <p className="mt-0.5 text-xs text-base-content/50">Move todos os datasets de <strong>{project.name}</strong> para outro servidor de armazenamento.</p>
 
           <div className="mt-4 space-y-3">
+            <div className="text-xs text-base-content/50">
+              Servidor atual: <span className="font-medium text-base-content/70">{currentServer?.name ?? "Servidor padrão"}</span>
+            </div>
             <label className="form-control w-full">
               <span className="label-text font-medium">Servidor de destino</span>
               <select className="select mt-1 w-full" value={targetId} onChange={e => setTargetId(e.target.value)}>
-                {storageServers.map(s => (
+                {targetOptions.map(s => (
                   <option key={s.id} value={s.id}>{s.name}{s.isDefault ? " (padrão)" : ""}</option>
                 ))}
               </select>
