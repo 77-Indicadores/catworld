@@ -2,6 +2,7 @@ import { z } from "zod";
 
 const schema = z.object({
   CATWORLD_DATABASE_URL: z.string().min(1),
+  CATWORLD_MSSQL_URL: z.string().min(1),
   CATWORLD_ENCRYPTION_KEY: z.string().min(1),
   AUTH_SECRET: z.string().min(32),
   CATWORLD_UPLOAD_DIR: z.string().default("./var/uploads"),

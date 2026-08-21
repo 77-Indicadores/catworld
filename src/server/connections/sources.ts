@@ -3,6 +3,7 @@ import sql from "mssql";
 import { Cron } from "croner";
 import { prisma } from "@/server/db";
 import { sqlPool, ensureSchema } from "@/server/azure/sql";
+import { getStoragePool } from "@/server/storage/pool";
 import { quoteIdentifier, sqlIdentifier } from "@/server/security/naming";
 import { ApiError } from "@/server/http";
 import { queryColumns, quotedPgTable, streamPostgresRows, tableColumns, type SourceColumn } from "./postgres";
@@ -17,15 +18,16 @@ export function nextRefreshFromCron(cronExpr: string | null | undefined, from = 
   }
 }
 
+function advisoryLockKey(id: string): bigint {
+  // Convert first 15 hex chars of UUID (no dashes) to a positive bigint for pg_advisory_lock
+  return BigInt("0x" + id.replace(/-/g, "").slice(0, 15));
+}
+
 export async function queueSourceRefresh(datasetSourceId: string) {
-  // Use an app-level lock to prevent race condition where two workers both see "no existing job"
+  // Use Postgres advisory lock to prevent race condition where two workers both see "no existing job"
   // and both insert, creating duplicate SOURCE_REFRESH jobs for the same source.
-  const pool = await sqlPool();
-  const lockName = `SR_${datasetSourceId.slice(0, 36)}`;
-  await pool.request().query(
-    `DECLARE @lk INT; EXEC @lk=sp_getapplock @Resource=N'${lockName}',@LockMode='Exclusive',@LockOwner='Session',@LockTimeout=5000;` +
-    `IF @lk<0 RAISERROR('lock timeout queueSourceRefresh',16,1)`,
-  );
+  const lockKey = advisoryLockKey(datasetSourceId);
+  await prisma.$executeRawUnsafe(`SELECT pg_advisory_lock(${lockKey})`);
   try {
     const existing = await prisma.job.findFirst({
       where: { type: "SOURCE_REFRESH", status: { in: ["QUEUED", "RUNNING"] }, payloadJson: JSON.stringify({ datasetSourceId }) },
@@ -42,7 +44,7 @@ export async function queueSourceRefresh(datasetSourceId: string) {
     ]);
     return job;
   } finally {
-    await pool.request().query(`EXEC sp_releaseapplock @Resource=N'${lockName}',@LockOwner='Session'`).catch(() => {});
+    await prisma.$executeRawUnsafe(`SELECT pg_advisory_unlock(${lockKey})`).catch(() => {});
   }
 }
 
@@ -172,7 +174,7 @@ export async function refreshDatasetSource(datasetSourceId: string) {
   const columns = source.sourceKind === "table"
     ? (isMssql ? await tableColumnsMssql(source.connection, source.sourceSchema!, source.sourceTable!) : await tableColumns(source.connection, source.sourceSchema!, source.sourceTable!))
     : (isMssql ? await queryColumnsMssql(source.connection, source.sourceSql!) : await queryColumns(source.connection, source.sourceSql!));
-  const pool = await sqlPool();
+  const pool = await getStoragePool(source.dataset.storageServerId);
   const schema = source.dataset.schemaName;
   const table = source.targetTable.sqlName;
   const stage = `cw_src_${source.id.replaceAll("-", "").slice(0, 20)}`;
@@ -181,7 +183,7 @@ export async function refreshDatasetSource(datasetSourceId: string) {
   let rowCount = 0n;
 
   await prisma.datasetSource.update({ where: { id: source.id }, data: { lastStatus: "running", lastError: null } });
-  await ensureSchema(schema);
+  await ensureSchema(schema, pool);
   await pool.request().query(`IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL DROP TABLE ${staging}; CREATE TABLE ${staging} (${columnDefs(columns)})`);
   try {
     for await (const rows of (isMssql ? streamMssqlRows(source.connection, query, 1000) : streamPostgresRows(source.connection, query, 1000))) {

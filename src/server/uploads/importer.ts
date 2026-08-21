@@ -3,6 +3,7 @@ import { extname } from "node:path";
 import sql from "mssql";
 import { prisma } from "@/server/db";
 import { sqlPool } from "@/server/azure/sql";
+import { getStoragePool } from "@/server/storage/pool";
 import { quoteIdentifier, sqlIdentifier } from "@/server/security/naming";
 import { previewFile, rowsFromFile, type FilePreview, type ParsedColumn, type RowsFromFileOpts, type ParseStats } from "./parser";
 import { bulkInsertFromBlob, sanitizeCsvField } from "./importer-bulk-blob";
@@ -192,7 +193,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
   const tableName = upload.table?.sqlName ?? sqlIdentifier(upload.originalFilename.replace(/\.[^.]+$/, ""));
   const schema = upload.dataset.schemaName;
   const stage = `cw_stage_${upload.id.replaceAll("-", "").slice(0, 20)}`;
-  const pool = await sqlPool();
+  const pool = await getStoragePool(upload.dataset.storageServerId);
   const target = `${quoteIdentifier(schema)}.${quoteIdentifier(tableName)}`;
   const staging = `${quoteIdentifier(schema)}.${quoteIdentifier(stage)}`;
 

@@ -27,7 +27,7 @@ function parsePrismaSqlServerUrl(url: string): sql.config {
 const globalPool = globalThis as unknown as { catworldSqlPool?: Promise<sql.ConnectionPool> };
 export function sqlPool() {
   if (!globalPool.catworldSqlPool) {
-    const pool = new sql.ConnectionPool(parsePrismaSqlServerUrl(env().CATWORLD_DATABASE_URL));
+    const pool = new sql.ConnectionPool(parsePrismaSqlServerUrl(env().CATWORLD_MSSQL_URL));
     pool.on("error", () => { if (globalPool.catworldSqlPool) globalPool.catworldSqlPool = undefined; });
     globalPool.catworldSqlPool = pool.connect().catch((err) => { globalPool.catworldSqlPool = undefined; throw err; });
   }
@@ -41,9 +41,10 @@ export async function checkSql() {
   return { latencyMs: Date.now() - started, database: result.recordset[0]?.database_name };
 }
 
-export async function ensureSchema(schema: string) {
+export async function ensureSchema(schema: string, pool?: sql.ConnectionPool) {
+  const p = pool ?? await sqlPool();
   const q = quoteIdentifier(schema);
-  await (await sqlPool()).request().query(`IF SCHEMA_ID(N'${escapeSqlLiteral(schema)}') IS NULL EXEC(N'CREATE SCHEMA ${q}')`);
+  await p.request().query(`IF SCHEMA_ID(N'${escapeSqlLiteral(schema)}') IS NULL EXEC(N'CREATE SCHEMA ${q}')`);
 }
 
 export async function dropTable(schema: string, table: string) {

@@ -1,7 +1,11 @@
 import { randomUUID } from "crypto";
 import { prisma } from "@/server/db";
-import { sqlPool } from "@/server/azure/sql";
+import { getStoragePool } from "@/server/storage/pool";
 import { nextRefreshFromCron } from "./sources";
+
+function advisoryLockKey(id: string): bigint {
+  return BigInt("0x" + id.replace(/-/g, "").slice(0, 15));
+}
 
 function stagingName(sqlName: string) {
   const safe = sqlName.slice(0, 28).replace(/[^a-z0-9_]/g, "_");
@@ -10,12 +14,8 @@ function stagingName(sqlName: string) {
 }
 
 export async function queueDerivedRefresh(derivedTableId: string) {
-  const pool = await sqlPool();
-  const lockName = `DR_${derivedTableId.slice(0, 36)}`;
-  await pool.request().query(
-    `DECLARE @lk INT; EXEC @lk=sp_getapplock @Resource=N'${lockName}',@LockMode='Exclusive',@LockOwner='Session',@LockTimeout=5000;` +
-    `IF @lk<0 RAISERROR('lock timeout queueDerivedRefresh',16,1)`,
-  );
+  const lockKey = advisoryLockKey(derivedTableId);
+  await prisma.$executeRawUnsafe(`SELECT pg_advisory_lock(${lockKey})`);
   try {
     const existing = await prisma.job.findFirst({
       where: {
@@ -38,7 +38,7 @@ export async function queueDerivedRefresh(derivedTableId: string) {
     ]);
     return job;
   } finally {
-    await pool.request().query(`EXEC sp_releaseapplock @Resource=N'${lockName}',@LockOwner='Session'`).catch(() => {});
+    await prisma.$executeRawUnsafe(`SELECT pg_advisory_unlock(${lockKey})`).catch(() => {});
   }
 }
 
@@ -57,7 +57,7 @@ export async function refreshDerivedTable(derivedTableId: string) {
     include: { dataset: true },
   });
 
-  const pool = await sqlPool();
+  const pool = await getStoragePool(dt.dataset.storageServerId);
   const schema = dt.dataset.schemaName;
   const qSchema = `[${schema}]`;
   const staging = stagingName(dt.sqlName);
