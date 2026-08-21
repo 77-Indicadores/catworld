@@ -128,8 +128,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       rows = result.rows as Record<string, unknown>[];
       columnNames = result.columns;
     } else {
-      await ensureInternalPrincipal(actor.principal);
-      await grantSchema(actor.principal, table.dataset.schemaName, "READ");
+      await ensureInternalPrincipal(actor.principal, table.dataset.storageServerId);
+      await grantSchema(actor.principal, table.dataset.schemaName, "READ", table.dataset.storageServerId);
       const result = await executeReadOnly(
         actor.principal,
         `SELECT * FROM ${quoteIdentifier(table.dataset.schemaName)}.${quoteIdentifier(table.sqlName)}`,
@@ -138,6 +138,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         [],
         0,
         600,
+        table.dataset.storageServerId,
       );
       rows = result.rows as Record<string, unknown>[];
       columnNames = result.columns;

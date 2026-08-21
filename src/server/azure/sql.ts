@@ -36,16 +36,18 @@ export async function dropSchema(schema: string) {
   await pool.request().query(`IF SCHEMA_ID(N'${escapeSqlLiteral(schema)}') IS NOT NULL DROP SCHEMA ${q}`);
 }
 
-export async function ensureInternalPrincipal(principal: string) {
+export async function ensureInternalPrincipal(principal: string, storageServerId?: string | null) {
   const q = quoteIdentifier(principal);
-  await (await sqlPool()).request().query(`IF DATABASE_PRINCIPAL_ID(N'${escapeSqlLiteral(principal)}') IS NULL CREATE USER ${q} WITHOUT LOGIN`);
+  const pool = storageServerId ? await getStoragePool(storageServerId) : await sqlPool();
+  await pool.request().query(`IF DATABASE_PRINCIPAL_ID(N'${escapeSqlLiteral(principal)}') IS NULL CREATE USER ${q} WITHOUT LOGIN`);
 }
 
-export async function grantSchema(principal: string, schema: string, permission: "READ" | "WRITE") {
+export async function grantSchema(principal: string, schema: string, permission: "READ" | "WRITE", storageServerId?: string | null) {
   const user = quoteIdentifier(principal), target = quoteIdentifier(schema);
   const grants = permission === "READ" ? ["SELECT"] : ["SELECT", "INSERT", "UPDATE", "DELETE"];
-  await ensureInternalPrincipal(principal);
-  for (const grant of grants) await (await sqlPool()).request().query(`GRANT ${grant} ON SCHEMA::${target} TO ${user}`);
+  const pool = storageServerId ? await getStoragePool(storageServerId) : await sqlPool();
+  await pool.request().query(`IF DATABASE_PRINCIPAL_ID(N'${escapeSqlLiteral(principal)}') IS NULL CREATE USER ${user} WITHOUT LOGIN`);
+  for (const grant of grants) await pool.request().query(`GRANT ${grant} ON SCHEMA::${target} TO ${user}`);
 }
 
 export async function batchGrantSchemas(principal: string, items: { schema: string; permission: "READ" | "WRITE" }[], storageServerId?: string | null) {

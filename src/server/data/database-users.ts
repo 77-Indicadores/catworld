@@ -10,7 +10,7 @@ export async function createDatabaseUser(input:{name:string;kind:string;scopeTyp
  const name=sqlIdentifier(input.name),secret=password(); await createExternalDatabaseUser(name,secret);
  const user=await prisma.databaseUser.create({data:{name,kind:input.kind,encryptedPassword:encryptSecret(secret)}});
  await prisma.accessGrant.create({data:{databaseUserId:user.id,scopeType:input.scopeType,projectId:input.projectId,datasetId:input.datasetId,permission:input.permission}});
- for(const dataset of await grantTargets(input))await grantSchema(name,dataset.schemaName,input.permission);
+ for(const dataset of await grantTargets(input))await grantSchema(name,dataset.schemaName,input.permission,dataset.storageServerId);
  return {user,secret};
 }
 export async function rotateDatabaseUser(id:string){const user=await prisma.databaseUser.findUniqueOrThrow({where:{id}}),secret=password();await rotateExternalDatabaseUser(user.name,secret);await prisma.databaseUser.update({where:{id},data:{encryptedPassword:encryptSecret(secret)}});return {user,secret};}

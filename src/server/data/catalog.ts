@@ -48,7 +48,7 @@ export async function createDataset(projectId: string, input: { name: string; de
         : grant.tokenId
         ? `cw_t_${grant.tokenId.replaceAll("-", "").slice(0, 24)}`
         : grant.databaseUser?.name;
-      if (principal) await grantSchema(principal, schemaName, grant.permission === "READ" ? "READ" : "WRITE");
+      if (principal) await grantSchema(principal, schemaName, grant.permission === "READ" ? "READ" : "WRITE", storageServerId);
     }
   }
 
