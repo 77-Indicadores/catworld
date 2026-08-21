@@ -54,6 +54,7 @@ export async function getStoragePool(storageServerId: string | null | undefined)
       select: { id: true, url: true },
     });
 
+    if (!server.url) throw new Error(`StorageServer ${id} has no url configured`);
     const pool = new sql.ConnectionPool(parseMssqlUrl(server.url));
     pool.on("error", () => { poolCache.delete(id); });
 

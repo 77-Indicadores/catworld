@@ -294,7 +294,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
 
       try {
         const orResult = await bulkInsertFromBlob(
-          uploadId, source, mapping, schema, directTmp, opts, onProgress, false, knownRowCount, parseStats,
+          uploadId, source, mapping, schema, directTmp, opts, onProgress, false, knownRowCount, parseStats, pool,
         );
         total = orResult.total;
         inserted = total;
@@ -367,7 +367,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
           const cleanBlobName = `bulkimport/${uploadId}.csv`;
           try {
             const blobResult = await bulkInsertFromBlob(
-              uploadId, source, mapping, schema, destTable, opts, onProgress, phase2, knownRowCount, parseStats,
+              uploadId, source, mapping, schema, destTable, opts, onProgress, phase2, knownRowCount, parseStats, pool,
             );
             total = blobResult.total;
             phaseTimings.importMethod = "blob-bulk";
@@ -447,7 +447,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
             catch { blobSrc = await downloadFile(upload.blobName); }
 
             const blobResult = await bulkInsertFromBlob(
-              uploadId, blobSrc, mapping, schema, destTable, opts, onProgress, false, knownRowCount, parseStats,
+              uploadId, blobSrc, mapping, schema, destTable, opts, onProgress, false, knownRowCount, parseStats, pool,
             );
             total = blobResult.total;
             phaseTimings.bulkBlob = blobResult;

@@ -2,7 +2,7 @@ import type { NextRequest } from "next/server";
 import { z } from "zod";
 import sql from "mssql";
 import { prisma } from "@/server/db";
-import { sqlPool } from "@/server/azure/sql";
+import { getStoragePool } from "@/server/storage/pool";
 import { resolveActor } from "@/server/auth/actor";
 import { canAccess } from "@/server/auth/permissions";
 import { sqlIdentifier, quoteIdentifier } from "@/server/security/naming";
@@ -70,7 +70,7 @@ export async function POST(r: NextRequest, { params }: { params: Promise<{ id: s
 
     if (!table) return notCapable("first-upload");
 
-    const pool = await sqlPool();
+    const pool = await getStoragePool(dataset.storageServerId);
     const schema = dataset.schemaName;
     const tableName = table.sqlName;
     const target = `${quoteIdentifier(schema)}.${quoteIdentifier(tableName)}`;

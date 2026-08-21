@@ -7,7 +7,7 @@ import {
   StorageSharedKeyCredential,
   generateBlobSASQueryParameters,
 } from "@azure/storage-blob";
-import { sqlPool } from "@/server/azure/sql";
+import sql from "mssql";
 import { quoteIdentifier } from "@/server/security/naming";
 import { rowsFromFile, type ParsedColumn, type RowsFromFileOpts, type ParseStats } from "./parser";
 import { normalizeDateLike } from "./date-normalize";
@@ -131,6 +131,7 @@ export async function bulkInsertFromBlob(
   isPreProcessed = false,
   knownRowCount = 0,
   parseStats?: ParseStats,
+  pool?: sql.ConnectionPool | null,
 ): Promise<BulkBlobResult> {
   const { connStr, account, key, container } = blobEnv();
   const cleanBlobName = `bulkimport/${uploadId}.csv`;
@@ -199,7 +200,8 @@ export async function bulkInsertFromBlob(
 
   const credential = new StorageSharedKeyCredential(account, key);
 
-  const pool = await sqlPool();
+  if (!pool) throw new Error("[bulkInsertFromBlob] pool is required");
+  const activePool: sql.ConnectionPool = pool;
   const hash = createHash("md5").update(uploadId).digest("hex").slice(0, 8);
   const tempCred = `CatworldBulkCred_${hash}`;
   const tempDs = `CatworldBulkDS_${hash}`;
@@ -209,7 +211,7 @@ export async function bulkInsertFromBlob(
   // Avoids DROP+CREATE DDL on the critical path — 2 DDL ops on first attempt vs 1 ALTER on retry.
   // Cleanup (DROP) still happens in the finally block after all attempts complete.
   async function ensureCredentialAndDataSource(sas: string) {
-    await pool.request().query(`
+    await activePool.request().query(`
       IF NOT EXISTS (SELECT 1 FROM sys.database_scoped_credentials WHERE name='${tempCred}')
         CREATE DATABASE SCOPED CREDENTIAL [${tempCred}]
           WITH IDENTITY = 'SHARED ACCESS SIGNATURE', SECRET = '${sas}';
@@ -223,7 +225,7 @@ export async function bulkInsertFromBlob(
   }
 
   try {
-    const bulkReq = pool.request();
+    const bulkReq = activePool.request();
     (bulkReq as unknown as { overrides: { requestTimeout: number } }).overrides.requestTimeout = 30 * 60_000;
     const bulkSql = `
       BULK INSERT ${quoteIdentifier(schema)}.${quoteIdentifier(stagingTable)}
@@ -248,7 +250,7 @@ export async function bulkInsertFromBlob(
       try {
         // Truncate staging on retry (was partially loaded on previous attempt)
         if (attempt > 1) {
-          await pool.request().query(`TRUNCATE TABLE ${quoteIdentifier(schema)}.${quoteIdentifier(stagingTable)}`);
+          await activePool.request().query(`TRUNCATE TABLE ${quoteIdentifier(schema)}.${quoteIdentifier(stagingTable)}`);
         }
 
         // Fresh SAS token + atomic DROP+CREATE per attempt
@@ -287,8 +289,8 @@ export async function bulkInsertFromBlob(
     }
   } finally {
     // Cleanup: drop data source first (depends on credential), then credential
-    await pool.request().query(`DROP EXTERNAL DATA SOURCE IF EXISTS [${tempDs}]`).catch(() => {});
-    await pool.request().query(`DROP DATABASE SCOPED CREDENTIAL IF EXISTS [${tempCred}]`).catch(() => {});
+    await activePool.request().query(`DROP EXTERNAL DATA SOURCE IF EXISTS [${tempDs}]`).catch(() => {});
+    await activePool.request().query(`DROP DATABASE SCOPED CREDENTIAL IF EXISTS [${tempCred}]`).catch(() => {});
   }
 
   return { total, timings, cleanBlobName, reusedCleanBlob, bulkAttempts, parseStats: ps };
@@ -345,7 +347,8 @@ async function _openrowsetInsertFromBlob_DELETED(
   });
 
   const credential = new StorageSharedKeyCredential(account, key);
-  const pool = await sqlPool();
+  // NOTE: dead code — pool not available here; function is kept for reference only
+  const activePool = null as unknown as sql.ConnectionPool;
   const hash = createHash("md5").update(uploadId).digest("hex").slice(0, 8);
   const tempCred = `CatworldBulkCred_${hash}`;
   const tempDs   = `CatworldBulkDS_${hash}`;
@@ -367,7 +370,7 @@ async function _openrowsetInsertFromBlob_DELETED(
   const colList = [...mapping.map(c => quoteIdentifier(c.sqlName)), "[_cw_rh]"].join(",");
 
   async function ensureCredentialAndDataSource(sas: string) {
-    await pool.request().query(`
+    await activePool.request().query(`
       IF NOT EXISTS (SELECT 1 FROM sys.database_scoped_credentials WHERE name='${tempCred}')
         CREATE DATABASE SCOPED CREDENTIAL [${tempCred}]
           WITH IDENTITY = 'SHARED ACCESS SIGNATURE', SECRET = '${sas}';
@@ -404,7 +407,7 @@ async function _openrowsetInsertFromBlob_DELETED(
       bulkAttempts = attempt;
       try {
         if (attempt > 1) {
-          await pool.request().query(
+          await activePool.request().query(
             `TRUNCATE TABLE ${quoteIdentifier(schema)}.${quoteIdentifier(targetTable)}`
           );
         }
@@ -413,7 +416,7 @@ async function _openrowsetInsertFromBlob_DELETED(
           credential
         ).toString();
         await ensureCredentialAndDataSource(sas);
-        const req = pool.request();
+        const req = activePool.request();
         (req as unknown as { overrides: { requestTimeout: number } }).overrides.requestTimeout = 30 * 60_000;
         await mark("openrowsetInsertMs", () => req.query(insertSql));
         break;
@@ -426,8 +429,8 @@ async function _openrowsetInsertFromBlob_DELETED(
       }
     }
   } finally {
-    await pool.request().query(`DROP EXTERNAL DATA SOURCE IF EXISTS [${tempDs}]`).catch(() => {});
-    await pool.request().query(`DROP DATABASE SCOPED CREDENTIAL IF EXISTS [${tempCred}]`).catch(() => {});
+    await activePool.request().query(`DROP EXTERNAL DATA SOURCE IF EXISTS [${tempDs}]`).catch(() => {});
+    await activePool.request().query(`DROP DATABASE SCOPED CREDENTIAL IF EXISTS [${tempCred}]`).catch(() => {});
   }
 
   return { total, timings, cleanBlobName, reusedCleanBlob: false, bulkAttempts, parseStats: {} };

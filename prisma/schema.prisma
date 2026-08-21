@@ -326,13 +326,25 @@ model Job {
 }
 
 model StorageServer {
-  id        String    @id @default(uuid()) @db.Uuid
-  name      String    @db.VarChar(120)
-  url       String    @db.Text
-  isDefault Boolean   @default(false) @map("is_default")
-  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamp(3)
-  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamp(3)
-  datasets  Dataset[]
+  id                   String    @id @db.Uuid
+  name                 String    @db.VarChar(120)
+  /// Connection URL: sqlserver://host:port;database=...;user=...;password=...
+  url                  String?   @db.Text
+  provider             String    @default("sqlserver") @db.VarChar(50)
+  server               String    @default("") @db.VarChar(255)
+  port                 Int       @default(1433)
+  databaseName         String    @default("") @map("database_name") @db.VarChar(255)
+  encryptedCredentials String    @default("") @map("encrypted_credentials") @db.Text
+  sslMode              String    @default("none") @map("ssl_mode") @db.VarChar(50)
+  encrypt              Boolean   @default(true)
+  isDefault            Boolean   @default(false) @map("is_default")
+  active               Boolean   @default(true)
+  lastStatus           String?   @map("last_status") @db.VarChar(50)
+  lastLatencyMs        Int?      @map("last_latency_ms")
+  lastCheckedAt        DateTime? @map("last_checked_at") @db.Timestamp(3)
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamp(3)
+  updatedAt            DateTime  @updatedAt @map("updated_at") @db.Timestamp(3)
+  datasets             Dataset[]
 
   @@map("cw_storage_servers")
 }
