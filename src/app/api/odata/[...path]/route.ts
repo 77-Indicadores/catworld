@@ -97,7 +97,7 @@ function escXml(s: string) {
 type Column    = { originalName: string; sqlName: string; sqlType: string; nullable: boolean };
 type LiveSource = { mode: "live"; connection: PgConnection; sourceKind: string; sourceSchema: string | null; sourceTable: string | null; sourceSql: string | null };
 type Table     = { sqlName: string; columns: Column[]; live: LiveSource | null };
-type Dataset   = { id: string; schemaName: string; tables: Table[] };
+type Dataset   = { id: string; schemaName: string; storageServerId: string | null; tables: Table[] };
 
 async function loadDataset(projectSlug: string, datasetSlug: string): Promise<Dataset> {
   const cacheKey = `${projectSlug}/${datasetSlug}`;
@@ -111,6 +111,7 @@ async function loadDataset(projectSlug: string, datasetSlug: string): Promise<Da
   const dataset = await prisma.dataset.findFirst({
     where: { projectId: project.id, slug: datasetSlug, active: true },
     include: {
+      // storageServerId é campo direto no Dataset — incluído automaticamente pelo Prisma
       tables: {
         include: {
           columns: { orderBy: { ordinal: "asc" } },
@@ -143,7 +144,7 @@ async function loadDataset(projectSlug: string, datasetSlug: string): Promise<Da
     return { sqlName: t.sqlName, columns: t.columns, live };
   });
 
-  const result: Dataset = { id: dataset.id, schemaName: dataset.schemaName, tables };
+  const result: Dataset = { id: dataset.id, schemaName: dataset.schemaName, storageServerId: dataset.storageServerId, tables };
   datasetCache.set(cacheKey, { dataset: result, expiresAt: now + DATASET_CACHE_TTL });
   return result;
 }
@@ -358,9 +359,9 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 
       const cachedCount = getCachedCount(countCacheKey);
       const [result, countResult] = await Promise.all([
-        executeReadOnly(actor.principal, dataSql, 120, top, [dataset.schemaName]),
+        executeReadOnly(actor.principal, dataSql, 120, top, [dataset.schemaName], 0, 120, dataset.storageServerId),
         needCount && cachedCount === null
-          ? executeReadOnly(actor.principal, countSql, 30, 1, [dataset.schemaName])
+          ? executeReadOnly(actor.principal, countSql, 30, 1, [dataset.schemaName], 0, 120, dataset.storageServerId)
           : Promise.resolve(null),
       ]);
 
