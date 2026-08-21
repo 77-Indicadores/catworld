@@ -1,10 +1,11 @@
 /**
  * Storage pool routing — returns a mssql ConnectionPool for the given StorageServer.
- * Falls back to the default Azure SQL Server (CATWORLD_MSSQL_URL) when storageServerId is null.
+ * All URLs come from cw_storage_servers (managed via admin UI), never from env vars.
+ *
+ * Pass null/undefined to use the StorageServer marked as isDefault = true.
  */
 import sql from "mssql";
 import { prisma } from "@/server/db";
-import { sqlPool } from "@/server/azure/sql";
 
 function parseMssqlUrl(url: string): sql.config {
   const withoutScheme = url.replace(/^sqlserver:\/\//i, "");
@@ -32,28 +33,36 @@ function parseMssqlUrl(url: string): sql.config {
 
 const poolCache = new Map<string, Promise<sql.ConnectionPool>>();
 
+async function getDefaultStorageServerId(): Promise<string> {
+  const server = await prisma.storageServer.findFirstOrThrow({
+    where: { isDefault: true },
+    select: { id: true },
+  });
+  return server.id;
+}
+
 /**
  * Returns the mssql ConnectionPool for the given storageServerId.
- * Pass null to use the default Azure SQL Server.
+ * Pass null/undefined to route to the default StorageServer.
  */
 export async function getStoragePool(storageServerId: string | null | undefined): Promise<sql.ConnectionPool> {
-  if (!storageServerId) return sqlPool();
+  const id = storageServerId ?? await getDefaultStorageServerId();
 
-  if (!poolCache.has(storageServerId)) {
+  if (!poolCache.has(id)) {
     const server = await prisma.storageServer.findUniqueOrThrow({
-      where: { id: storageServerId },
-      select: { id: true, url: true, name: true },
+      where: { id },
+      select: { id: true, url: true },
     });
 
     const pool = new sql.ConnectionPool(parseMssqlUrl(server.url));
-    pool.on("error", () => { poolCache.delete(storageServerId); });
+    pool.on("error", () => { poolCache.delete(id); });
 
     const promise = pool
       .connect()
-      .catch((err) => { poolCache.delete(storageServerId); throw err; });
+      .catch((err) => { poolCache.delete(id); throw err; });
 
-    poolCache.set(storageServerId, promise);
+    poolCache.set(id, promise);
   }
 
-  return poolCache.get(storageServerId)!;
+  return poolCache.get(id)!;
 }

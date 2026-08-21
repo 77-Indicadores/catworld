@@ -1,37 +1,13 @@
 import * as Sentry from "@sentry/nextjs";
 import sql from "mssql";
-import { env } from "@/server/env";
+import { getStoragePool } from "@/server/storage/pool";
 import { quoteIdentifier } from "@/server/security/naming";
 import { validateReadOnlySql } from "@/server/security/sql-safety";
 import { ApiError } from "@/server/http";
 
-function parsePrismaSqlServerUrl(url: string): sql.config {
-  const withoutScheme = url.replace(/^sqlserver:\/\//i, "");
-  const [hostPort, ...rest] = withoutScheme.split(";").filter(Boolean);
-  const [server, port] = hostPort.split(":");
-  const params = Object.fromEntries(rest.map((part) => { const i = part.indexOf("="); return [part.slice(0, i).toLowerCase(), part.slice(i + 1)]; }));
-  if (!server) throw new Error("CATWORLD_DATABASE_URL inválida: host ausente");
-  return {
-    server,
-    port: port ? Number(port) : 1433,
-    database: params.database,
-    user: params.user,
-    password: params.password,
-    options: { encrypt: params.encrypt !== "false", trustServerCertificate: params.trustservercertificate === "true", packetSize: 16384 },
-    requestTimeout: 600_000,
-    connectionTimeout: 30_000,
-    pool: { max: 10, min: 2, idleTimeoutMillis: 30_000 },
-  };
-}
-
-const globalPool = globalThis as unknown as { catworldSqlPool?: Promise<sql.ConnectionPool> };
-export function sqlPool() {
-  if (!globalPool.catworldSqlPool) {
-    const pool = new sql.ConnectionPool(parsePrismaSqlServerUrl(env().CATWORLD_MSSQL_URL));
-    pool.on("error", () => { if (globalPool.catworldSqlPool) globalPool.catworldSqlPool = undefined; });
-    globalPool.catworldSqlPool = pool.connect().catch((err) => { globalPool.catworldSqlPool = undefined; throw err; });
-  }
-  return globalPool.catworldSqlPool;
+/** Returns the default storage pool (StorageServer with isDefault=true). */
+export function sqlPool(): Promise<sql.ConnectionPool> {
+  return getStoragePool(null);
 }
 
 export async function checkSql() {
