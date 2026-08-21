@@ -71,14 +71,14 @@ export async function revokeSchema(principal: string, schema: string) {
   for (const grant of ["SELECT", "INSERT", "UPDATE", "DELETE"]) await (await sqlPool()).request().query(`IF DATABASE_PRINCIPAL_ID(N'${escapeSqlLiteral(principal)}') IS NOT NULL REVOKE ${grant} ON SCHEMA::${target} FROM ${user}`);
 }
 
-export async function executeReadOnly(principal: string, query: string, timeout = 30, limit = 10_000, schemas: string[] = [], offset = 0, maxTimeoutSeconds = 120) {
+export async function executeReadOnly(principal: string, query: string, timeout = 30, limit = 10_000, schemas: string[] = [], offset = 0, maxTimeoutSeconds = 120, storageServerId?: string | null) {
   const validated = validateReadOnlySql(query);
   if (!validated.safe) throw new ApiError(400, "UNSAFE_SQL", validated.reason);
 
   let statement = validated.statement;
 
   if (schemas.length > 0) {
-    const pool = await sqlPool();
+    const pool = storageServerId ? await getStoragePool(storageServerId) : await sqlPool();
     const unqualified = extractUnqualifiedTableRefs(statement);
 
     if (unqualified.length > 0) {
@@ -109,7 +109,7 @@ const tableMap = new Map<string, string[]>();
     }
   }
 
-  const pool = await sqlPool();
+  const pool = storageServerId ? await getStoragePool(storageServerId) : await sqlPool();
   const request = new sql.Request(pool);
   const timeoutMs = Math.min(Math.max(timeout, 1), maxTimeoutSeconds) * 1000;
   // .timeout is a no-op in mssql v12; overrides.requestTimeout is the real field.

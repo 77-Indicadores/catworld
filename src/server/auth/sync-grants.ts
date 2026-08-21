@@ -24,9 +24,25 @@ export async function syncActorGrants(actor: Actor, scope?: SyncScope) {
 
 async function _doSync(actor: Actor, scope?: SyncScope) {
   const datasets = actor.type === "user" && actor.role === "ADMIN"
-    ? (await prisma.dataset.findMany({ where: { active: true, ...scopeWhere(scope) } })).map(d => ({ schemaName: d.schemaName, permission: "WRITE" as const }))
+    ? (await prisma.dataset.findMany({ where: { active: true, ...scopeWhere(scope) }, select: { schemaName: true, storageServerId: true } })).map(d => ({ schemaName: d.schemaName, storageServerId: d.storageServerId, permission: "WRITE" as const }))
     : await datasetsForActor(actor, scope);
-  await batchGrantSchemas(actor.principal, datasets.map(d => ({ schema: d.schemaName, permission: d.permission })));
+
+  // Grants de schema só se aplicam a datasets em SQL Server (MSSQL).
+  // Datasets em PostgreSQL usam conta única da aplicação — sem usuários por schema.
+  // Resolve o provider de cada storageServerId (null = default).
+  const storageServers = await prisma.storageServer.findMany({ select: { id: true, provider: true, isDefault: true } });
+  const defaultProvider = storageServers.find(s => s.isDefault)?.provider ?? "sqlserver";
+  const providerById = new Map(storageServers.map(s => [s.id, s.provider]));
+
+  const mssqlDatasets = datasets.filter(d => {
+    const provider = d.storageServerId ? (providerById.get(d.storageServerId) ?? "sqlserver") : defaultProvider;
+    return provider === "sqlserver";
+  });
+
+  if (mssqlDatasets.length > 0) {
+    await batchGrantSchemas(actor.principal, mssqlDatasets.map(d => ({ schema: d.schemaName, permission: d.permission })));
+  }
+
   cache.set(cacheKey(actor.principal, scope), Date.now());
 }
 
@@ -38,11 +54,11 @@ export function invalidateSyncCache(principal?: string) {
 
 async function datasetsForActor(actor: Actor, scope?: SyncScope) {
   const grants = await prisma.accessGrant.findMany({ where: actor.type === "user" ? { userId: actor.id } : { tokenId: actor.id } });
-  const all = await prisma.dataset.findMany({ where: { active: true, ...scopeWhere(scope) } });
-  const byId = new Map<string, { schemaName: string; permission: "READ" | "WRITE" }>();
+  const all = await prisma.dataset.findMany({ where: { active: true, ...scopeWhere(scope) }, select: { id: true, projectId: true, schemaName: true, storageServerId: true } });
+  const byId = new Map<string, { schemaName: string; storageServerId: string | null; permission: "READ" | "WRITE" }>();
   for (const grant of grants) {
     const matching = grant.scopeType === "GLOBAL" ? all : grant.scopeType === "PROJECT" ? all.filter(d => d.projectId === grant.projectId) : all.filter(d => d.id === grant.datasetId);
-    for (const d of matching) { const p = grant.permission === "WRITE" || grant.permission === "ADMIN" ? "WRITE" : "READ"; const old = byId.get(d.id); if (!old || p === "WRITE") byId.set(d.id, { schemaName: d.schemaName, permission: p }); }
+    for (const d of matching) { const p = grant.permission === "WRITE" || grant.permission === "ADMIN" ? "WRITE" : "READ"; const old = byId.get(d.id); if (!old || p === "WRITE") byId.set(d.id, { schemaName: d.schemaName, storageServerId: d.storageServerId, permission: p }); }
   }
   return [...byId.values()];
 }
