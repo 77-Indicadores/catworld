@@ -1,24 +1,65 @@
 import { prisma } from "@/server/db";
 import { datasetSchema, slugify } from "@/server/security/naming";
-import { dropSchema,dropTable,ensureSchema,grantSchema } from "@/server/azure/sql";
+import { dropSchema, dropTable, ensureSchema, grantSchema } from "@/server/azure/sql";
+import { getStorageConnection } from "@/server/storage/connection";
 
 export const projectInclude = { datasets: { where: { active: true }, include: { tables: { include: { columns: true } } } } } as const;
 export async function listProjects() { return prisma.project.findMany({ where: { active: true }, include: projectInclude, orderBy: { name: "asc" } }); }
 export async function createProject(input: { name: string; description?: string }) {
   return prisma.project.create({ data: { name: input.name.trim(), slug: slugify(input.name), description: input.description?.trim() || null } });
 }
+
 export async function createDataset(projectId: string, input: { name: string; description?: string }) {
   const project = await prisma.project.findUniqueOrThrow({ where: { id: projectId } });
   const slug = slugify(input.name), schemaName = datasetSchema(project.slug, slug);
-  await ensureSchema(schemaName);
-  const dataset=await prisma.dataset.create({ data: { projectId, name: input.name.trim(), slug, schemaName, description: input.description?.trim() || null } });
-  const grants=await prisma.accessGrant.findMany({where:{OR:[{scopeType:"GLOBAL"},{scopeType:"PROJECT",projectId}]},include:{databaseUser:true}});
-  for(const grant of grants){const principal=grant.userId?`cw_u_${grant.userId.replaceAll("-","").slice(0,24)}`:grant.tokenId?`cw_t_${grant.tokenId.replaceAll("-","").slice(0,24)}`:grant.databaseUser?.name;if(principal)await grantSchema(principal,schemaName,grant.permission==="READ"?"READ":"WRITE");}
+
+  // Resolve o storage server do projeto: usa o mesmo dos datasets existentes,
+  // ou o servidor padrão (isDefault) se o projeto ainda não tem datasets.
+  const existingDataset = await prisma.dataset.findFirst({
+    where: { projectId, active: true },
+    select: { storageServerId: true },
+    orderBy: { createdAt: "asc" },
+  });
+  const storageServerId = existingDataset?.storageServerId ?? null; // null → usa isDefault
+
+  const conn = await getStorageConnection(storageServerId);
+  await conn.createSchemaIfNotExists(schemaName);
+
+  const dataset = await prisma.dataset.create({
+    data: {
+      projectId,
+      name: input.name.trim(),
+      slug,
+      schemaName,
+      description: input.description?.trim() || null,
+      storageServerId,
+    },
+  });
+
+  // Grants de acesso só se aplicam ao SQL Server (usuários internos do MSSQL)
+  if (conn.provider === "sqlserver") {
+    const grants = await prisma.accessGrant.findMany({
+      where: { OR: [{ scopeType: "GLOBAL" }, { scopeType: "PROJECT", projectId }] },
+      include: { databaseUser: true },
+    });
+    for (const grant of grants) {
+      const principal = grant.userId
+        ? `cw_u_${grant.userId.replaceAll("-", "").slice(0, 24)}`
+        : grant.tokenId
+        ? `cw_t_${grant.tokenId.replaceAll("-", "").slice(0, 24)}`
+        : grant.databaseUser?.name;
+      if (principal) await grantSchema(principal, schemaName, grant.permission === "READ" ? "READ" : "WRITE");
+    }
+  }
+
   return dataset;
 }
 
 export async function deleteTable(id: string) {
-  const table = await prisma.datasetTable.findUniqueOrThrow({ where: { id }, include: { dataset: true } });
+  const table = await prisma.datasetTable.findUniqueOrThrow({
+    where: { id },
+    include: { dataset: { select: { schemaName: true, storageServerId: true } } },
+  });
   const uploads = await prisma.upload.findMany({ where: { tableId: id } });
   const uploadIds = uploads.map((u) => u.id);
   const sources = await prisma.datasetSource.findMany({ where: { targetTableId: id }, select: { id: true } });
@@ -30,13 +71,14 @@ export async function deleteTable(id: string) {
     prisma.datasetSource.deleteMany({ where: { targetTableId: id } }),
     prisma.datasetTable.delete({ where: { id } }),
   ]);
-  await dropTable(table.dataset.schemaName, table.sqlName);
+  const conn = await getStorageConnection(table.dataset.storageServerId);
+  await conn.dropTableIfExists(table.dataset.schemaName, table.sqlName);
 }
 
 export async function deleteDatasetSource(id: string) {
   const source = await prisma.datasetSource.findUniqueOrThrow({
     where: { id },
-    include: { targetTable: { include: { dataset: true } } },
+    include: { targetTable: { include: { dataset: { select: { schemaName: true, storageServerId: true } } } } },
   });
   const target = source.targetTable;
   const sourcePayload = JSON.stringify({ datasetSourceId: source.id });
@@ -50,18 +92,23 @@ export async function deleteDatasetSource(id: string) {
     ...(target ? [prisma.datasetTable.delete({ where: { id: target.id } })] : []),
   ]);
 
-  if (target && source.mode === "extract") await dropTable(target.dataset.schemaName, target.sqlName);
+  if (target && source.mode === "extract") {
+    const conn = await getStorageConnection(target.dataset.storageServerId);
+    await conn.dropTableIfExists(target.dataset.schemaName, target.sqlName);
+  }
 }
 
 export async function deleteDatasetSourceGroup(groupId: string) {
   const sources = await prisma.datasetSource.findMany({
     where: { sourceGroupId: groupId },
-    include: { targetTable: { include: { dataset: true } } },
+    include: { targetTable: { include: { dataset: { select: { schemaName: true, storageServerId: true } } } } },
     orderBy: { createdAt: "asc" },
   });
   const sourceIds = sources.map((s) => s.id);
   const sourcePayloads = sourceIds.map((id) => JSON.stringify({ datasetSourceId: id }));
-  const targets = sources.map((s) => s.targetTable ? ({ sourceMode: s.mode, table: s.targetTable }) : null).filter(Boolean) as { sourceMode: string; table: NonNullable<(typeof sources)[number]["targetTable"]> }[];
+  const targets = sources
+    .map((s) => s.targetTable ? ({ sourceMode: s.mode, table: s.targetTable }) : null)
+    .filter(Boolean) as { sourceMode: string; table: NonNullable<(typeof sources)[number]["targetTable"]> }[];
   const tableIds = targets.map((t) => t.table.id);
   const uploads = tableIds.length ? await prisma.upload.findMany({ where: { tableId: { in: tableIds } }, select: { id: true } }) : [];
   const uploadIds = uploads.map((u) => u.id);
@@ -74,14 +121,21 @@ export async function deleteDatasetSourceGroup(groupId: string) {
   ]);
 
   for (const target of targets) {
-    if (target.sourceMode === "extract") await dropTable(target.table.dataset.schemaName, target.table.sqlName);
+    if (target.sourceMode === "extract") {
+      const conn = await getStorageConnection(target.table.dataset.storageServerId);
+      await conn.dropTableIfExists(target.table.dataset.schemaName, target.table.sqlName);
+    }
   }
 
   return { deletedSources: sourceIds.length, deletedTables: tableIds.length };
 }
 
 export async function deleteDataset(id: string) {
-  const dataset = await prisma.dataset.findUniqueOrThrow({ where: { id }, include: { tables: true } });
+  const dataset = await prisma.dataset.findUniqueOrThrow({
+    where: { id },
+    include: { tables: true },
+    // storageServerId incluído automaticamente
+  });
   const tableIds = dataset.tables.map((t) => t.id);
   const uploads = await prisma.upload.findMany({ where: { OR: [{ datasetId: id }, { tableId: { in: tableIds } }] } });
   const uploadIds = uploads.map((u) => u.id);
@@ -96,7 +150,8 @@ export async function deleteDataset(id: string) {
     prisma.datasetTable.deleteMany({ where: { datasetId: id } }),
     prisma.dataset.delete({ where: { id } }),
   ]);
-  await dropSchema(dataset.schemaName);
+  const conn = await getStorageConnection(dataset.storageServerId);
+  await conn.dropSchemaIfExists(dataset.schemaName);
 }
 
 export async function deleteProject(id: string) {
