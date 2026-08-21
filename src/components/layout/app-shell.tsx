@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import {
   Activity, ArrowUpFromLine, Bell, BookOpen, CheckCircle2, ChevronRight, CircleUserRound, CircleX, CloudCog, Database,
   FileKey2, FolderKanban, Home, KeyRound, LayoutDashboard, Menu, Moon, Search,
-  Server, Settings, Sun, UsersRound, X,
+  Server, Settings, Sun, Trash2, UsersRound, X,
 } from "lucide-react";
 
 type StorageStatus = { name: string; status: string | null; latencyMs: number | null } | null;
@@ -20,7 +20,8 @@ const nav = [
   { href: "/database-users", label: "Usuários do banco", icon: FileKey2 },
   { href: "/storage-servers", label: "Servidores SQL", icon: Server },
   { href: "/audit", label: "Auditoria", icon: Activity },
-  { href: "/settings/connections", label: "Configurações", icon: Settings },
+  { href: "/settings/connections", label: "Conexões", icon: Settings },
+  { href: "/settings/retention", label: "Retenção", icon: Trash2 },
 ];
 
 const navBottom = [

@@ -348,3 +348,11 @@ model StorageServer {
 
   @@map("cw_storage_servers")
 }
+
+model SystemSetting {
+  key       String   @id @db.VarChar(120)
+  value     String   @db.Text
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamp(3)
+
+  @@map("cw_system_settings")
+}

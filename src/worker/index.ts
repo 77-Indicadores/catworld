@@ -76,7 +76,58 @@ async function convertLegacy(path: string, dir: string) {
   return join(dir, `${basename(path, ".xls")}.xlsx`);
 }
 
+async function runMetadataCleanup() {
+  // Lê configurações de retenção do Postgres
+  const rows = await prisma.systemSetting.findMany({
+    where: { key: { in: ["retention.jobs_days", "retention.audit_events_days", "retention.uploads_days", "retention.dataset_versions_keep"] } },
+  });
+  const cfg = Object.fromEntries(rows.map((r) => [r.key, Number(r.value)]));
+  const jobsDays            = cfg["retention.jobs_days"]             ?? 30;
+  const auditDays           = cfg["retention.audit_events_days"]     ?? 30;
+  const uploadsDays         = cfg["retention.uploads_days"]          ?? 30;
+  const versionsKeep        = cfg["retention.dataset_versions_keep"] ?? 10;
+
+  const deletedJobs = await prisma.$executeRawUnsafe(
+    `DELETE FROM cw_jobs WHERE status IN ('COMPLETED','FAILED') AND created_at < NOW() - ($1 || ' days')::INTERVAL`,
+    String(jobsDays),
+  );
+
+  const deletedAudit = await prisma.$executeRawUnsafe(
+    `DELETE FROM cw_audit_events WHERE created_at < NOW() - ($1 || ' days')::INTERVAL`,
+    String(auditDays),
+  );
+
+  const deletedUploads = await prisma.$executeRawUnsafe(
+    `DELETE FROM cw_uploads WHERE status IN ('COMPLETED','FAILED','CANCELLED') AND created_at < NOW() - ($1 || ' days')::INTERVAL`,
+    String(uploadsDays),
+  );
+
+  // Para dataset_versions: mantém apenas os últimos N por table_id
+  const deletedVersions = await prisma.$executeRawUnsafe(
+    `DELETE FROM cw_dataset_versions
+     WHERE id IN (
+       SELECT id FROM (
+         SELECT id, ROW_NUMBER() OVER (PARTITION BY table_id ORDER BY created_at DESC) AS rn
+         FROM cw_dataset_versions
+       ) ranked
+       WHERE rn > $1
+     )`,
+    versionsKeep,
+  );
+
+  console.log(
+    "[METADATA_CLEANUP] jobs=%d audit_events=%d uploads=%d dataset_versions=%d",
+    deletedJobs, deletedAudit, deletedUploads, deletedVersions,
+  );
+}
+
 async function work(job: Claimed) {
+  if (job.type === "METADATA_CLEANUP") {
+    await runMetadataCleanup();
+    await prisma.job.update({ where: { id: job.id }, data: { status: "COMPLETED", lockedAt: null, lockedBy: null, heartbeatAt: null, lastError: null } });
+    return;
+  }
+
   if (job.type === "SOURCE_REFRESH") {
     const payload = JSON.parse(job.payload_json ?? "{}") as { datasetSourceId?: string };
     if (!payload.datasetSourceId) throw new Error("SOURCE_REFRESH sem datasetSourceId");
@@ -405,6 +456,29 @@ async function main() {
   const allowedTypes = rawTypes ? rawTypes.split(",").map(t => t.trim()).filter(Boolean) : null;
   const handlesSourceRefresh = !allowedTypes || allowedTypes.includes("SOURCE_REFRESH");
   const handlesDerivedRefresh = !allowedTypes || allowedTypes.includes("DERIVED_REFRESH");
+  const handlesCleanup = !allowedTypes || allowedTypes.includes("METADATA_CLEANUP");
+
+  // Enqueue one METADATA_CLEANUP per day if none is queued/running
+  async function scheduleCleanupIfNeeded() {
+    if (!handlesCleanup) return;
+    const existing = await prisma.job.findFirst({
+      where: { type: "METADATA_CLEANUP", status: { in: ["QUEUED", "RUNNING"] } },
+    });
+    if (existing) return;
+    const last = await prisma.job.findFirst({
+      where: { type: "METADATA_CLEANUP", status: "COMPLETED" },
+      orderBy: { createdAt: "desc" },
+    });
+    const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
+    if (!last || last.createdAt.getTime() < dayAgo) {
+      await prisma.$executeRawUnsafe(
+        `INSERT INTO cw_jobs (id, type, status, payload_json, attempts, max_attempts, weight, available_at, created_at, updated_at)
+         VALUES (gen_random_uuid(), 'METADATA_CLEANUP', 'QUEUED', NULL, 0, 1, 0, NOW(), NOW(), NOW())`,
+      );
+      console.log("[worker] METADATA_CLEANUP agendado");
+    }
+  }
+
   let lastRecovery = 0;
   const recoveryLoop = async () => {
     while (!stopping) {
@@ -413,6 +487,7 @@ async function main() {
           await recoverStale();
           if (handlesSourceRefresh) await enqueueDueSourceRefreshes();
           if (handlesDerivedRefresh) await enqueueDueDerivedRefreshes();
+          await scheduleCleanupIfNeeded();
         } catch (e) {
           console.warn("[recovery] erro (transiente): %s", e instanceof Error ? e.message : e);
         }
