@@ -77,10 +77,11 @@ async function convertLegacy(path: string, dir: string) {
 }
 
 async function runMetadataCleanup() {
-  // Lê configurações de retenção do Postgres
-  const rows = await prisma.systemSetting.findMany({
-    where: { key: { in: ["retention.jobs_days", "retention.audit_events_days", "retention.uploads_days", "retention.dataset_versions_keep"] } },
-  });
+  // Lê configurações de retenção do Postgres via SQL direto (evita dependência do Prisma client gerado)
+  const rows = await prisma.$queryRawUnsafe<{ key: string; value: string }[]>(
+    `SELECT key, value FROM cw_system_settings WHERE key = ANY($1::text[])`,
+    ["retention.jobs_days", "retention.audit_events_days", "retention.uploads_days", "retention.dataset_versions_keep"],
+  );
   const cfg = Object.fromEntries(rows.map((r) => [r.key, Number(r.value)]));
   const jobsDays            = cfg["retention.jobs_days"]             ?? 30;
   const auditDays           = cfg["retention.audit_events_days"]     ?? 30;
