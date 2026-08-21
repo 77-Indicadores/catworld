@@ -4,6 +4,7 @@ import { Cron } from "croner";
 import { prisma } from "@/server/db";
 import { sqlPool, ensureSchema } from "@/server/azure/sql";
 import { getStoragePool } from "@/server/storage/pool";
+import { getStorageConnection } from "@/server/storage/connection";
 import { quoteIdentifier, sqlIdentifier } from "@/server/security/naming";
 import { ApiError } from "@/server/http";
 import { queryColumns, quotedPgTable, streamPostgresRows, tableColumns, type SourceColumn } from "./postgres";
@@ -165,8 +166,6 @@ export async function refreshDatasetSource(datasetSourceId: string) {
     ? `SELECT * FROM ${isMssql ? quotedMssqlTable(source.sourceSchema!, source.sourceTable!) : quotedPgTable(source.sourceSchema!, source.sourceTable!)}`
     : source.sourceSql!;
   const quoteCol = (col: string) => isMssql ? `[${col.replace(/]/g, "]]")}]` : `"${col.replace(/"/g, '""')}"`;
-  // lastDeltaValue is written by us (MAX of source column) not by end-users, so string
-  // escaping is sufficient here. Single-quote doubling is standard SQL injection prevention.
   const query = useDelta
     ? `${baseTableQuery} WHERE ${quoteCol(source.deltaColumn!)} > '${source.lastDeltaValue!.replace(/'/g, "''")}'`
     : baseTableQuery;
@@ -174,57 +173,95 @@ export async function refreshDatasetSource(datasetSourceId: string) {
   const columns = source.sourceKind === "table"
     ? (isMssql ? await tableColumnsMssql(source.connection, source.sourceSchema!, source.sourceTable!) : await tableColumns(source.connection, source.sourceSchema!, source.sourceTable!))
     : (isMssql ? await queryColumnsMssql(source.connection, source.sourceSql!) : await queryColumns(source.connection, source.sourceSql!));
-  const pool = await getStoragePool(source.dataset.storageServerId);
+
+  const storageConn = await getStorageConnection(source.dataset.storageServerId);
   const schema = source.dataset.schemaName;
   const table = source.targetTable.sqlName;
   const stage = `cw_src_${source.id.replaceAll("-", "").slice(0, 20)}`;
-  const target = `${quoteIdentifier(schema)}.${quoteIdentifier(table)}`;
-  const staging = `${quoteIdentifier(schema)}.${quoteIdentifier(stage)}`;
   let rowCount = 0n;
 
   await prisma.datasetSource.update({ where: { id: source.id }, data: { lastStatus: "running", lastError: null } });
-  await ensureSchema(schema, pool);
-  await pool.request().query(`IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL DROP TABLE ${staging}; CREATE TABLE ${staging} (${columnDefs(columns)})`);
+  await storageConn.createSchemaIfNotExists(schema);
+
+  // Cria tabela staging com os tipos canônicos das colunas
+  const stageCols = columns.map(c => ({ name: c.sqlName, sqlType: c.sqlType, nullable: true }));
+  await storageConn.dropTableIfExists(schema, stage);
+  await storageConn.createTable(schema, stage, stageCols);
+
   try {
-    for await (const rows of (isMssql ? streamMssqlRows(source.connection, query, 1000) : streamPostgresRows(source.connection, query, 1000))) {
-      await bulkInsertRows(pool, schema, stage, columns, rows);
+    const STREAM_BATCH = 1000;
+    for await (const rows of (isMssql ? streamMssqlRows(source.connection, query, STREAM_BATCH) : streamPostgresRows(source.connection, query, STREAM_BATCH))) {
+      const bulkRows = rows.map(row => columns.map(c => convertSourceValue(row[c.originalName], c.sqlType)));
+      await storageConn.bulkInsert(schema, stage, stageCols, bulkRows);
       rowCount += BigInt(rows.length);
     }
-    // Capture new delta value BEFORE the transaction swaps/drops staging
+
+    // Captura novo delta ANTES de trocar/dropar staging
     let newDeltaValue: string | null | undefined = undefined;
     if (source.deltaColumn && source.sourceKind === "table" && source.keyColumn) {
-      const col = quoteIdentifier(source.deltaColumn);
-      const res = await pool.request().query(`SELECT MAX(${col}) AS v FROM ${staging}`);
-      const v = res.recordset[0]?.v;
+      const col = storageConn.q(source.deltaColumn);
+      const qStage = `${storageConn.q(schema)}.${storageConn.q(stage)}`;
+      const res = await storageConn.query<{ v: unknown }>(`SELECT MAX(${col}) AS v FROM ${qStage}`);
+      const v = res[0]?.v;
       if (v != null) newDeltaValue = v instanceof Date ? v.toISOString() : String(v);
     }
 
-    const tx = new sql.Transaction(pool);
-    await tx.begin();
-    try {
-      const req = new sql.Request(tx);
-      const hasTarget = await targetExists(req, schema, table);
-      if (source.keyColumn && hasTarget) {
-        // Upsert: DELETE matched rows by key + INSERT from staging (faster than MERGE)
-        const key = quoteIdentifier(source.keyColumn);
-        const colList = columns.map((c) => quoteIdentifier(c.sqlName)).join(",");
-        await req.query(`
-          DELETE t FROM ${target} t WHERE EXISTS (SELECT 1 FROM ${staging} s WHERE t.${key} = s.${key});
-          INSERT INTO ${target} (${colList}) SELECT ${colList} FROM ${staging};
-          DROP TABLE ${staging};
-        `);
-      } else {
-        if (hasTarget) await req.query(`DROP TABLE ${target}`);
-        await req.query(`EXEC sp_rename '${schema}.${stage}', '${table}'`);
+    // Swap atômico (upsert ou replace)
+    const hasTarget = await storageConn.tableExists(schema, table);
+    if (storageConn.provider === "sqlserver") {
+      // mssql: usa pool raw para transação e sp_rename
+      const pool = await (storageConn as import("@/server/storage/mssql-storage").MssqlStorageConnection).rawPool();
+      const qTarget = `${quoteIdentifier(schema)}.${quoteIdentifier(table)}`;
+      const qStaging = `${quoteIdentifier(schema)}.${quoteIdentifier(stage)}`;
+      const tx = new sql.Transaction(pool);
+      await tx.begin();
+      try {
+        const req = new sql.Request(tx);
+        if (source.keyColumn && hasTarget) {
+          const key = quoteIdentifier(source.keyColumn);
+          const colList = columns.map((c) => quoteIdentifier(c.sqlName)).join(",");
+          await req.query(`
+            DELETE t FROM ${qTarget} t WHERE EXISTS (SELECT 1 FROM ${qStaging} s WHERE t.${key} = s.${key});
+            INSERT INTO ${qTarget} (${colList}) SELECT ${colList} FROM ${qStaging};
+            DROP TABLE ${qStaging};
+          `);
+        } else {
+          if (hasTarget) await req.query(`DROP TABLE ${qTarget}`);
+          await req.query(`EXEC sp_rename '${(schema as string).replaceAll("'", "''")}.${ (stage as string).replaceAll("'", "''")}', '${(table as string).replaceAll("'", "''")}'`);
+        }
+        await tx.commit();
+      } catch (e) {
+        await tx.rollback().catch(() => undefined);
+        throw e;
       }
-      await tx.commit();
-    } catch (e) {
-      await tx.rollback().catch(() => undefined);
-      throw e;
+    } else {
+      // postgres: usa transação via withClient
+      const pgConn = storageConn as import("@/server/storage/pg-storage").PgStorageConnection;
+      const { pgQuote } = await import("@/server/storage/pg-storage");
+      const qTarget = `${pgQuote(schema)}.${pgQuote(table)}`;
+      const qStaging = `${pgQuote(schema)}.${pgQuote(stage)}`;
+      await pgConn.withClient(async (client: import("pg").PoolClient) => {
+        await client.query("BEGIN");
+        try {
+          if (source.keyColumn && hasTarget) {
+            const key = pgQuote(source.keyColumn);
+            const colList = columns.map(c => pgQuote(c.sqlName)).join(", ");
+            await client.query(`DELETE FROM ${qTarget} t USING ${qStaging} s WHERE t.${key} = s.${key}`);
+            await client.query(`INSERT INTO ${qTarget} (${colList}) SELECT ${colList} FROM ${qStaging}`);
+            await client.query(`DROP TABLE ${qStaging}`);
+          } else {
+            await client.query(`DROP TABLE IF EXISTS ${qTarget}`);
+            await client.query(`ALTER TABLE ${qStaging} RENAME TO ${pgQuote(table)}`);
+          }
+          await client.query("COMMIT");
+        } catch (e) {
+          await client.query("ROLLBACK").catch(() => undefined);
+          throw e;
+        }
+      });
     }
 
-    const finalCountResult = await pool.request().query(`SELECT COUNT_BIG(*) count FROM ${target}`);
-    const finalRowCount = BigInt(finalCountResult.recordset[0]?.count ?? rowCount);
+    const finalRowCount = await storageConn.countRows(schema, table);
 
     await replaceColumnCatalog(source.targetTable.id, columns, finalRowCount);
     await prisma.datasetSource.update({
@@ -240,77 +277,38 @@ export async function refreshDatasetSource(datasetSourceId: string) {
     });
     return { rowCount: finalRowCount };
   } catch (e) {
-    await pool.request().query(`IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL DROP TABLE ${staging}`).catch(() => undefined);
+    await storageConn.dropTableIfExists(schema, stage).catch(() => undefined);
     const message = e instanceof Error ? e.message : String(e);
-    await prisma.datasetSource.update({ where: { id: source.id }, data: { lastStatus: "failed", lastError: message, nextRefreshAt: nextRefreshFromCron(source.refreshCron) } });
+    await prisma.datasetSource.update({
+      where: { id: source.id },
+      data: { lastStatus: "failed", lastError: message, nextRefreshAt: nextRefreshFromCron(source.refreshCron) },
+    });
     throw e;
   }
 }
 
-async function targetExists(req: sql.Request, schema: string, table: string) {
-  const result = await req.query(`SELECT CASE WHEN OBJECT_ID(N'${schema}.${table}',N'U') IS NULL THEN 0 ELSE 1 END n`);
-  return Number(result.recordset[0]?.n ?? 0) === 1;
-}
-
-function columnDefs(columns: SourceColumn[]) {
-  return columns.map((c) => `${quoteIdentifier(c.sqlName)} ${sqlType(c.sqlType)} NULL`).join(",");
-}
-
-function sqlType(type: string) {
-  if (type === "BIGINT") return "BIGINT";
-  if (type.startsWith("DECIMAL")) return "DECIMAL(18,4)";
-  if (type === "DATE") return "DATE";
-  if (type === "DATETIME2") return "DATETIME2";
-  if (type === "TIME") return "TIME";
-  return "NVARCHAR(MAX)";
-}
-
-async function bulkInsertRows(pool: sql.ConnectionPool, schema: string, table: string, columns: SourceColumn[], rows: Record<string, unknown>[]) {
-  if (!rows.length) return;
-  const bulk = new sql.Table(`${schema}.${table}`);
-  bulk.create = false;
-  for (const column of columns) bulk.columns.add(column.sqlName, tdsType(column.sqlType), { nullable: true });
-  for (const row of rows) bulk.rows.add(...columns.map((column) => convert(row[column.originalName], column.sqlType)) as Parameters<typeof bulk.rows.add>);
-  await new sql.Request(pool).bulk(bulk, { tableLock: true });
-}
-
-function tdsType(type: string): sql.ISqlType | (() => sql.ISqlType) {
-  if (type === "BIGINT") return sql.BigInt;
-  if (type.startsWith("DECIMAL")) return sql.Decimal(18, 4);
-  if (type === "DATE") return sql.Date;
-  if (type === "DATETIME2") return sql.DateTime2;
-  if (type === "TIME") return sql.Time;
-  return sql.NVarChar(sql.MAX);
-}
-
-function convert(value: unknown, type: string) {
+/** Converte valor de fonte para string compatível com bulkInsert */
+function convertSourceValue(value: unknown, type: string): string | null {
   if (value == null) return null;
   if (type === "BIGINT") {
-    // Return native BigInt — tedious bulk API accepts it and preserves full 64-bit precision.
-    // Drivers return large BIGINTs as string to avoid float64 precision loss; handle both.
     const s = typeof value === "bigint" ? value.toString() : String(value).trim();
     if (!/^-?\d+$/.test(s)) return null;
-    try {
-      const b = BigInt(s);
-      if (b < -9223372036854775808n || b > 9223372036854775807n) return null;
-      return b;
-    } catch { return null; }
+    return s;
   }
   if (type.startsWith("DECIMAL")) {
-    // BUG3-fix: DECIMAL(18,4) max integer digits = 14. Values >= 1e14 overflow → NULL not error.
     const n = Number(value);
     if (!Number.isFinite(n) || Math.abs(n) >= 1e14) return null;
-    return n;
+    return String(n);
   }
   if (type === "DATE" || type === "DATETIME2") {
     const d = value instanceof Date ? value : new Date(String(value));
     if (isNaN(d.getTime())) return null;
-    const year = d.getUTCFullYear();
-    return year < 1753 || year > 9999 ? null : d;
+    return d.toISOString();
   }
   if (type === "TIME") return String(value);
   return typeof value === "object" ? JSON.stringify(value) : String(value);
 }
+
 
 async function replaceColumnCatalog(tableId: string, columns: SourceColumn[], rowCount: bigint) {
   await prisma.$transaction([

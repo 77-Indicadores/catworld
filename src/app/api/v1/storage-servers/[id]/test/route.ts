@@ -1,5 +1,6 @@
 import type { NextRequest } from "next/server";
 import sql from "mssql";
+import { Pool } from "pg";
 import { prisma } from "@/server/db";
 import { resolveActor, requireRole } from "@/server/auth/actor";
 import { handleApiError, ok, ApiError } from "@/server/http";
@@ -27,13 +28,32 @@ function parseMssqlUrl(url: string): sql.config {
   };
 }
 
+function parsePgUrl(url: string) {
+  const normalized = url.replace(/^postgresql:\/\//, "postgres://");
+  const u = new URL(normalized);
+  const ssl = u.searchParams.get("sslmode") ?? u.searchParams.get("ssl");
+  return {
+    host: u.hostname,
+    port: u.port ? Number(u.port) : 5432,
+    database: u.pathname.slice(1) || undefined,
+    user: decodeURIComponent(u.username),
+    password: decodeURIComponent(u.password),
+    ssl: ssl === "disable" ? false : { rejectUnauthorized: ssl === "verify-full" },
+    connectionTimeoutMillis: 15_000,
+    statement_timeout: 10_000,
+  };
+}
+
 export async function POST(r: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const actor = await resolveActor(r);
     requireRole(actor, ["ADMIN"]);
     const id = (await params).id;
 
-    const record = await prisma.storageServer.findUnique({ where: { id }, select: { url: true, encryptedCredentials: true } });
+    const record = await prisma.storageServer.findUnique({
+      where: { id },
+      select: { provider: true, url: true, encryptedCredentials: true },
+    });
     if (!record) throw new ApiError(404, "NOT_FOUND", "StorageServer não encontrado");
 
     let resolvedUrl: string | null = null;
@@ -44,27 +64,49 @@ export async function POST(r: NextRequest, { params }: { params: Promise<{ id: s
     if (!resolvedUrl) throw new ApiError(400, "NO_URL", "StorageServer sem URL configurada");
 
     const started = Date.now();
-    const pool = new sql.ConnectionPool(parseMssqlUrl(resolvedUrl));
-    try {
-      await pool.connect();
-      const result = await pool.request().query<{ db: string }>("SELECT DB_NAME() AS db");
-      const latencyMs = Date.now() - started;
-      const database = result.recordset[0]?.db ?? "";
 
-      await prisma.storageServer.update({
-        where: { id },
-        data: { lastStatus: "healthy", lastLatencyMs: latencyMs, lastCheckedAt: new Date() },
-      });
-
-      return ok({ healthy: true, latencyMs, database });
-    } catch (err) {
-      await prisma.storageServer.update({
-        where: { id },
-        data: { lastStatus: "error", lastCheckedAt: new Date() },
-      }).catch(() => undefined);
-      throw err;
-    } finally {
-      await pool.close().catch(() => undefined);
+    if (record.provider === "postgres") {
+      const pool = new Pool(parsePgUrl(resolvedUrl));
+      try {
+        const result = await pool.query<{ db: string }>("SELECT current_database() AS db");
+        const latencyMs = Date.now() - started;
+        const database = result.rows[0]?.db ?? "";
+        await prisma.storageServer.update({
+          where: { id },
+          data: { lastStatus: "healthy", lastLatencyMs: latencyMs, lastCheckedAt: new Date() },
+        });
+        return ok({ healthy: true, latencyMs, database });
+      } catch (err) {
+        await prisma.storageServer.update({
+          where: { id },
+          data: { lastStatus: "error", lastCheckedAt: new Date() },
+        }).catch(() => undefined);
+        throw err;
+      } finally {
+        await pool.end().catch(() => undefined);
+      }
+    } else {
+      // SQL Server
+      const pool = new sql.ConnectionPool(parseMssqlUrl(resolvedUrl));
+      try {
+        await pool.connect();
+        const result = await pool.request().query<{ db: string }>("SELECT DB_NAME() AS db");
+        const latencyMs = Date.now() - started;
+        const database = result.recordset[0]?.db ?? "";
+        await prisma.storageServer.update({
+          where: { id },
+          data: { lastStatus: "healthy", lastLatencyMs: latencyMs, lastCheckedAt: new Date() },
+        });
+        return ok({ healthy: true, latencyMs, database });
+      } catch (err) {
+        await prisma.storageServer.update({
+          where: { id },
+          data: { lastStatus: "error", lastCheckedAt: new Date() },
+        }).catch(() => undefined);
+        throw err;
+      } finally {
+        await pool.close().catch(() => undefined);
+      }
     }
   } catch (e) {
     return handleApiError(e);

@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
 import { prisma } from "@/server/db";
 import { getStoragePool } from "@/server/storage/pool";
+import { getStorageConnection } from "@/server/storage/connection";
 import { nextRefreshFromCron } from "./sources";
 
 function advisoryLockKey(id: string): bigint {
@@ -57,95 +58,68 @@ export async function refreshDerivedTable(derivedTableId: string) {
     include: { dataset: true },
   });
 
-  const pool = await getStoragePool(dt.dataset.storageServerId);
+  const conn = await getStorageConnection(dt.dataset.storageServerId);
   const schema = dt.dataset.schemaName;
-  const qSchema = `[${schema}]`;
   const staging = stagingName(dt.sqlName);
-  const qStaging = `${qSchema}.[${staging}]`;
-  const qTarget = `${qSchema}.[${dt.sqlName}]`;
 
   await prisma.derivedTable.update({ where: { id: derivedTableId }, data: { lastStatus: "running" } });
 
   try {
-    await pool.request().query(
-      `SELECT * INTO ${qStaging} FROM (${dt.querySql}) AS _drv`,
-    );
+    // Cria tabela staging como resultado do querySql (sintaxe depende do provider)
+    if (conn.provider === "sqlserver") {
+      const qSchema = `[${schema}]`;
+      const qStaging = `${qSchema}.[${staging}]`;
+      const pool = await (conn as import("@/server/storage/mssql-storage").MssqlStorageConnection).rawPool();
+      await pool.request().query(`SELECT * INTO ${qStaging} FROM (${dt.querySql}) AS _drv`);
+    } else {
+      const { pgQuote } = await import("@/server/storage/pg-storage");
+      await conn.createSchemaIfNotExists(schema);
+      const qStaging = `${pgQuote(schema)}.${pgQuote(staging)}`;
+      await conn.execute(`CREATE TABLE ${qStaging} AS SELECT * FROM (${dt.querySql}) AS _drv`);
+    }
 
-    const countRes = await pool.request().query<{ n: number }>(
-      `SELECT COUNT_BIG(*) AS n FROM ${qStaging}`,
-    );
-    const rowCount = Number((countRes.recordset[0] as { n: number }).n);
+    const rowCount = Number(await conn.countRows(schema, staging));
 
-    const colsRes = await pool.request().query<{
-      COLUMN_NAME: string;
-      DATA_TYPE: string;
-      CHARACTER_MAXIMUM_LENGTH: number | null;
-    }>(
-      `SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH
-       FROM INFORMATION_SCHEMA.COLUMNS
-       WHERE TABLE_SCHEMA=N'${schema}' AND TABLE_NAME=N'${staging}'
-       ORDER BY ORDINAL_POSITION`,
-    );
-    const cols = colsRes.recordset as { COLUMN_NAME: string; DATA_TYPE: string; CHARACTER_MAXIMUM_LENGTH: number | null }[];
+    // Lê colunas da staging para atualizar metadados
+    const cols = await conn.listColumns(schema, staging);
 
-    // Drop existing target and rename staging into its place
-    await pool.request().query(
-      `IF OBJECT_ID(N'${schema}.${dt.sqlName}', N'U') IS NOT NULL DROP TABLE ${qTarget}`,
-    );
-    await pool.request().query(
-      `EXEC sp_rename N'${schema}.${staging}', N'${dt.sqlName}'`,
-    );
+    // Substitui target pela staging atomicamente
+    await conn.dropTableIfExists(schema, dt.sqlName);
+    await conn.renameTable(schema, staging, dt.sqlName);
 
     const now = new Date();
 
-    // Find or create the cw_tables record
     let tableRecord = await prisma.datasetTable.findFirst({
       where: { datasetId: dt.datasetId, sqlName: dt.sqlName },
     });
 
     if (!tableRecord) {
       tableRecord = await prisma.datasetTable.create({
-        data: {
-          datasetId: dt.datasetId,
-          name: dt.name,
-          sqlName: dt.sqlName,
-          rowCount: BigInt(rowCount),
-          lastDataAt: now,
-        },
+        data: { datasetId: dt.datasetId, name: dt.name, sqlName: dt.sqlName, rowCount: BigInt(rowCount), lastDataAt: now },
       });
-      await prisma.derivedTable.update({
-        where: { id: derivedTableId },
-        data: { targetTableId: tableRecord.id },
-      });
+      await prisma.derivedTable.update({ where: { id: derivedTableId }, data: { targetTableId: tableRecord.id } });
     } else {
       await prisma.datasetTable.update({
         where: { id: tableRecord.id },
         data: { rowCount: BigInt(rowCount), lastDataAt: now },
       });
       if (!dt.targetTableId) {
-        await prisma.derivedTable.update({
-          where: { id: derivedTableId },
-          data: { targetTableId: tableRecord.id },
-        });
+        await prisma.derivedTable.update({ where: { id: derivedTableId }, data: { targetTableId: tableRecord.id } });
       }
     }
 
-    // Refresh column metadata
     await prisma.datasetColumn.deleteMany({ where: { tableId: tableRecord.id } });
     await prisma.datasetColumn.createMany({
       data: cols.map((c, i) => ({
         tableId: tableRecord!.id,
         ordinal: i + 1,
-        originalName: c.COLUMN_NAME,
-        sqlName: c.COLUMN_NAME,
-        sqlType: c.CHARACTER_MAXIMUM_LENGTH != null && c.CHARACTER_MAXIMUM_LENGTH > 0
-          ? `${c.DATA_TYPE}(${c.CHARACTER_MAXIMUM_LENGTH})`
-          : c.DATA_TYPE,
+        originalName: c.name,
+        sqlName: c.name,
+        sqlType: c.sqlType,
         nullable: true,
       })),
     });
 
-    const nextRefreshAt = nextRefreshFromCron(dt.refreshCron);
     await prisma.derivedTable.update({
       where: { id: derivedTableId },
       data: {
@@ -153,16 +127,13 @@ export async function refreshDerivedTable(derivedTableId: string) {
         lastRowCount: BigInt(rowCount),
         lastError: null,
         lastRefreshedAt: now,
-        nextRefreshAt,
+        nextRefreshAt: nextRefreshFromCron(dt.refreshCron),
       },
     });
 
     console.log("[derived] %s → %d linhas", dt.sqlName, rowCount);
   } catch (e) {
-    // Clean up orphaned staging table
-    await pool.request()
-      .query(`IF OBJECT_ID(N'${schema}.${staging}', N'U') IS NOT NULL DROP TABLE ${qStaging}`)
-      .catch(() => {});
+    await conn.dropTableIfExists(schema, staging).catch(() => {});
     throw e;
   }
 }

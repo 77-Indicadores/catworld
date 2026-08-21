@@ -2,104 +2,70 @@
  * POST /api/v1/projects/[id]/migrate-storage
  *
  * Migra todos os datasets do projeto para um StorageServer de destino.
- * Para cada dataset: copia o schema + tabelas do SQL Server de origem para o destino,
- * depois atualiza storage_server_id. Não remove dados da origem.
+ * Suporta cross-provider (sqlserver ↔ postgres).
+ * Não remove dados da origem.
  */
 import type { NextRequest } from "next/server";
 import { z } from "zod";
-import sql from "mssql";
 import { prisma } from "@/server/db";
 import { resolveActor, requireRole } from "@/server/auth/actor";
 import { handleApiError, ok, ApiError } from "@/server/http";
-import { getStoragePool } from "@/server/storage/pool";
-import { quoteIdentifier } from "@/server/security/naming";
+import { getStorageConnection } from "@/server/storage/connection";
+import type { StorageConnection, ColDef } from "@/server/storage/connection";
 
 const bodySchema = z.object({ targetStorageServerId: z.string().uuid() });
 
 async function copySchema(
-  srcPool: sql.ConnectionPool,
-  dstPool: sql.ConnectionPool,
+  src: StorageConnection,
+  dst: StorageConnection,
   schema: string,
 ): Promise<{ table: string; rows: number }[]> {
-  const qSchema = quoteIdentifier(schema);
-  const esc = (s: string) => s.replaceAll("'", "''");
-
   // Cria schema no destino
-  await dstPool.request().query(
-    `IF SCHEMA_ID(N'${esc(schema)}') IS NULL EXEC(N'CREATE SCHEMA ${qSchema}')`,
-  );
+  await dst.createSchemaIfNotExists(schema);
 
-  // Lista tabelas na origem
-  const tablesRes = await srcPool.request()
-    .input("schema", sql.NVarChar(128), schema)
-    .query<{ name: string }>(
-      `SELECT t.name FROM sys.tables t JOIN sys.schemas s ON t.schema_id=s.schema_id WHERE s.name=@schema ORDER BY t.name`,
-    );
-
+  const tables = await src.listTables(schema);
   const results: { table: string; rows: number }[] = [];
 
-  for (const { name: table } of tablesRes.recordset) {
-    const qTable = quoteIdentifier(table);
-    const qFull = `${qSchema}.${qTable}`;
+  for (const table of tables) {
+    const cols = await src.listColumns(schema, table);
 
-    // Colunas da origem
-    const colsRes = await srcPool.request()
-      .input("schema", sql.NVarChar(128), schema)
-      .input("table", sql.NVarChar(128), table)
-      .query<{ col: string; type: string; max_len: number; prec: number; scale: number; nullable: number; is_identity: number }>(
-        `SELECT c.name col, ty.name type, c.max_length max_len, c.precision prec, c.scale scale,
-                c.is_nullable nullable, c.is_identity
-         FROM sys.columns c JOIN sys.types ty ON c.user_type_id=ty.user_type_id
-         WHERE c.object_id=OBJECT_ID(QUOTENAME(@schema)+'.'+QUOTENAME(@table)) ORDER BY c.column_id`,
-      );
+    // Colunas internas (ex: _cw_rh) mantidas como tipo texto
+    const colDefs: ColDef[] = cols.map(c => ({
+      name: c.name,
+      sqlType: c.sqlType,
+      nullable: true,
+    }));
 
-    const cols = colsRes.recordset;
-    if (!cols.length) continue;
+    // Recria tabela no destino
+    await dst.dropTableIfExists(schema, table);
+    await dst.createTable(schema, table, colDefs);
 
-    // DDL da tabela no destino
-    const colDefs = cols.map((c) => {
-      const q = quoteIdentifier(c.col);
-      const nullable = c.nullable ? "NULL" : "NOT NULL";
-      const t = c.type.toLowerCase();
-      if (["nvarchar", "varchar", "nchar", "char"].includes(t)) {
-        const len = c.max_len === -1 ? "MAX" : String(t.startsWith("n") ? c.max_len / 2 : c.max_len);
-        return `${q} ${c.type.toUpperCase()}(${len}) ${nullable}`;
-      }
-      if (["decimal", "numeric"].includes(t)) return `${q} ${c.type.toUpperCase()}(${c.prec},${c.scale}) ${nullable}`;
-      if (["datetime2", "time", "datetimeoffset"].includes(t)) return `${q} ${c.type.toUpperCase()}(${c.scale}) ${nullable}`;
-      return `${q} ${c.type.toUpperCase()} ${nullable}`;
-    });
-
-    await dstPool.request().query(
-      `IF OBJECT_ID(N'${esc(schema)}.${esc(table)}',N'U') IS NOT NULL DROP TABLE ${qFull}`,
-    );
-    await dstPool.request().query(`CREATE TABLE ${qFull} (${colDefs.join(", ")})`);
-
-    // Copia dados em batches
-    const nonIdentity = cols.filter((c) => !c.is_identity);
-    const selectCols = nonIdentity.map((c) => quoteIdentifier(c.col)).join(", ");
+    // Copia dados em batches via query raw na origem + bulkInsert no destino
+    const BATCH = 2000;
     let offset = 0;
-    const batchSize = 2000;
     let totalRows = 0;
+    const srcQ = src.q(schema);
+    const srcT = src.q(table);
+    const colList = cols.map(c => src.q(c.name)).join(", ");
+
+    // mssql usa OFFSET/FETCH, postgres usa LIMIT/OFFSET
+    const page = (off: number) => src.provider === "sqlserver"
+      ? `SELECT ${colList} FROM ${srcQ}.${srcT} ORDER BY (SELECT NULL) OFFSET ${off} ROWS FETCH NEXT ${BATCH} ROWS ONLY`
+      : `SELECT ${colList} FROM ${srcQ}.${srcT} LIMIT ${BATCH} OFFSET ${off}`;
 
     while (true) {
-      const batchRes = await srcPool.request().query<Record<string, unknown>>(
-        `SELECT ${selectCols} FROM ${qFull} ORDER BY (SELECT NULL) OFFSET ${offset} ROWS FETCH NEXT ${batchSize} ROWS ONLY`,
-      );
-      const rows = batchRes.recordset;
+      const rows = await src.query<Record<string, unknown>>(page(offset));
       if (!rows.length) break;
 
-      const bulkTable = new sql.Table(qFull);
-      bulkTable.create = false;
-      for (const c of nonIdentity) bulkTable.columns.add(c.col, sql.NVarChar(sql.MAX), { nullable: true });
-      for (const row of rows) bulkTable.rows.add(...nonIdentity.map((c) => {
-        const v = row[c.col]; return v === null || v === undefined ? null : String(v);
+      const bulkRows = rows.map(row => cols.map(c => {
+        const v = row[c.name];
+        return v == null ? null : String(v);
       }));
+      await dst.bulkInsert(schema, table, colDefs, bulkRows);
 
-      await new sql.Request(dstPool).bulk(bulkTable);
       totalRows += rows.length;
-      offset += batchSize;
-      if (rows.length < batchSize) break;
+      offset += BATCH;
+      if (rows.length < BATCH) break;
     }
 
     results.push({ table, rows: totalRows });
@@ -117,20 +83,32 @@ export async function POST(r: NextRequest, { params }: { params: Promise<{ id: s
 
     const project = await prisma.project.findUnique({
       where: { id: projectId },
-      select: { id: true, name: true, datasets: { where: { active: true }, select: { id: true, schemaName: true, storageServerId: true } } },
+      select: {
+        id: true,
+        name: true,
+        datasets: {
+          where: { active: true },
+          select: { id: true, schemaName: true, storageServerId: true },
+        },
+      },
     });
     if (!project) throw new ApiError(404, "NOT_FOUND", "Projeto não encontrado");
 
     const datasetsToMigrate = project.datasets.filter(d => d.storageServerId !== targetStorageServerId);
-    if (!datasetsToMigrate.length) throw new ApiError(400, "ALREADY_ON_TARGET", "Todos os datasets já estão neste servidor");
+    if (!datasetsToMigrate.length) {
+      throw new ApiError(400, "ALREADY_ON_TARGET", "Todos os datasets já estão neste servidor");
+    }
 
-    const dstPool = await getStoragePool(targetStorageServerId);
+    const dstConn = await getStorageConnection(targetStorageServerId);
     const datasetResults: { datasetId: string; schema: string; tables: { table: string; rows: number }[] }[] = [];
 
     for (const dataset of datasetsToMigrate) {
-      const srcPool = await getStoragePool(dataset.storageServerId);
-      const tables = await copySchema(srcPool, dstPool, dataset.schemaName);
-      await prisma.dataset.update({ where: { id: dataset.id }, data: { storageServerId: targetStorageServerId } });
+      const srcConn = await getStorageConnection(dataset.storageServerId);
+      const tables = await copySchema(srcConn, dstConn, dataset.schemaName);
+      await prisma.dataset.update({
+        where: { id: dataset.id },
+        data: { storageServerId: targetStorageServerId },
+      });
       datasetResults.push({ datasetId: dataset.id, schema: dataset.schemaName, tables });
     }
 

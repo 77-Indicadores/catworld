@@ -4,6 +4,7 @@ import sql from "mssql";
 import { prisma } from "@/server/db";
 import { sqlPool } from "@/server/azure/sql";
 import { getStoragePool } from "@/server/storage/pool";
+import { getStorageConnection } from "@/server/storage/connection";
 import { quoteIdentifier, sqlIdentifier } from "@/server/security/naming";
 import { previewFile, rowsFromFile, type FilePreview, type ParsedColumn, type RowsFromFileOpts, type ParseStats } from "./parser";
 import { bulkInsertFromBlob, sanitizeCsvField } from "./importer-bulk-blob";
@@ -176,6 +177,19 @@ async function tdsBulkCopy(
 
 // ─── Main import entry point ───────────────────────────────────────────────────
 export async function importUpload(uploadId: string, source: string | NodeJS.ReadableStream) {
+  // Roteamento por provider: PG usa importer dedicado, mssql usa o caminho abaixo
+  const upload0 = await prisma.upload.findUniqueOrThrow({
+    where: { id: uploadId },
+    include: { dataset: { select: { storageServerId: true } } },
+  });
+  const conn0 = await getStorageConnection(upload0.dataset?.storageServerId ?? null);
+  if (conn0.provider === "postgres") {
+    const { importUploadPg } = await import("./importer-pg");
+    const { PgStorageConnection } = await import("@/server/storage/pg-storage");
+    return importUploadPg(uploadId, source, conn0 as InstanceType<typeof PgStorageConnection>);
+  }
+  // ─── SQL Server path (código original abaixo) ─────────────────────────────────
+
   const importStarted = Date.now();
   const phaseTimings: Record<string, unknown> = {};
   const parseStats: ParseStats = {};

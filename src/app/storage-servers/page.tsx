@@ -9,6 +9,7 @@ export default async function StorageServersPage() {
     select: {
       id: true,
       name: true,
+      provider: true,
       url: true,
       isDefault: true,
       active: true,

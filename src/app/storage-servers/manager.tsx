@@ -6,6 +6,7 @@ import { CheckCircle2, CircleX, Clock3, Database, Pencil, Plus, RefreshCw, Star,
 type Server = {
   id: string;
   name: string;
+  provider: string;
   url: string | null;
   isDefault: boolean;
   active: boolean;
@@ -46,12 +47,14 @@ export function StorageServerManager({ initialServers }: { initialServers: Serve
   const [formName, setFormName] = useState("");
   const [formUrl, setFormUrl] = useState("");
   const [formDefault, setFormDefault] = useState(false);
+  const [formProvider, setFormProvider] = useState<"sqlserver" | "postgres">("sqlserver");
 
   function openCreate() {
     setEditing(null);
     setFormName("");
     setFormUrl("");
     setFormDefault(false);
+    setFormProvider("sqlserver");
     setError(null);
     setModalOpen(true);
   }
@@ -61,6 +64,7 @@ export function StorageServerManager({ initialServers }: { initialServers: Serve
     setFormName(s.name);
     setFormUrl(s.url ?? "");
     setFormDefault(s.isDefault);
+    setFormProvider((s.provider as "sqlserver" | "postgres") ?? "sqlserver");
     setError(null);
     setModalOpen(true);
   }
@@ -80,8 +84,7 @@ export function StorageServerManager({ initialServers }: { initialServers: Serve
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
-    const body = { name: formName.trim(), url: formUrl.trim(), isDefault: formDefault };
-
+    const body = { name: formName.trim(), url: formUrl.trim(), isDefault: formDefault, provider: formProvider };
     startTransition(async () => {
       try {
         const res = await fetch(
@@ -172,6 +175,9 @@ export function StorageServerManager({ initialServers }: { initialServers: Serve
                         <span className="font-medium">{s.name}</span>
                         {s.isDefault && <span className="badge badge-xs badge-primary">padrão</span>}
                         {!s.active && <span className="badge badge-xs badge-ghost">inativo</span>}
+                        <span className={`badge badge-xs ${s.provider === "postgres" ? "badge-info" : "badge-warning"}`}>
+                          {s.provider === "postgres" ? "PG" : "MSSQL"}
+                        </span>
                       </div>
                     </td>
                     <td className="max-w-xs truncate font-mono text-xs text-base-content/60">{maskedUrl(s.url)}</td>
@@ -235,26 +241,42 @@ export function StorageServerManager({ initialServers }: { initialServers: Serve
                   className="input input-sm input-bordered w-full"
                   value={formName}
                   onChange={(e) => setFormName(e.target.value)}
-                  placeholder="ex: Azure SQL Server – Produção"
+                  placeholder={formProvider === "postgres" ? "ex: PostgreSQL – Produção" : "ex: Azure SQL Server – Produção"}
                   required
                 />
               </div>
 
               <div className="form-control">
+                <label className="label"><span className="label-text font-medium">Provider</span></label>
+                <select
+                  className="select select-sm select-bordered w-full"
+                  value={formProvider}
+                  onChange={(e) => setFormProvider(e.target.value as "sqlserver" | "postgres")}
+                  disabled={!!editing}
+                >
+                  <option value="sqlserver">SQL Server (MSSQL)</option>
+                  <option value="postgres">PostgreSQL</option>
+                </select>
+                {editing && <label className="label"><span className="label-text-alt text-base-content/45">Provider não pode ser alterado após criação.</span></label>}
+              </div>
+
+              <div className="form-control">
                 <label className="label">
                   <span className="label-text font-medium">URL de conexão</span>
-                  <span className="label-text-alt text-base-content/50">SQL Server</span>
+                  <span className="label-text-alt text-base-content/50">{formProvider === "postgres" ? "PostgreSQL" : "SQL Server"}</span>
                 </label>
                 <textarea
                   className="textarea textarea-bordered textarea-sm w-full font-mono text-xs leading-relaxed"
                   rows={3}
                   value={formUrl}
                   onChange={(e) => setFormUrl(e.target.value)}
-                  placeholder="sqlserver://host:1433;database=...;user=...;password=...;encrypt=true"
+                  placeholder={formProvider === "postgres"
+                    ? "postgres://user:password@host:5432/database?sslmode=require"
+                    : "sqlserver://host:1433;database=...;user=...;password=...;encrypt=true"}
                   required
                 />
                 <label className="label">
-                  <span className="label-text-alt text-base-content/45">A senha é armazenada como texto no banco de metadados.</span>
+                  <span className="label-text-alt text-base-content/45">A URL é criptografada antes de ser salva.</span>
                 </label>
               </div>
 
