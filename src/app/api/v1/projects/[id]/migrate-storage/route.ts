@@ -60,7 +60,21 @@ async function copySchema(
       const bulkRows = rows.map(row => cols.map(c => {
         const v = row[c.name];
         if (v == null) return null;
-        if (v instanceof Date) return v.toISOString();
+        if (v instanceof Date) {
+          // Coluna TIME no MSSQL chega como Date com data 1970-01-01 — extrai só HH:MM:SS
+          const t = c.sqlType?.toLowerCase() ?? "";
+          if (t === "time" || t.startsWith("time(")) {
+            return v.toISOString().slice(11, 19); // "HH:MM:SS"
+          }
+          return v.toISOString();
+        }
+        // String que veio do MSSQL representando time (ex: "1970-01-01T07:00:00.000Z")
+        if (typeof v === "string" && /^1970-01-01T\d{2}:\d{2}:\d{2}/.test(v)) {
+          const t = c.sqlType?.toLowerCase() ?? "";
+          if (t === "time" || t.startsWith("time(")) {
+            return v.slice(11, 19); // "HH:MM:SS"
+          }
+        }
         return String(v);
       }));
       await dst.bulkInsert(schema, table, colDefs, bulkRows);
