@@ -222,7 +222,7 @@ class CatworldClient:
         project_id: str | None = None,
     ) -> QueryResult:
         """Busca todos os dados via NDJSON streaming (1 request, sem paginação)."""
-        payload: dict[str, Any] = {"sql": sql, "timeout": timeout, "stream": True}
+        payload: dict[str, Any] = {"sql": sql, "stream": True}  # timeout fixo em 300s no servidor (modo stream)
         if dataset_id:
             payload["datasetId"] = dataset_id
         if project_id:
