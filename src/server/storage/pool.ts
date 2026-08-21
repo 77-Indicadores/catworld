@@ -6,6 +6,7 @@
  */
 import sql from "mssql";
 import { prisma } from "@/server/db";
+import { decryptSecret } from "@/server/security/crypto";
 
 function parseMssqlUrl(url: string): sql.config {
   const withoutScheme = url.replace(/^sqlserver:\/\//i, "");
@@ -51,11 +52,18 @@ export async function getStoragePool(storageServerId: string | null | undefined)
   if (!poolCache.has(id)) {
     const server = await prisma.storageServer.findUniqueOrThrow({
       where: { id },
-      select: { id: true, url: true },
+      select: { id: true, url: true, encryptedCredentials: true },
     });
 
-    if (!server.url) throw new Error(`StorageServer ${id} has no url configured`);
-    const pool = new sql.ConnectionPool(parseMssqlUrl(server.url));
+    // encryptedCredentials tem precedência (armazena URL completa criptografada).
+    // url é fallback legado (pode ser mascarada ou plaintext de registros antigos).
+    let resolvedUrl: string | null = null;
+    if (server.encryptedCredentials) {
+      try { resolvedUrl = decryptSecret(server.encryptedCredentials); } catch { /* fallback abaixo */ }
+    }
+    if (!resolvedUrl) resolvedUrl = server.url;
+    if (!resolvedUrl) throw new Error(`StorageServer ${id} has no url configured`);
+    const pool = new sql.ConnectionPool(parseMssqlUrl(resolvedUrl));
     pool.on("error", () => { poolCache.delete(id); });
 
     const promise = pool

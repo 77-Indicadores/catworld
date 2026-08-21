@@ -8,10 +8,13 @@ export const dynamic = "force-dynamic";
 
 export default async function ProjectPage({ params }: { params: Promise<{ project: string }> }) {
   const actor = await resolveActor(), ids = await visibleProjectIds(actor);
-  const p = await prisma.project.findFirst({
-    where: { slug: (await params).project, ...(ids ? { id: { in: ids } } : {}) },
-    include: { datasets: { where: { active: true }, include: { tables: { include: { columns: { orderBy: { ordinal: "asc" } }, source: { include: { connection: true } } } }, derivedTables: { where: { active: true }, orderBy: { createdAt: "asc" }, include: { targetTable: { select: { id: true, rowCount: true, lastDataAt: true } } } } } } },
-  });
+  const [p, storageServers] = await Promise.all([
+    prisma.project.findFirst({
+      where: { slug: (await params).project, ...(ids ? { id: { in: ids } } : {}) },
+      include: { datasets: { where: { active: true }, include: { storageServer: { select: { id: true, name: true } }, tables: { include: { columns: { orderBy: { ordinal: "asc" } }, source: { include: { connection: true } } } }, derivedTables: { where: { active: true }, orderBy: { createdAt: "asc" }, include: { targetTable: { select: { id: true, rowCount: true, lastDataAt: true } } } } } } },
+    }),
+    prisma.storageServer.findMany({ where: { active: true }, select: { id: true, name: true, isDefault: true }, orderBy: { createdAt: "asc" } }),
+  ]);
   if (!p) notFound();
   const project = {
     id: p.id,
@@ -26,6 +29,8 @@ export default async function ProjectPage({ params }: { params: Promise<{ projec
       description: d.description,
       active: d.active,
       schemaName: d.schemaName,
+      storageServerId: d.storageServerId,
+      storageServer: d.storageServer ? { id: d.storageServer.id, name: d.storageServer.name } : null,
       tables: d.tables.map((t) => ({
         id: t.id,
         name: t.name,
@@ -71,5 +76,5 @@ export default async function ProjectPage({ params }: { params: Promise<{ projec
     })),
   };
   const publicOrigin = env().CATWORLD_PUBLIC_ORIGIN ?? "";
-  return <ProjectWorkspace project={project} publicOrigin={publicOrigin} />;
+  return <ProjectWorkspace project={project} publicOrigin={publicOrigin} storageServers={storageServers} />;
 }

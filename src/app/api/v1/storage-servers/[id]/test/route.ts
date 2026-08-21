@@ -3,6 +3,7 @@ import sql from "mssql";
 import { prisma } from "@/server/db";
 import { resolveActor, requireRole } from "@/server/auth/actor";
 import { handleApiError, ok, ApiError } from "@/server/http";
+import { decryptSecret } from "@/server/security/crypto";
 
 function parseMssqlUrl(url: string): sql.config {
   const withoutScheme = url.replace(/^sqlserver:\/\//i, "");
@@ -32,12 +33,18 @@ export async function POST(r: NextRequest, { params }: { params: Promise<{ id: s
     requireRole(actor, ["ADMIN"]);
     const id = (await params).id;
 
-    const record = await prisma.storageServer.findUnique({ where: { id }, select: { url: true } });
+    const record = await prisma.storageServer.findUnique({ where: { id }, select: { url: true, encryptedCredentials: true } });
     if (!record) throw new ApiError(404, "NOT_FOUND", "StorageServer não encontrado");
-    if (!record.url) throw new ApiError(400, "NO_URL", "StorageServer sem URL configurada");
+
+    let resolvedUrl: string | null = null;
+    if (record.encryptedCredentials) {
+      try { resolvedUrl = decryptSecret(record.encryptedCredentials); } catch { /* fallback */ }
+    }
+    if (!resolvedUrl) resolvedUrl = record.url;
+    if (!resolvedUrl) throw new ApiError(400, "NO_URL", "StorageServer sem URL configurada");
 
     const started = Date.now();
-    const pool = new sql.ConnectionPool(parseMssqlUrl(record.url));
+    const pool = new sql.ConnectionPool(parseMssqlUrl(resolvedUrl));
     try {
       await pool.connect();
       const result = await pool.request().query<{ db: string }>("SELECT DB_NAME() AS db");

@@ -3,6 +3,11 @@ import { z } from "zod";
 import { prisma } from "@/server/db";
 import { resolveActor, requireRole } from "@/server/auth/actor";
 import { handleApiError, ok, ApiError } from "@/server/http";
+import { encryptSecret } from "@/server/security/crypto";
+
+function maskUrl(url: string): string {
+  return url.replace(/password=[^;]+/gi, "password=••••••••");
+}
 
 const visible = {
   id: true,
@@ -53,7 +58,10 @@ export async function PATCH(r: NextRequest, { params }: { params: Promise<{ id: 
       where: { id },
       data: {
         ...(input.name !== undefined && { name: input.name }),
-        ...(input.url !== undefined && { url: input.url }),
+        ...(input.url !== undefined && {
+          url: maskUrl(input.url),
+          encryptedCredentials: encryptSecret(input.url),
+        }),
         ...(input.isDefault !== undefined && { isDefault: input.isDefault }),
         ...(input.active !== undefined && { active: input.active }),
       },

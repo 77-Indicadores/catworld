@@ -1,7 +1,7 @@
 "use client";
 import { useRef, useState } from "react";
 import { Cron } from "croner";
-import { Cable, ChevronDown, Code2, Database, DatabaseZap, Pencil, Plus, RefreshCw, Search, Table2, ToggleLeft, ToggleRight, Trash2, UploadCloud } from "lucide-react";
+import { Cable, ChevronDown, Code2, Database, DatabaseZap, Pencil, Plus, RefreshCw, Search, Server, Table2, ToggleLeft, ToggleRight, Trash2, UploadCloud } from "lucide-react";
 import { CopyableId } from "@/components/ui/copyable-id";
 import { EditCatalogDialog } from "@/components/management/edit-catalog-dialog";
 import { StatusBadge } from "@/components/ui/primitives";
@@ -22,7 +22,8 @@ type Source = {
 };
 type Table = { id: string; name: string; lastDataAt: string | null; source: Source | null };
 type DerivedTable = { id: string; name: string; sqlName: string; querySql: string; refreshCron: string | null; active: boolean; lastStatus: string | null; lastRowCount: string | null; lastError: string | null; lastRefreshedAt: string | null; nextRefreshAt: string | null; targetTable: { id: string; rowCount: string; lastDataAt: string | null } | null };
-type Dataset = { id: string; slug: string; name: string; description: string | null; active: boolean; schemaName: string; tables: Table[]; derivedTables: DerivedTable[] };
+type StorageServerOption = { id: string; name: string; isDefault: boolean };
+type Dataset = { id: string; slug: string; name: string; description: string | null; active: boolean; schemaName: string; storageServerId: string | null; storageServer: { id: string; name: string } | null; tables: Table[]; derivedTables: DerivedTable[] };
 
 // A group is either:
 //   - Multiple table sources that share a sourceGroupId (batch import)
@@ -764,9 +765,127 @@ function DerivedRow({ dt, schemaName, onSelectTable, onChanged }: {
   );
 }
 
+// ── Storage Server picker ──────────────────────────────────────────────────
+function StorageServerSection({ dataset, storageServers, onChanged }: {
+  dataset: Dataset; storageServers: StorageServerOption[]; onChanged: () => void;
+}) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const [selectedId, setSelectedId] = useState(dataset.storageServerId ?? "");
+  const [migrating, setMigrating] = useState(false);
+  const [migrateData, setMigrateData] = useState(false);
+  const [result, setResult] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  function open() {
+    setSelectedId(dataset.storageServerId ?? "");
+    setMigrateData(false);
+    setResult(null);
+    setError(null);
+    dialogRef.current?.showModal();
+  }
+  function close() { dialogRef.current?.close(); }
+
+  async function save() {
+    if (!selectedId || selectedId === dataset.storageServerId) { close(); return; }
+    setMigrating(true); setResult(null); setError(null);
+    try {
+      if (migrateData) {
+        const r = await fetch(`/api/v1/datasets/${dataset.id}/migrate-storage`, {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ targetStorageServerId: selectedId }),
+        });
+        const j = await r.json() as { data?: { tablesCopied: number }; error?: { message: string } };
+        if (!r.ok) { setError(j.error?.message ?? "Erro na migração"); setMigrating(false); return; }
+        setResult(`✓ ${j.data?.tablesCopied ?? 0} tabela(s) migrada(s)`);
+      } else {
+        const r = await fetch(`/api/v1/datasets/${dataset.id}`, {
+          method: "PATCH", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ storageServerId: selectedId }),
+        });
+        const j = await r.json() as { error?: { message: string } };
+        if (!r.ok) { setError(j.error?.message ?? "Erro ao atualizar"); setMigrating(false); return; }
+      }
+      setMigrating(false);
+      close();
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Erro de rede");
+      setMigrating(false);
+    }
+  }
+
+  const current = storageServers.find(s => s.id === dataset.storageServerId);
+
+  return (
+    <>
+      <button
+        onClick={open}
+        className="flex items-center gap-1.5 rounded px-1.5 py-0.5 text-xs text-base-content/50 hover:bg-base-200 hover:text-base-content/70"
+        title="Alterar servidor de armazenamento"
+      >
+        <Server size={11} className="shrink-0" />
+        <span>{current?.name ?? "Servidor padrão"}</span>
+        <Pencil size={10} className="opacity-0 group-hover:opacity-100" />
+      </button>
+
+      <dialog ref={dialogRef} className="modal">
+        <div className="modal-box max-w-md">
+          <h3 className="font-bold text-base">Servidor de armazenamento</h3>
+          <p className="mt-0.5 text-xs text-base-content/50">Dataset: <span className="font-mono">{dataset.schemaName}</span></p>
+
+          <div className="mt-4 space-y-3">
+            <label className="form-control w-full">
+              <span className="label-text font-medium">Servidor</span>
+              <select
+                className="select mt-1 w-full"
+                value={selectedId}
+                onChange={e => setSelectedId(e.target.value)}
+              >
+                {storageServers.map(s => (
+                  <option key={s.id} value={s.id}>{s.name}{s.isDefault ? " (padrão)" : ""}</option>
+                ))}
+              </select>
+            </label>
+
+            {selectedId !== dataset.storageServerId && (
+              <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-warning/30 bg-warning/5 p-3 select-none">
+                <input
+                  type="checkbox"
+                  className="checkbox checkbox-sm checkbox-warning mt-0.5"
+                  checked={migrateData}
+                  onChange={e => setMigrateData(e.target.checked)}
+                />
+                <span className="text-sm">
+                  <span className="font-medium">Migrar dados agora</span>
+                  <p className="mt-0.5 text-xs text-base-content/55">Copia todas as tabelas do schema para o novo servidor. Sem isso, os dados permanecem no servidor antigo e as consultas podem falhar.</p>
+                </span>
+              </label>
+            )}
+
+            {result && <div className="alert alert-success text-sm">{result}</div>}
+            {error && <div className="alert alert-error text-sm">{error}</div>}
+          </div>
+
+          <div className="modal-action">
+            <button className="btn btn-ghost btn-sm" onClick={close} disabled={migrating}>Cancelar</button>
+            <button
+              className="btn btn-primary btn-sm"
+              onClick={() => { void save(); }}
+              disabled={migrating || selectedId === dataset.storageServerId}
+            >
+              {migrating ? <><span className="loading loading-spinner loading-xs" />{migrateData ? "Migrando…" : "Salvando…"}</> : "Salvar"}
+            </button>
+          </div>
+        </div>
+        <form method="dialog" className="modal-backdrop"><button onClick={close}>fechar</button></form>
+      </dialog>
+    </>
+  );
+}
+
 // ── Main panel ─────────────────────────────────────────────────────────────
-export function DatasetPanel({ dataset, projectSlug, publicOrigin, onSelectTable, onChanged }: {
-  dataset: Dataset; projectSlug: string; publicOrigin: string;
+export function DatasetPanel({ dataset, projectSlug, publicOrigin, storageServers, onSelectTable, onChanged }: {
+  dataset: Dataset; projectSlug: string; publicOrigin: string; storageServers: StorageServerOption[];
   onSelectTable: (tableId: string) => void; onChanged: () => void;
 }) {
   const derivedTargetIds = new Set(dataset.derivedTables.map(dt => dt.targetTable?.id).filter(Boolean));
@@ -789,7 +908,12 @@ export function DatasetPanel({ dataset, projectSlug, publicOrigin, onSelectTable
           <div className="min-w-0">
             <h2 className="truncate font-semibold">{dataset.name}</h2>
             {dataset.description && <p className="mt-0.5 truncate text-xs text-base-content/45">{dataset.description}</p>}
-            <div className="mt-2"><CopyableId value={dataset.id} label="Dataset ID" /></div>
+            <div className="mt-1.5 flex flex-wrap items-center gap-1">
+              <CopyableId value={dataset.id} label="Dataset ID" />
+              {storageServers.length > 0 && (
+                <StorageServerSection dataset={dataset} storageServers={storageServers} onChanged={onChanged} />
+              )}
+            </div>
           </div>
           <div className="flex shrink-0 items-center gap-1">
             <PowerBIDialog projectSlug={projectSlug} datasetSlug={dataset.slug} datasetName={dataset.name} publicOrigin={publicOrigin} />

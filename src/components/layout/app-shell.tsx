@@ -4,10 +4,12 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
-  Activity, ArrowUpFromLine, Bell, BookOpen, ChevronRight, CircleUserRound, CloudCog, Database,
+  Activity, ArrowUpFromLine, Bell, BookOpen, CheckCircle2, ChevronRight, CircleUserRound, CircleX, CloudCog, Database,
   FileKey2, FolderKanban, Home, KeyRound, LayoutDashboard, Menu, Moon, Search,
   Server, Settings, Sun, UsersRound, X,
 } from "lucide-react";
+
+type StorageStatus = { name: string; status: string | null; latencyMs: number | null } | null;
 
 const nav = [
   { href: "/dashboard", label: "Visão geral", icon: LayoutDashboard },
@@ -30,10 +32,21 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [dark, setDark] = useState(false);
+  const [storageStatus, setStorageStatus] = useState<StorageStatus>(null);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", dark ? "catworld-dark" : "catworld");
   }, [dark]);
+
+  useEffect(() => {
+    fetch("/api/v1/storage-servers")
+      .then(r => r.json())
+      .then((j: { data?: { name: string; lastStatus: string | null; lastLatencyMs: number | null; isDefault: boolean }[] }) => {
+        const def = j.data?.find(s => s.isDefault) ?? j.data?.[0];
+        if (def) setStorageStatus({ name: def.name, status: def.lastStatus, latencyMs: def.lastLatencyMs });
+      })
+      .catch(() => undefined);
+  }, []);
 
   if (pathname === "/login") return <>{children}</>;
 
@@ -78,12 +91,21 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </ul>
         </nav>
         <div className="border-t border-base-300 p-2 xl:p-3">
-          <div className="tooltip tooltip-right xl:tooltip-right" data-tip="Azure SQL conectado · 38ms">
-            <div className="flex items-center justify-center gap-2 rounded-xl bg-base-200 p-3 xl:justify-start">
-              <CloudCog size={15} className="shrink-0 text-success" />
-              <span className="hidden xl:block"><span className="text-xs font-medium">Azure SQL conectado</span><p className="text-[11px] text-base-content/50">38 ms · Produção</p></span>
+          <Link href="/storage-servers" className="tooltip tooltip-right xl:tooltip-right block" data-tip={storageStatus ? `${storageStatus.name}${storageStatus.latencyMs ? ` · ${storageStatus.latencyMs}ms` : ""}` : "Servidores SQL"}>
+            <div className="flex items-center justify-center gap-2 rounded-xl bg-base-200 p-3 xl:justify-start hover:bg-base-300 transition-colors">
+              {storageStatus?.status === "healthy"
+                ? <CheckCircle2 size={15} className="shrink-0 text-success" />
+                : storageStatus?.status === "error"
+                ? <CircleX size={15} className="shrink-0 text-error" />
+                : <CloudCog size={15} className="shrink-0 text-base-content/40" />}
+              <span className="hidden xl:block min-w-0">
+                <span className="block truncate text-xs font-medium">{storageStatus?.name ?? "SQL Server"}</span>
+                <p className="text-[11px] text-base-content/50">
+                  {storageStatus?.status === "healthy" && storageStatus.latencyMs ? `${storageStatus.latencyMs}ms · conectado` : storageStatus?.status === "error" ? "erro de conexão" : "não testado"}
+                </p>
+              </span>
             </div>
-          </div>
+          </Link>
         </div>
     </aside>
   );

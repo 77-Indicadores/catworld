@@ -3,11 +3,17 @@ import { z } from "zod";
 import { prisma } from "@/server/db";
 import { resolveActor, requireRole } from "@/server/auth/actor";
 import { handleApiError, ok } from "@/server/http";
+import { encryptSecret } from "@/server/security/crypto";
+
+/** Mascara a senha na URL para exibição. */
+function maskUrl(url: string): string {
+  return url.replace(/password=[^;]+/gi, "password=••••••••");
+}
 
 const visible = {
   id: true,
   name: true,
-  url: true,
+  url: true,              // campo url armazena versão mascarada para display
   isDefault: true,
   active: true,
   lastStatus: true,
@@ -41,7 +47,6 @@ export async function POST(r: NextRequest) {
     requireRole(actor, ["ADMIN"]);
     const input = bodySchema.parse(await r.json());
 
-    // Se isDefault, remove o flag dos demais
     if (input.isDefault) {
       await prisma.storageServer.updateMany({ data: { isDefault: false } });
     }
@@ -50,14 +55,14 @@ export async function POST(r: NextRequest) {
       data: {
         id: crypto.randomUUID(),
         name: input.name,
-        url: input.url,
+        url: maskUrl(input.url),                       // display: mascarado
+        encryptedCredentials: encryptSecret(input.url), // storage: criptografado
         isDefault: input.isDefault ?? false,
         active: input.active ?? true,
         provider: "sqlserver",
         server: "",
         port: 1433,
         databaseName: "",
-        encryptedCredentials: "",
         sslMode: "none",
         encrypt: true,
       },
