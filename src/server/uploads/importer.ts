@@ -4,7 +4,7 @@ import sql from "mssql";
 import { prisma } from "@/server/db";
 import { sqlPool } from "@/server/azure/sql";
 import { getStoragePool } from "@/server/storage/pool";
-import { getStorageConnection } from "@/server/storage/connection";
+import { getStorageConnection, type ColDef } from "@/server/storage/connection";
 import { quoteIdentifier, sqlIdentifier } from "@/server/security/naming";
 import { previewFile, rowsFromFile, type FilePreview, type ParsedColumn, type RowsFromFileOpts, type ParseStats } from "./parser";
 import { bulkInsertFromBlob, sanitizeCsvField } from "./importer-bulk-blob";
@@ -219,6 +219,8 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
   const schema = upload.dataset.schemaName;
   const stage = `cw_stage_${upload.id.replaceAll("-", "").slice(0, 20)}`;
   const pool = await getStoragePool(upload.dataset.storageServerId);
+  // StorageConnection reutiliza o mesmo pool interno (singleton por storageServerId)
+  const storageConn = await getStorageConnection(upload.dataset.storageServerId);
   const target = `${quoteIdentifier(schema)}.${quoteIdentifier(tableName)}`;
   const staging = `${quoteIdentifier(schema)}.${quoteIdentifier(stage)}`;
 
@@ -515,123 +517,110 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
         );
       }
 
-      // ── Atomic transaction ───────────────────────────────────────────────────
-      const tx = new sql.Transaction(pool);
-      await tx.begin();
-      try {
-        const request = new sql.Request(tx);
-        // overrides.requestTimeout is the correct mssql v12 field (not .timeout which is a no-op)
-        (request as unknown as { overrides: { requestTimeout: number } }).overrides.requestTimeout = 7_200_000;
-        const targetColDefs = typedColumnDefs(mapping);
-        const colList = mapping.map(c => quoteIdentifier(c.sqlName)).join(",");
-        // Typed staging: staging already has correct types — direct column copy, no TRY_CONVERT.
-        // NVARCHAR(MAX) staging (truncation fallback): must use TRY_CONVERT to cast strings to types.
-        const typedSelect = stagingIsTyped
-          ? mapping.map(c => `s.${quoteIdentifier(c.sqlName)}`).join(",")
-          : mapping.map(c => typedSelectExpr(c, "s")).join(",");
+      // ── Atomic swap / transaction ────────────────────────────────────────────
+      // deltaReplace e upsert usam atomicSwap (lock ~ms em produção).
+      // phase2, replace e append mantêm o caminho de transação original.
+      const mappingWithRh: ColDef[] = [
+        ...mapping.map(c => ({ name: c.sqlName, sqlType: c.sqlType, nullable: true })),
+        { name: "_cw_rh", sqlType: "NVARCHAR(MAX)", nullable: true },
+      ];
 
-        if (phase2) {
-          // Phase 2: new rows already BULK inserted into target.
-          // Delete removed rows using batched IN clauses — avoids #cw_del temp table compilation issue.
-          const insertStats = await request.query(`
-            INSERT INTO ${target} (${colList},[_cw_rh])
-              SELECT ${typedSelect},s.[_cw_rh] FROM ${staging} s
-              WHERE NOT EXISTS(SELECT 1 FROM ${target} t WHERE t.[_cw_rh]=s.[_cw_rh])
-            OPTION (MAXDOP 1);
-            SELECT @@ROWCOUNT inserted;
-          `);
-          inserted = Number(insertStats.recordset[0]?.inserted ?? total);
-          if (toDelete.length > 0) {
-            const BATCH = 500;
-            for (let i = 0; i < toDelete.length; i += BATCH) {
-              const batch = toDelete.slice(i, i + BATCH);
-              // Hashes are validated as /^[0-9a-f]{32}$/ at the API layer — safe to inline
-              const placeholders = batch.map(h => `'${h}'`).join(",");
-              const delRes = await request.query(
-                `DELETE FROM ${target} WHERE [_cw_rh] IN (${placeholders}); SELECT @@ROWCOUNT deleted;`,
-              );
-              updated += Number(delRes.recordset[0]?.deleted ?? 0);
-            }
-          }
-          await request.query(`DROP TABLE ${staging}`);
-        } else if (deltaReplace) {
-          // Phase 1: full file in staging — INSERT new rows, DELETE removed rows.
-          // MAXDOP 1 on INSERT reduces log writer contention on Azure SQL (Brent Ozar finding).
-          const deltaStats = await request.query(`
-            DECLARE @ins INT, @del INT;
-            INSERT INTO ${target} (${colList},[_cw_rh])
-              SELECT ${typedSelect},s.[_cw_rh] FROM ${staging} s
-              WHERE NOT EXISTS(SELECT 1 FROM ${target} t WHERE t.[_cw_rh]=s.[_cw_rh])
-            OPTION (MAXDOP 1);
-            SET @ins=@@ROWCOUNT;
-            DELETE t FROM ${target} t
-              WHERE NOT EXISTS(SELECT 1 FROM ${staging} s WHERE s.[_cw_rh]=t.[_cw_rh]);
-            SET @del=@@ROWCOUNT;
-            DROP TABLE ${staging};
-            SELECT @ins inserted, @del deleted;
-          `);
-          inserted = Number(deltaStats.recordset[0]?.inserted ?? 0);
-          updated = Number(deltaStats.recordset[0]?.deleted ?? 0);
-        } else if (upload.mode === "replace" || !targetExists) {
-          // Full replace via staging (schema mismatch fallback when OPENROWSET not used)
-          if (targetExists) await request.query(`DROP TABLE ${target}`);
-          await request.query(`
-            CREATE TABLE ${target} (${targetColDefs},[_cw_rh] CHAR(32) NULL);
-            INSERT INTO ${target} (${colList},[_cw_rh])
-              SELECT ${typedSelect},s.[_cw_rh] FROM ${staging} s
-            OPTION (MAXDOP 1);
-            CREATE INDEX [IX__cw_rh] ON ${target} ([_cw_rh]);
-            DROP TABLE ${staging};
-          `);
-          inserted = total;
-        } else if (upload.mode === "append") {
-          await request.query(
-            `INSERT INTO ${target} (${mapping.map(c => quoteIdentifier(c.sqlName)).join(",")})
-             SELECT ${typedSelect} FROM ${staging} s
-             OPTION (MAXDOP 1);
-             DROP TABLE ${staging}`,
-          );
-          inserted = total;
-        } else {
-          // Upsert: DELETE matched rows + INSERT all from staging (1.5-1.8× faster than MERGE,
-          // less index fragmentation — see RESEARCH.md #4)
-          if (!upload.keyColumn) throw new Error("Upsert exige coluna-chave");
-          const key = quoteIdentifier(upload.keyColumn);
-          const keyColumn = mapping.find(c => c.sqlName === upload.keyColumn);
-          if (!keyColumn) throw new Error("Coluna-chave não encontrada no arquivo");
-          const keyExpr = typedSelectExpr(keyColumn, "s");
-          const duplicates = await request.query(
-            `SELECT ${key}, COUNT(*) n FROM ${staging} GROUP BY ${key} HAVING COUNT(*) > 1`,
-          );
-          if (duplicates.recordset.length) throw new Error("Arquivo contém chaves duplicadas para upsert");
-          const upsertStats = await request.query(`
-            DECLARE @del INT, @ins INT;
-            DELETE t FROM ${target} t
-              WHERE EXISTS (SELECT 1 FROM ${staging} s WHERE t.${key} = ${keyExpr});
-            SET @del = @@ROWCOUNT;
-            INSERT INTO ${target} (${mapping.map(c => quoteIdentifier(c.sqlName)).join(",")})
-              SELECT ${mapping.map(c => typedSelectExpr(c, "s")).join(",")} FROM ${staging} s
-            OPTION (MAXDOP 1);
-            SET @ins = @@ROWCOUNT;
-            DROP TABLE ${staging};
-            SELECT @del updated, @ins inserted;
-          `);
-          updated = Number(upsertStats.recordset[0]?.updated ?? 0);
-          inserted = Number(upsertStats.recordset[0]?.inserted ?? 0);
-        }
-
-        const countStr = (await request.query(`SELECT COUNT_BIG(*) count FROM ${target}`)).recordset[0].count as string;
-        actual = BigInt(countStr);
-
-        const MAX_BIGINT = 9223372036854775807n;
-        if (actual > MAX_BIGINT || actual < 0n)
-          throw new Error(`Row count ${countStr} exceeds BIGINT range. Verifique a integridade dos dados.`);
-
-        await tx.commit();
+      if (deltaReplace && !phase2) {
+        // fullSwap: staging tem o estado completo novo — DROP target + RENAME staging (lock ~ms)
+        await storageConn.atomicSwap(schema, stage, tableName, mappingWithRh, { targetExists });
+        inserted = total; updated = 0;
+        actual = await storageConn.countRows(schema, tableName);
         if (typeof deleteCleanBlob === "function") await deleteCleanBlob();
-      } catch (e) {
-        await tx.rollback().catch(() => undefined);
-        throw e;
+      } else if (upload.mode === "upsert") {
+        // mergeSwap: mantém rows de target cujo key NÃO está em staging + todos de staging (lock ~ms)
+        if (!upload.keyColumn) throw new Error("Upsert exige coluna-chave");
+        const key = quoteIdentifier(upload.keyColumn);
+        const duplicates = await pool.request().query(
+          `SELECT ${key}, COUNT(*) n FROM ${staging} GROUP BY ${key} HAVING COUNT(*) > 1`,
+        );
+        if (duplicates.recordset.length) throw new Error("Arquivo contém chaves duplicadas para upsert");
+        const mergedName = `cw_mgd_${upload.id.replaceAll("-", "").slice(0, 20)}`;
+        await storageConn.atomicSwap(schema, stage, tableName, mappingWithRh, {
+          targetExists, keyColumn: upload.keyColumn, mergedName,
+        });
+        inserted = total; updated = 0;
+        actual = await storageConn.countRows(schema, tableName);
+        if (typeof deleteCleanBlob === "function") await deleteCleanBlob();
+      } else {
+        // Transação original para: phase2, replace, append
+        const tx = new sql.Transaction(pool);
+        await tx.begin();
+        try {
+          const request = new sql.Request(tx);
+          // overrides.requestTimeout is the correct mssql v12 field (not .timeout which is a no-op)
+          (request as unknown as { overrides: { requestTimeout: number } }).overrides.requestTimeout = 7_200_000;
+          const targetColDefs = typedColumnDefs(mapping);
+          const colList = mapping.map(c => quoteIdentifier(c.sqlName)).join(",");
+          // Typed staging: staging already has correct types — direct column copy, no TRY_CONVERT.
+          // NVARCHAR(MAX) staging (truncation fallback): must use TRY_CONVERT to cast strings to types.
+          const typedSelect = stagingIsTyped
+            ? mapping.map(c => `s.${quoteIdentifier(c.sqlName)}`).join(",")
+            : mapping.map(c => typedSelectExpr(c, "s")).join(",");
+
+          if (phase2) {
+            // Phase 2: new rows already BULK inserted into target.
+            // Delete removed rows using batched IN clauses — avoids #cw_del temp table compilation issue.
+            const insertStats = await request.query(`
+              INSERT INTO ${target} (${colList},[_cw_rh])
+                SELECT ${typedSelect},s.[_cw_rh] FROM ${staging} s
+                WHERE NOT EXISTS(SELECT 1 FROM ${target} t WHERE t.[_cw_rh]=s.[_cw_rh])
+              OPTION (MAXDOP 1);
+              SELECT @@ROWCOUNT inserted;
+            `);
+            inserted = Number(insertStats.recordset[0]?.inserted ?? total);
+            if (toDelete.length > 0) {
+              const BATCH = 500;
+              for (let i = 0; i < toDelete.length; i += BATCH) {
+                const batch = toDelete.slice(i, i + BATCH);
+                // Hashes are validated as /^[0-9a-f]{32}$/ at the API layer — safe to inline
+                const placeholders = batch.map(h => `'${h}'`).join(",");
+                const delRes = await request.query(
+                  `DELETE FROM ${target} WHERE [_cw_rh] IN (${placeholders}); SELECT @@ROWCOUNT deleted;`,
+                );
+                updated += Number(delRes.recordset[0]?.deleted ?? 0);
+              }
+            }
+            await request.query(`DROP TABLE ${staging}`);
+          } else if (upload.mode === "replace" || !targetExists) {
+            // Full replace via staging (schema mismatch fallback when OPENROWSET not used)
+            if (targetExists) await request.query(`DROP TABLE ${target}`);
+            await request.query(`
+              CREATE TABLE ${target} (${targetColDefs},[_cw_rh] CHAR(32) NULL);
+              INSERT INTO ${target} (${colList},[_cw_rh])
+                SELECT ${typedSelect},s.[_cw_rh] FROM ${staging} s
+              OPTION (MAXDOP 1);
+              CREATE INDEX [IX__cw_rh] ON ${target} ([_cw_rh]);
+              DROP TABLE ${staging};
+            `);
+            inserted = total;
+          } else if (upload.mode === "append") {
+            await request.query(
+              `INSERT INTO ${target} (${mapping.map(c => quoteIdentifier(c.sqlName)).join(",")})
+               SELECT ${typedSelect} FROM ${staging} s
+               OPTION (MAXDOP 1);
+               DROP TABLE ${staging}`,
+            );
+            inserted = total;
+          }
+
+          const countStr = (await request.query(`SELECT COUNT_BIG(*) count FROM ${target}`)).recordset[0].count as string;
+          actual = BigInt(countStr);
+
+          const MAX_BIGINT = 9223372036854775807n;
+          if (actual > MAX_BIGINT || actual < 0n)
+            throw new Error(`Row count ${countStr} exceeds BIGINT range. Verifique a integridade dos dados.`);
+
+          await tx.commit();
+          if (typeof deleteCleanBlob === "function") await deleteCleanBlob();
+        } catch (e) {
+          await tx.rollback().catch(() => undefined);
+          throw e;
+        }
       }
     }
 
