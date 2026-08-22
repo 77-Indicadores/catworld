@@ -193,59 +193,64 @@ export async function importUploadPg(
   // Índice em _cw_rh para upserts/deltas futuros
   await conn.execute(`CREATE INDEX ON ${qStaging} ("_cw_rh")`);
 
-  // ── Transação atômica ────────────────────────────────────────────────────────
+  // ── Swap atômico / transação ─────────────────────────────────────────────────
+  // replace usa atomicSwap (DROP+RENAME em tx breve, MVCC protege leitores).
+  // append e upsert mantêm o caminho de transação original.
 
   let inserted = total, updated = 0;
   const colList = mapping.map(c => pgQuote(c.sqlName)).join(", ");
   const colListWithRh = colList + `, "_cw_rh"`;
-  const targetColDefs = colDefs(mapping, true);
+  const mappingWithRh = [
+    ...mapping.map(c => ({ name: c.sqlName, sqlType: c.sqlType, nullable: true })),
+    { name: "_cw_rh", sqlType: "NVARCHAR(MAX)" as const, nullable: true },
+  ];
 
-  await conn.withClient(async (client) => {
-    await client.query("BEGIN");
-    try {
-      if (upload.mode === "replace" || !targetExists) {
-        // Full replace: drop + create + INSERT from staging
-        await client.query(`DROP TABLE IF EXISTS ${qTarget}`);
-        await client.query(`CREATE TABLE ${qTarget} (${targetColDefs})`);
-        await client.query(`INSERT INTO ${qTarget} (${colListWithRh}) SELECT ${colListWithRh} FROM ${qStaging}`);
-        await client.query(`CREATE INDEX ON ${qTarget} ("_cw_rh")`);
-        await client.query(`DROP TABLE ${qStaging}`);
-        inserted = total;
+  if (upload.mode === "replace" || !targetExists) {
+    // fullSwap: staging tem estado completo → DROP target + RENAME staging (AccessExclusiveLock ~ms)
+    // Índice em _cw_rh criado na staging ANTES do swap para evitar AEL durante CREATE INDEX
+    await conn.execute(`CREATE INDEX ON ${qStaging} ("_cw_rh")`);
+    await conn.atomicSwap(schema, stage, tableName, mappingWithRh, { targetExists });
+    inserted = total;
 
-      } else if (upload.mode === "append") {
-        await client.query(`INSERT INTO ${qTarget} (${colList}) SELECT ${colList} FROM ${qStaging}`);
-        await client.query(`DROP TABLE ${qStaging}`);
-        inserted = total;
+  } else {
+    await conn.withClient(async (client) => {
+      await client.query("BEGIN");
+      try {
+        if (upload.mode === "append") {
+          await client.query(`INSERT INTO ${qTarget} (${colList}) SELECT ${colList} FROM ${qStaging}`);
+          await client.query(`DROP TABLE ${qStaging}`);
+          inserted = total;
 
-      } else if (upload.mode === "upsert") {
-        if (!upload.keyColumn) throw new Error("Upsert exige coluna-chave");
-        const key = pgQuote(upload.keyColumn);
+        } else if (upload.mode === "upsert") {
+          if (!upload.keyColumn) throw new Error("Upsert exige coluna-chave");
+          const key = pgQuote(upload.keyColumn);
 
-        // Verifica chaves duplicadas no arquivo
-        const dupRes = await client.query<{ n: string }>(
-          `SELECT COUNT(*) AS n FROM (SELECT ${key}, COUNT(*) c FROM ${qStaging} GROUP BY ${key} HAVING COUNT(*) > 1) x`,
-        );
-        if (Number(dupRes.rows[0]?.n) > 0) throw new Error("Arquivo contém chaves duplicadas para upsert");
+          // Verifica chaves duplicadas no arquivo
+          const dupRes = await client.query<{ n: string }>(
+            `SELECT COUNT(*) AS n FROM (SELECT ${key}, COUNT(*) c FROM ${qStaging} GROUP BY ${key} HAVING COUNT(*) > 1) x`,
+          );
+          if (Number(dupRes.rows[0]?.n) > 0) throw new Error("Arquivo contém chaves duplicadas para upsert");
 
-        const delRes = await client.query(
-          `DELETE FROM ${qTarget} t USING ${qStaging} s WHERE t.${key} = s.${key}`,
-        );
-        updated = delRes.rowCount ?? 0;
-        await client.query(
-          `INSERT INTO ${qTarget} (${colList}) SELECT ${colList} FROM ${qStaging}`,
-        );
-        await client.query(`DROP TABLE ${qStaging}`);
-        inserted = total;
+          const delRes = await client.query(
+            `DELETE FROM ${qTarget} t USING ${qStaging} s WHERE t.${key} = s.${key}`,
+          );
+          updated = delRes.rowCount ?? 0;
+          await client.query(
+            `INSERT INTO ${qTarget} (${colList}) SELECT ${colList} FROM ${qStaging}`,
+          );
+          await client.query(`DROP TABLE ${qStaging}`);
+          inserted = total;
+        }
+
+        await client.query("COMMIT");
+      } catch (e) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        // Cleanup staging em caso de erro
+        await conn.execute(`DROP TABLE IF EXISTS ${qStaging}`).catch(() => undefined);
+        throw e;
       }
-
-      await client.query("COMMIT");
-    } catch (e) {
-      await client.query("ROLLBACK").catch(() => undefined);
-      // Cleanup staging em caso de erro
-      await conn.execute(`DROP TABLE IF EXISTS ${qStaging}`).catch(() => undefined);
-      throw e;
-    }
-  });
+    });
+  }
 
   const actual = await conn.countRows(schema, tableName);
 
