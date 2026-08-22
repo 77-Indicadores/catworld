@@ -212,14 +212,33 @@ export class MssqlStorageConnection implements StorageConnection {
     const p = await this.rawPool();
     const bulk = new sql.Table(`${schema}.${table}`);
     bulk.create = false;
-    for (const c of cols) bulk.columns.add(c.name, sql.NVarChar(sql.MAX), { nullable: true });
+
+    for (const c of cols) {
+      const t = c.sqlType;
+      let sqlType: sql.ISqlType | (() => sql.ISqlType);
+      if (t === "BIGINT") sqlType = sql.BigInt;
+      else if (t.startsWith("DECIMAL")) sqlType = sql.Decimal(18, 4);
+      else if (t === "DATE") sqlType = sql.Date;
+      else if (t === "DATETIME2") sqlType = sql.DateTime2(7);
+      else if (t === "TIME") sqlType = sql.Time(7);
+      else sqlType = sql.NVarChar(sql.MAX);
+      bulk.columns.add(c.name, sqlType, { nullable: true });
+    }
+
     for (const row of rows) {
-      bulk.rows.add(...cols.map((_, j) => {
+      bulk.rows.add(...cols.map((c, j) => {
         const v = row[j];
-        return v == null ? null : String(v);
+        if (v == null) return null;
+        const s = String(v);
+        if (c.sqlType === "BIGINT") return s ? parseInt(s, 10) : null;
+        if (c.sqlType.startsWith("DECIMAL")) return s ? parseFloat(s) : null;
+        return s;
       }) as Parameters<typeof bulk.rows.add>);
     }
-    await new sql.Request(p).bulk(bulk);
+
+    const req = new sql.Request(p);
+    // tableLock: row-level locks → single table lock para bulk (staging apenas)
+    await req.bulk(bulk, { tableLock: true });
   }
 
   // ── Transactions ─────────────────────────────────────────────────────────────
