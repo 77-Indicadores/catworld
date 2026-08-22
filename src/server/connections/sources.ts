@@ -1,11 +1,9 @@
 import { randomUUID } from "crypto";
-import sql from "mssql";
 import { Cron } from "croner";
 import { prisma } from "@/server/db";
 import { sqlPool, ensureSchema } from "@/server/azure/sql";
-import { getStoragePool } from "@/server/storage/pool";
 import { getStorageConnection } from "@/server/storage/connection";
-import { quoteIdentifier, sqlIdentifier } from "@/server/security/naming";
+import { sqlIdentifier } from "@/server/security/naming";
 import { ApiError } from "@/server/http";
 import { queryColumns, quotedPgTable, streamPostgresRows, tableColumns, type SourceColumn } from "./postgres";
 import { queryColumnsMssql, quotedMssqlTable, streamMssqlRows, tableColumnsMssql } from "./mssql";
@@ -208,58 +206,12 @@ export async function refreshDatasetSource(datasetSourceId: string) {
 
     // Swap atômico (upsert ou replace)
     const hasTarget = await storageConn.tableExists(schema, table);
-    if (storageConn.provider === "sqlserver") {
-      // mssql: usa pool raw para transação e sp_rename
-      const pool = await (storageConn as import("@/server/storage/mssql-storage").MssqlStorageConnection).rawPool();
-      const qTarget = `${quoteIdentifier(schema)}.${quoteIdentifier(table)}`;
-      const qStaging = `${quoteIdentifier(schema)}.${quoteIdentifier(stage)}`;
-      const tx = new sql.Transaction(pool);
-      await tx.begin();
-      try {
-        const req = new sql.Request(tx);
-        if (source.keyColumn && hasTarget) {
-          const key = quoteIdentifier(source.keyColumn);
-          const colList = columns.map((c) => quoteIdentifier(c.sqlName)).join(",");
-          await req.query(`
-            DELETE t FROM ${qTarget} t WHERE EXISTS (SELECT 1 FROM ${qStaging} s WHERE t.${key} = s.${key});
-            INSERT INTO ${qTarget} (${colList}) SELECT ${colList} FROM ${qStaging};
-            DROP TABLE ${qStaging};
-          `);
-        } else {
-          if (hasTarget) await req.query(`DROP TABLE ${qTarget}`);
-          await req.query(`EXEC sp_rename '${(schema as string).replaceAll("'", "''")}.${ (stage as string).replaceAll("'", "''")}', '${(table as string).replaceAll("'", "''")}'`);
-        }
-        await tx.commit();
-      } catch (e) {
-        await tx.rollback().catch(() => undefined);
-        throw e;
-      }
-    } else {
-      // postgres: usa transação via withClient
-      const pgConn = storageConn as import("@/server/storage/pg-storage").PgStorageConnection;
-      const { pgQuote } = await import("@/server/storage/pg-storage");
-      const qTarget = `${pgQuote(schema)}.${pgQuote(table)}`;
-      const qStaging = `${pgQuote(schema)}.${pgQuote(stage)}`;
-      await pgConn.withClient(async (client: import("pg").PoolClient) => {
-        await client.query("BEGIN");
-        try {
-          if (source.keyColumn && hasTarget) {
-            const key = pgQuote(source.keyColumn);
-            const colList = columns.map(c => pgQuote(c.sqlName)).join(", ");
-            await client.query(`DELETE FROM ${qTarget} t USING ${qStaging} s WHERE t.${key} = s.${key}`);
-            await client.query(`INSERT INTO ${qTarget} (${colList}) SELECT ${colList} FROM ${qStaging}`);
-            await client.query(`DROP TABLE ${qStaging}`);
-          } else {
-            await client.query(`DROP TABLE IF EXISTS ${qTarget}`);
-            await client.query(`ALTER TABLE ${qStaging} RENAME TO ${pgQuote(table)}`);
-          }
-          await client.query("COMMIT");
-        } catch (e) {
-          await client.query("ROLLBACK").catch(() => undefined);
-          throw e;
-        }
-      });
-    }
+    const useKeyMerge = useDelta && !!source.keyColumn && hasTarget;
+    await storageConn.atomicSwap(schema, stage, table, stageCols, {
+      targetExists: hasTarget,
+      keyColumn: useKeyMerge ? source.keyColumn : null,
+      mergedName: useKeyMerge ? `cw_mgd_${source.id.replaceAll("-", "").slice(0, 20)}` : undefined,
+    });
 
     const finalRowCount = await storageConn.countRows(schema, table);
 
