@@ -116,11 +116,22 @@ export async function importUploadPg(
   });
   if (!upload.dataset) throw new Error("Dataset não definido");
 
-  const mapping = (upload.mappingJson
+  let mapping = (upload.mappingJson
     ? JSON.parse(upload.mappingJson) as ParsedColumn[]
     : (await previewFile(source as string)).columns);
 
-  if (!mapping.length) throw new Error("Nenhuma coluna mapeada — verifique o mapeamento");
+  // mappingJson pode ser [] quando o preview não detectou colunas (arquivo vazio/sem cabeçalho).
+  // Nesse caso, tenta re-detectar a partir do arquivo; se ainda estiver vazio, conclui com 0 linhas.
+  if (!mapping.length && upload.mappingJson) {
+    mapping = (await previewFile(source as string)).columns;
+  }
+  if (!mapping.length) {
+    await prisma.upload.update({
+      where: { id: upload.id },
+      data: { status: "COMPLETED", progress: 100, rowCount: 0n, insertedCount: 0, updatedCount: 0, errorMessage: null },
+    });
+    return { tableId: upload.tableId ?? null, inserted: 0, updated: 0, rowCount: 0n };
+  }
 
   const ext = extname(upload.originalFilename).toLowerCase();
   const tableName = upload.table?.sqlName ?? sqlIdentifier(upload.originalFilename.replace(/\.[^.]+$/, ""));

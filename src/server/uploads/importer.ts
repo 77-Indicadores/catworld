@@ -197,12 +197,23 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
   const upload = await prisma.upload.findUniqueOrThrow({ where: { id: uploadId }, include: { dataset: true, table: true } });
   if (!upload.dataset) throw new Error("Dataset não definido");
 
-  const mapping = (upload.mappingJson
+  let mapping = (upload.mappingJson
     ? JSON.parse(upload.mappingJson)
     : (await previewFile(source as string)).columns) as ParsedColumn[];
   const knownRowCount = Number(upload.rowCount ?? 0);
 
-  if (!mapping.length) throw new Error("Nenhuma coluna mapeada — verifique o mapeamento do arquivo");
+  // mappingJson pode ser [] quando o preview não detectou colunas (arquivo vazio/sem cabeçalho).
+  // Nesse caso, tenta re-detectar a partir do arquivo; se ainda estiver vazio, conclui com 0 linhas.
+  if (!mapping.length && upload.mappingJson) {
+    mapping = (await previewFile(source as string)).columns;
+  }
+  if (!mapping.length) {
+    await prisma.upload.update({
+      where: { id: upload.id },
+      data: { status: "COMPLETED", progress: 100, rowCount: 0n, insertedCount: 0, updatedCount: 0, errorMessage: null },
+    });
+    return { tableId: upload.tableId ?? null, inserted: 0, updated: 0, rowCount: 0n };
+  }
 
   const tableName = upload.table?.sqlName ?? sqlIdentifier(upload.originalFilename.replace(/\.[^.]+$/, ""));
   const schema = upload.dataset.schemaName;
