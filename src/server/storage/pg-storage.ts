@@ -251,6 +251,92 @@ export class PgStorageConnection implements StorageConnection {
     }
   }
 
+  // ── Atomic swap ───────────────────────────────────────────────────────────────
+
+  async atomicSwap(
+    schema: string,
+    staging: string,
+    target: string,
+    cols: ColDef[],
+    opts?: { targetExists?: boolean; keyColumn?: string | null; mergedName?: string },
+  ): Promise<void> {
+    const qSc = pgQuote(schema);
+    const qStg = `${qSc}.${pgQuote(staging)}`;
+    const qTgt = `${qSc}.${pgQuote(target)}`;
+    const targetExists = opts?.targetExists ?? true;
+    const keyColumn = opts?.keyColumn ?? null;
+
+    if (!keyColumn) {
+      // ── fullSwap: DROP target + RENAME staging → target (transação breve) ──────
+      // MVCC: readers que começaram antes do BEGIN continuam vendo a versão antiga.
+      const client = await this._pool.connect();
+      try {
+        await client.query("BEGIN");
+        try {
+          if (targetExists) await client.query(`DROP TABLE ${qTgt}`);
+          await client.query(`ALTER TABLE ${qStg} RENAME TO ${pgQuote(target)}`);
+          await client.query("COMMIT");
+        } catch (e) {
+          await client.query("ROLLBACK").catch(() => undefined);
+          await this._pool.query(`DROP TABLE IF EXISTS ${qStg}`).catch(() => {});
+          throw e;
+        }
+      } finally {
+        client.release();
+      }
+      return;
+    }
+
+    // ── mergeSwap: materializa resultado fora de tx (MVCC protege target), depois DDL breve ──
+    const mergedName = opts?.mergedName ?? `cw_mgd_${staging.slice(0, 16)}`;
+    const qMgd = `${qSc}.${pgQuote(mergedName)}`;
+    const key = pgQuote(keyColumn);
+    const colDefs = cols
+      .map(c => `${pgQuote(c.name)} ${canonicalToPg(c.sqlType)}${c.nullable ? "" : " NOT NULL"}`)
+      .join(", ");
+    const colList = cols.map(c => pgQuote(c.name)).join(", ");
+
+    await this._pool.query(`DROP TABLE IF EXISTS ${qMgd}`);
+
+    try {
+      await this._pool.query(`CREATE TABLE ${qMgd} (${colDefs})`);
+
+      if (targetExists) {
+        // MVCC: readers veem target antiga enquanto este INSERT roda fora de tx
+        await this._pool.query(
+          `INSERT INTO ${qMgd} (${colList})
+           SELECT ${colList} FROM ${qTgt} t
+           WHERE NOT EXISTS (SELECT 1 FROM ${qStg} s WHERE s.${key} = t.${key})`,
+        );
+      }
+
+      // Copia todos os rows de staging (novos / atualizados)
+      await this._pool.query(
+        `INSERT INTO ${qMgd} (${colList}) SELECT ${colList} FROM ${qStg}`,
+      );
+
+      // Transação breve: DROP target + RENAME merged → target (AccessExclusiveLock ~ms)
+      const client = await this._pool.connect();
+      try {
+        await client.query("BEGIN");
+        try {
+          if (targetExists) await client.query(`DROP TABLE ${qTgt}`);
+          await client.query(`ALTER TABLE ${qMgd} RENAME TO ${pgQuote(target)}`);
+          await client.query("COMMIT");
+        } catch (e) {
+          await client.query("ROLLBACK").catch(() => undefined);
+          throw e;
+        }
+      } finally {
+        client.release();
+      }
+    } finally {
+      // best-effort cleanup
+      await this._pool.query(`DROP TABLE IF EXISTS ${qStg}`).catch(() => {});
+      await this._pool.query(`DROP TABLE IF EXISTS ${qMgd}`).catch(() => {});
+    }
+  }
+
   /**
    * Bulk insert com cliente dedicado (dentro de transação).
    * rows[i][j] corresponde a cols[j].

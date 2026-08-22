@@ -57,6 +57,36 @@ export interface StorageConnection {
    * A transação faz commit ao retornar com sucesso, rollback em caso de erro.
    */
   withTransaction<T>(fn: () => Promise<T>): Promise<T>;
+
+  /**
+   * Troca atômica staging → target com janela de lock mínima em produção.
+   *
+   * fullSwap (sem keyColumn):
+   *   DROP target (se existir) + RENAME staging → target dentro de transação breve.
+   *   Lock em produção: ~ms.
+   *
+   * mergeSwap (com keyColumn):
+   *   1. Materializa fora de transação: (rows de target cujo key NÃO está em staging) + (todos de staging)
+   *      em uma tabela temporária — leituras na target não são bloqueadas.
+   *   2. DROP target + RENAME temporária → target (transação breve, lock ~ms).
+   *
+   * A staging é sempre removida ao final (por rename ou DROP explícito).
+   * Em caso de falha, staging e mergedName são removidas via best-effort.
+   */
+  atomicSwap(
+    schema: string,
+    staging: string,
+    target: string,
+    cols: ColDef[],
+    opts?: {
+      /** true se target já existe (default true) */
+      targetExists?: boolean;
+      /** Coluna-chave para mergeSwap. Sem keyColumn → fullSwap. */
+      keyColumn?: string | null;
+      /** Nome da tabela intermediária para mergeSwap. Obrigatório se keyColumn fornecido. */
+      mergedName?: string;
+    },
+  ): Promise<void>;
 }
 
 // ─── Cache de conexões ────────────────────────────────────────────────────────

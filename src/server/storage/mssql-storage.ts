@@ -237,4 +237,106 @@ export class MssqlStorageConnection implements StorageConnection {
       throw e;
     }
   }
+
+  // ── Atomic swap ───────────────────────────────────────────────────────────────
+
+  async atomicSwap(
+    schema: string,
+    staging: string,
+    target: string,
+    cols: ColDef[],
+    opts?: { targetExists?: boolean; keyColumn?: string | null; mergedName?: string },
+  ): Promise<void> {
+    const p = await this.rawPool();
+    const qSc = mssqlQuote(schema);
+    const qStg = `${qSc}.${mssqlQuote(staging)}`;
+    const qTgt = `${qSc}.${mssqlQuote(target)}`;
+    const targetExists = opts?.targetExists ?? true;
+    const keyColumn = opts?.keyColumn ?? null;
+
+    const setReqTimeout = (req: sql.Request, ms: number) => {
+      (req as unknown as { overrides: { requestTimeout: number } }).overrides.requestTimeout = ms;
+    };
+
+    if (!keyColumn) {
+      // ── fullSwap: DROP target + RENAME staging → target (transação breve) ──────
+      const tx = new sql.Transaction(p);
+      await tx.begin();
+      try {
+        const req = new sql.Request(tx);
+        setReqTimeout(req, 30_000);
+        if (targetExists) await req.query(`DROP TABLE ${qTgt}`);
+        await req.query(`EXEC sp_rename N'${esc(schema)}.${esc(staging)}', N'${esc(target)}'`);
+        await tx.commit();
+      } catch (e) {
+        await tx.rollback().catch(() => undefined);
+        // best-effort: drop staging se rename não ocorreu
+        await p.request().query(
+          `IF OBJECT_ID(N'${esc(schema)}.${esc(staging)}','U') IS NOT NULL DROP TABLE ${qStg}`,
+        ).catch(() => {});
+        throw e;
+      }
+      return;
+    }
+
+    // ── mergeSwap: materializa resultado final em temp, depois DDL breve ─────────
+    // Leituras na target não bloqueiam enquanto os INSERTs no merged correm fora de tx.
+    const mergedName = opts?.mergedName ?? `cw_mgd_${staging.slice(0, 16)}`;
+    const qMgd = `${qSc}.${mssqlQuote(mergedName)}`;
+    const key = mssqlQuote(keyColumn);
+    const colDefs = cols
+      .map(c => `${mssqlQuote(c.name)} ${canonicalToMssql(c.sqlType)}${c.nullable ? " NULL" : " NOT NULL"}`)
+      .join(", ");
+    const colList = cols.map(c => mssqlQuote(c.name)).join(", ");
+
+    // Remove eventual sobra de tentativa anterior
+    await p.request().query(
+      `IF OBJECT_ID(N'${esc(schema)}.${esc(mergedName)}','U') IS NOT NULL DROP TABLE ${qMgd}`,
+    );
+
+    try {
+      await p.request().query(`CREATE TABLE ${qMgd} (${colDefs})`);
+
+      if (targetExists) {
+        // Copia rows de target cujo key NÃO aparece em staging (fora de tx)
+        const copyReq = p.request();
+        setReqTimeout(copyReq, 7_200_000);
+        await copyReq.query(
+          `INSERT INTO ${qMgd} (${colList})
+           SELECT ${colList} FROM ${qTgt} t
+           WHERE NOT EXISTS (SELECT 1 FROM ${qStg} s WHERE s.${key} = t.${key})
+           OPTION (MAXDOP 1)`,
+        );
+      }
+
+      // Copia todos os rows de staging (novos / atualizados)
+      const insReq = p.request();
+      setReqTimeout(insReq, 7_200_000);
+      await insReq.query(
+        `INSERT INTO ${qMgd} (${colList}) SELECT ${colList} FROM ${qStg} OPTION (MAXDOP 1)`,
+      );
+
+      // Transação breve: DROP target + RENAME merged → target (~ms de lock)
+      const tx = new sql.Transaction(p);
+      await tx.begin();
+      try {
+        const req = new sql.Request(tx);
+        setReqTimeout(req, 30_000);
+        if (targetExists) await req.query(`DROP TABLE ${qTgt}`);
+        await req.query(`EXEC sp_rename N'${esc(schema)}.${esc(mergedName)}', N'${esc(target)}'`);
+        await tx.commit();
+      } catch (e) {
+        await tx.rollback().catch(() => undefined);
+        throw e;
+      }
+    } finally {
+      // best-effort: remove staging (ainda existe se não foi renomeada) e merged (idem)
+      await p.request().query(
+        `IF OBJECT_ID(N'${esc(schema)}.${esc(staging)}','U') IS NOT NULL DROP TABLE ${qStg}`,
+      ).catch(() => {});
+      await p.request().query(
+        `IF OBJECT_ID(N'${esc(schema)}.${esc(mergedName)}','U') IS NOT NULL DROP TABLE ${qMgd}`,
+      ).catch(() => {});
+    }
+  }
 }
