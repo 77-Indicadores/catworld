@@ -15,6 +15,9 @@ const schema = z.object({
   // 0 = máxima velocidade; 200-500 = modo gentil (recomendado para S0/S1)
   CATWORLD_IMPORT_BATCH_DELAY_MS: z.coerce.number().int().min(0).default(200),
   CATWORLD_MAX_HEAVY_JOBS: z.coerce.number().int().min(1).max(20).default(2),
+  // Máximo de SOURCE_REFRESH simultâneos por storageServerId.
+  // Evita saturar o pool de conexões de um único storage com muitos syncs paralelos.
+  CATWORLD_MAX_SYNCS_PER_STORAGE: z.coerce.number().int().min(1).max(20).default(3),
   // Filtra quais tipos de job este worker processa. Ex: "SOURCE_REFRESH" ou "PREVIEW_UPLOAD,IMPORT_UPLOAD".
   // Vazio/ausente = processa todos os tipos.
   CATWORLD_WORKER_JOB_TYPES: z.string().optional(),

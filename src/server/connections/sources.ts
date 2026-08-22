@@ -48,6 +48,32 @@ export async function queueSourceRefresh(datasetSourceId: string) {
 }
 
 export async function enqueueDueSourceRefreshes() {
+  const { env } = await import("@/server/env");
+  const maxSyncsPerStorage = env().CATWORLD_MAX_SYNCS_PER_STORAGE;
+
+  // Conta SOURCE_REFRESH RUNNING por storageServerId (via dataset)
+  const runningJobs = await prisma.job.findMany({
+    where: { type: "SOURCE_REFRESH", status: "RUNNING" },
+    select: { payloadJson: true },
+  });
+
+  // Mapeia sourceId → storageServerId para os jobs em execução
+  const runningSources = runningJobs.map(j => {
+    try { return (JSON.parse(j.payloadJson ?? "") as { datasetSourceId?: string }).datasetSourceId ?? null; } catch { return null; }
+  }).filter((id): id is string => id != null);
+
+  const runningSyncsPerStorage = new Map<string, number>();
+  if (runningSources.length) {
+    const sourceDatasets = await prisma.datasetSource.findMany({
+      where: { id: { in: runningSources } },
+      select: { dataset: { select: { storageServerId: true } } },
+    });
+    for (const s of sourceDatasets) {
+      const sid = s.dataset.storageServerId ?? "__default__";
+      runningSyncsPerStorage.set(sid, (runningSyncsPerStorage.get(sid) ?? 0) + 1);
+    }
+  }
+
   const due = await prisma.datasetSource.findMany({
     where: {
       active: true,
@@ -55,10 +81,18 @@ export async function enqueueDueSourceRefreshes() {
       refreshCron: { not: null },
       nextRefreshAt: { lte: new Date() },
     },
-    select: { id: true },
-    take: 20,
+    select: { id: true, dataset: { select: { storageServerId: true } } },
+    orderBy: { nextRefreshAt: "asc" },
+    take: 50,
   });
-  for (const source of due) await queueSourceRefresh(source.id);
+
+  for (const source of due) {
+    const sid = source.dataset.storageServerId ?? "__default__";
+    const running = runningSyncsPerStorage.get(sid) ?? 0;
+    if (running >= maxSyncsPerStorage) continue;
+    runningSyncsPerStorage.set(sid, running + 1);
+    await queueSourceRefresh(source.id);
+  }
 }
 
 export async function createDatasetSource(input: {
