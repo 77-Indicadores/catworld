@@ -108,29 +108,52 @@ async function runMetadataCleanup() {
     deletedFiles++;
   }
 
-  // Orphan sweep: find files on disk that have no matching cw_uploads row at all.
-  // This catches uploads whose process died before the DB record was created/updated,
-  // or files left from bugs. We only touch files older than uploadsDays to avoid
-  // racing with active uploads.
+  // Orphan sweep: find files on disk that have no matching cw_uploads row.
+  // blobName is stored as a relative path (e.g. "uploads/2026-08-23/uuid.csv"),
+  // so we walk the directory recursively and compare relative paths against the DB.
+  // Only touch files older than uploadsDays to avoid racing with active uploads.
   let orphanFiles = 0;
   try {
     const uploadDir = env().CATWORLD_UPLOAD_DIR;
-    const { readdirSync, statSync } = await import("node:fs");
-    const { resolve } = await import("node:path");
+    const { readdir, stat, unlink } = await import("node:fs/promises");
+    const { resolve, relative } = await import("node:path");
     const cutoff = Date.now() - uploadsDays * 24 * 60 * 60 * 1000;
-    const files = readdirSync(uploadDir, { withFileTypes: true })
-      .filter(f => f.isFile() && statSync(resolve(uploadDir, f.name)).mtimeMs < cutoff)
-      .map(f => f.name);
-    if (files.length > 0) {
-      // Fetch known blobNames from DB (all statuses, including UPLOADING/PENDING — don't touch those)
-      const known = await prisma.$queryRawUnsafe<{ blob_name: string }[]>(
-        `SELECT blob_name FROM cw_uploads WHERE blob_name = ANY($1::text[])`,
-        files,
-      );
-      const knownSet = new Set(known.map(r => r.blob_name));
-      for (const file of files) {
-        if (!knownSet.has(file)) {
-          try { (await import("node:fs")).unlinkSync(resolve(uploadDir, file)); orphanFiles++; } catch { /* best-effort */ }
+
+    // Recursive walk — returns paths relative to uploadDir
+    async function walkDir(dir: string): Promise<string[]> {
+      const entries = await readdir(dir, { withFileTypes: true });
+      const results: string[] = [];
+      for (const entry of entries) {
+        const abs = resolve(dir, entry.name);
+        if (entry.isDirectory()) {
+          results.push(...await walkDir(abs));
+        } else if (entry.isFile()) {
+          const s = await stat(abs).catch(() => null);
+          if (s && s.mtimeMs < cutoff) results.push(relative(uploadDir, abs));
+        }
+      }
+      return results;
+    }
+
+    const candidates = await walkDir(uploadDir);
+    if (candidates.length > 0) {
+      // Build an IN list to avoid ANY($1::text[]) array serialization issues.
+      // Chunk to avoid hitting pg parameter limits on very large directories.
+      const CHUNK = 500;
+      const knownSet = new Set<string>();
+      for (let i = 0; i < candidates.length; i += CHUNK) {
+        const chunk = candidates.slice(i, i + CHUNK);
+        const placeholders = chunk.map((_, j) => `$${j + 1}`).join(",");
+        const rows = await prisma.$queryRawUnsafe<{ blob_name: string }[]>(
+          `SELECT blob_name FROM cw_uploads WHERE blob_name IN (${placeholders})`,
+          ...chunk,
+        );
+        for (const r of rows) knownSet.add(r.blob_name);
+      }
+      for (const rel of candidates) {
+        if (!knownSet.has(rel)) {
+          await unlink(resolve(uploadDir, rel)).catch(() => {});
+          orphanFiles++;
         }
       }
     }
