@@ -29,6 +29,12 @@ function convertForPg(v: unknown, sqlType: string): string | null {
 
   if (sqlType === "BIGINT") {
     if (!/^-?\d+$/.test(s)) return null;
+    // PostgreSQL BIGINT é signed 64-bit: -(2^63) a 2^63-1 (19 dígitos max).
+    // Valores fora desse range retornam null para não explodir o cast ::BIGINT.
+    try {
+      const b = BigInt(s);
+      if (b < -9223372036854775808n || b > 9223372036854775807n) return null;
+    } catch { return null; }
     return s;
   }
   if (sqlType.startsWith("DECIMAL")) {
