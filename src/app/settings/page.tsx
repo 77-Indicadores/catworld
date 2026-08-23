@@ -8,6 +8,7 @@ import {
   Server,
   Trash2,
   UsersRound,
+  Gauge,
 } from "lucide-react";
 import { PageHeader } from "@/components/ui/primitives";
 
@@ -72,6 +73,12 @@ const groups: SettingGroup[] = [
         icon: Trash2,
         label: "Retenção de dados",
         description: "Defina por quanto tempo logs, uploads e versões de datasets são mantidos.",
+      },
+      {
+        href: "/settings/worker",
+        icon: Gauge,
+        label: "Performance do Worker",
+        description: "Controle paralelismo e intensidade dos imports e syncs de fonte.",
       },
       {
         href: "/audit",

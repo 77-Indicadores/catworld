@@ -133,7 +133,8 @@ async function tdsBulkCopy(
   typed = true,
   stats?: ParseStats,
 ): Promise<number> {
-  const batchDelay = env().CATWORLD_IMPORT_BATCH_DELAY_MS;
+  const { getWorkerConfig } = await import("@/server/worker/config");
+  const { importBatchDelayMs: batchDelay } = await getWorkerConfig();
   const stringify = (v: unknown) => (v == null || String(v).trim() === "" ? null : String(v));
 
   let batch: Record<string, unknown>[] = [];

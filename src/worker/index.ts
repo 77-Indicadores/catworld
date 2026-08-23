@@ -411,11 +411,12 @@ async function loop(concurrencyId: number) {
   const allowedTypes = rawTypes ? rawTypes.split(",").map(t => t.trim()).filter(Boolean) : null;
   if (allowedTypes) console.log(`[worker] ${workerLabel} restrito a tipos: ${allowedTypes.join(", ")}`);
   else console.log(`[worker] ${workerLabel} iniciado`);
-  const maxHeavy = env().CATWORLD_MAX_HEAVY_JOBS;
   while (!stopping) {
     let job: Claimed | null;
     try {
-      job = await claim(workerLabel, maxHeavy, allowedTypes);
+      const { getWorkerConfig } = await import("@/server/worker/config");
+      const { maxHeavyJobs } = await getWorkerConfig();
+      job = await claim(workerLabel, maxHeavyJobs, allowedTypes);
     } catch (e) {
       console.warn("[worker] claim falhou (transiente): %s", e instanceof Error ? e.message : e);
       await new Promise(r => setTimeout(r, env().CATWORLD_JOB_POLL_MS));

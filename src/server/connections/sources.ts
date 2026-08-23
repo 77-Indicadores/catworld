@@ -48,8 +48,8 @@ export async function queueSourceRefresh(datasetSourceId: string) {
 }
 
 export async function enqueueDueSourceRefreshes() {
-  const { env } = await import("@/server/env");
-  const maxSyncsPerStorage = env().CATWORLD_MAX_SYNCS_PER_STORAGE;
+  const { getWorkerConfig } = await import("@/server/worker/config");
+  const { maxSyncsPerStorage } = await getWorkerConfig();
 
   // Conta SOURCE_REFRESH RUNNING por storageServerId (via dataset)
   const runningJobs = await prisma.job.findMany({
