@@ -91,10 +91,50 @@ async function runMetadataCleanup() {
     String(auditDays),
   );
 
+  // Fetch blobNames before deleting so we can clean up the files on disk.
+  const expiredUploads = await prisma.$queryRawUnsafe<{ blob_name: string }[]>(
+    `SELECT blob_name FROM cw_uploads WHERE status IN ('COMPLETED','FAILED','CANCELLED') AND created_at < NOW() - ($1 || ' days')::INTERVAL`,
+    String(uploadsDays),
+  );
   const deletedUploads = await prisma.$executeRawUnsafe(
     `DELETE FROM cw_uploads WHERE status IN ('COMPLETED','FAILED','CANCELLED') AND created_at < NOW() - ($1 || ' days')::INTERVAL`,
     String(uploadsDays),
   );
+  // Best-effort: delete files after the DB rows are gone so a partial failure on disk
+  // doesn't block the next cleanup run from retrying.
+  let deletedFiles = 0;
+  for (const { blob_name } of expiredUploads) {
+    await deleteFile(blob_name).catch(() => {});
+    deletedFiles++;
+  }
+
+  // Orphan sweep: find files on disk that have no matching cw_uploads row at all.
+  // This catches uploads whose process died before the DB record was created/updated,
+  // or files left from bugs. We only touch files older than uploadsDays to avoid
+  // racing with active uploads.
+  let orphanFiles = 0;
+  try {
+    const uploadDir = env().CATWORLD_UPLOAD_DIR;
+    const { readdirSync, statSync } = await import("node:fs");
+    const { resolve } = await import("node:path");
+    const cutoff = Date.now() - uploadsDays * 24 * 60 * 60 * 1000;
+    const files = readdirSync(uploadDir, { withFileTypes: true })
+      .filter(f => f.isFile() && statSync(resolve(uploadDir, f.name)).mtimeMs < cutoff)
+      .map(f => f.name);
+    if (files.length > 0) {
+      // Fetch known blobNames from DB (all statuses, including UPLOADING/PENDING — don't touch those)
+      const known = await prisma.$queryRawUnsafe<{ blob_name: string }[]>(
+        `SELECT blob_name FROM cw_uploads WHERE blob_name = ANY($1::text[])`,
+        files,
+      );
+      const knownSet = new Set(known.map(r => r.blob_name));
+      for (const file of files) {
+        if (!knownSet.has(file)) {
+          try { (await import("node:fs")).unlinkSync(resolve(uploadDir, file)); orphanFiles++; } catch { /* best-effort */ }
+        }
+      }
+    }
+  } catch { /* best-effort — don't let orphan sweep fail the whole cleanup */ }
 
   // Para dataset_versions: mantém apenas os últimos N por table_id
   const deletedVersions = await prisma.$executeRawUnsafe(
@@ -110,8 +150,8 @@ async function runMetadataCleanup() {
   );
 
   console.log(
-    "[METADATA_CLEANUP] jobs=%d audit_events=%d uploads=%d dataset_versions=%d",
-    deletedJobs, deletedAudit, deletedUploads, deletedVersions,
+    "[METADATA_CLEANUP] jobs=%d audit_events=%d uploads=%d (files=%d orphans=%d) dataset_versions=%d",
+    deletedJobs, deletedAudit, deletedUploads, deletedFiles, orphanFiles, deletedVersions,
   );
 }
 
