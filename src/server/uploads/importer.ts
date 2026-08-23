@@ -7,11 +7,9 @@ import { getStoragePool } from "@/server/storage/pool";
 import { getStorageConnection, type ColDef } from "@/server/storage/connection";
 import { quoteIdentifier, sqlIdentifier } from "@/server/security/naming";
 import { previewFile, rowsFromFile, type FilePreview, type ParsedColumn, type RowsFromFileOpts, type ParseStats } from "./parser";
-import { bulkInsertFromBlob, sanitizeCsvField } from "./importer-bulk-blob";
 import { env } from "@/server/env";
 import { normalizeDateLike } from "./date-normalize";
 
-const SMALL_CSV_TDS_THRESHOLD_BYTES = 1 * 1024 * 1024;
 
 function sqlTypeDef(type: string): string {
   if (type === "BIGINT") return "BIGINT";
@@ -178,7 +176,7 @@ async function tdsBulkCopy(
       const vals = typed
         ? mapping.map(c => convertForTds(row[c.sqlName], c.sqlType))
         : mapping.map(c => stringify(row[c.sqlName]));
-      const rh = ch("md5").update(mapping.map(c => sanitizeCsvField(row[c.sqlName])).join("|")).digest("hex");
+      const rh = ch("md5").update(mapping.map(c => String(row[c.sqlName] ?? "")).join("|")).digest("hex");
       vals.push(rh);
       bulk.rows.add(...(vals as Parameters<typeof bulk.rows.add>));
     }
@@ -282,13 +280,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
   const phase2 = deltaReplace && upload.deltaJson != null;
   const toDelete: string[] = phase2 ? (JSON.parse(upload.deltaJson!) as string[]) : [];
 
-  // Detect OPENROWSET opportunity BEFORE staging creation.
-  // Full replace + blob available + no delta: INSERT directly into target via OPENROWSET,
-  // skipping the staging table entirely (50% fewer log writes — one pass vs two).
   const ext = extname(upload.originalFilename).toLowerCase();
-  const smallCsv = !phase2 && ext === ".csv" && Number(upload.sizeBytes) <= SMALL_CSV_TDS_THRESHOLD_BYTES;
-  const useBlob = !!env().CATWORLD_AZURE_BLOB_CONNECTION_STRING && !smallCsv;
-  const canUseOpenrowset = useBlob && !phase2 && !deltaReplace && (upload.mode === "replace" || !targetExists);
 
   // ── Idempotency: if staging already exists and has rows, skip data loading ──
   // This handles retries where the staging was populated but the transaction failed.
@@ -306,7 +298,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
 
   const stagingHasData = !stagingIsPartial && stagingRowCount > 0;
 
-  if (!stagingHasData && !canUseOpenrowset) {
+  if (!stagingHasData) {
     await writePool.request().query(
       `IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL DROP TABLE ${staging};
        CREATE TABLE ${staging} (${colDefs})`,
@@ -317,7 +309,6 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
 
   let total = 0, inserted = 0, updated = 0;
   let lastProgressMs = Date.now();
-  let deleteCleanBlob: (() => Promise<void>) | undefined;
   let actual = 0n;
   const reclassifiedCols: string[] = [];
 
@@ -336,186 +327,14 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
       }
     };
 
-    if (canUseOpenrowset) {
-      // ── Direct BULK INSERT → temp table → atomic rename to target ─────────────
-      // SAFETY: BULK INSERT into a temp table first; only rename to production after
-      // verifying row count. This preserves old data if BULK INSERT fails mid-stream.
-      const cleanBlobName = `bulkimport/${uploadId}.csv`;
-      await deleteBulkCleanBlob(cleanBlobName);
-
-      // Temp table lives in the same schema, named by uploadId (idempotent across retries).
-      const directTmp = `cw_direct_${upload.id.replaceAll("-", "").slice(0, 20)}`;
-      const directTmpFull = `${quoteIdentifier(schema)}.${quoteIdentifier(directTmp)}`;
-
-      // Drop any leftover temp from a previous failed attempt, then create fresh.
-      await writePool.request().query(
-        `IF OBJECT_ID(N'${schema}.${directTmp}',N'U') IS NOT NULL DROP TABLE ${directTmpFull};
-         CREATE TABLE ${directTmpFull} (${typedColumnDefs(mapping)},[_cw_rh] CHAR(32) NULL)`,
-      );
-
-      try {
-        const orResult = await bulkInsertFromBlob(
-          uploadId, source, mapping, schema, directTmp, opts, onProgress, false, knownRowCount, parseStats, writePool,
-        );
-        total = orResult.total;
-        inserted = total;
-        phaseTimings.importMethod = "direct-bulk";
-        phaseTimings.bulkBlob = orResult;
-        let cleanBlobDeleted = false;
-        deleteCleanBlob = async () => {
-          if (cleanBlobDeleted || !env().CATWORLD_AZURE_BLOB_CONNECTION_STRING) return;
-          cleanBlobDeleted = true;
-          const { BlobServiceClient } = await import("@azure/storage-blob");
-          const { env: getEnv } = await import("@/server/env");
-          const eBlob = getEnv();
-          BlobServiceClient.fromConnectionString(eBlob.CATWORLD_AZURE_BLOB_CONNECTION_STRING!)
-            .getContainerClient(eBlob.CATWORLD_AZURE_BLOB_CONTAINER)
-            .getBlockBlobClient(orResult.cleanBlobName).delete().catch(() => {});
-        };
-      } catch (orError) {
-        // BULK INSERT failed — clean up temp, old target is UNTOUCHED.
-        await writePool.request().query(
-          `IF OBJECT_ID(N'${schema}.${directTmp}',N'U') IS NOT NULL DROP TABLE ${directTmpFull}`,
-        ).catch(() => {});
-        await deleteBulkCleanBlob(cleanBlobName);
-        throw orError;
-      }
-
-      await writePool.request().query(`CREATE INDEX [IX__cw_rh] ON ${directTmpFull} ([_cw_rh])`);
-
-      // Integrity check BEFORE dropping the old target — row count must match parsed count.
-      const countStr = (await pool.request().query(
-        `SELECT COUNT_BIG(*) count FROM ${directTmpFull}`,
-      )).recordset[0].count as string;
-      actual = BigInt(countStr);
-
-      if (actual !== BigInt(total)) {
-        // Count mismatch — drop temp, old target is still intact.
-        await writePool.request().query(
-          `IF OBJECT_ID(N'${schema}.${directTmp}',N'U') IS NOT NULL DROP TABLE ${directTmpFull}`,
-        ).catch(() => {});
-        throw new Error(
-          `[integrity] direct-bulk: arquivo produziu ${total} linhas mas tabela temporária tem ${actual.toString()} linhas. ` +
-          `Tabela original preservada. Upload marcado FAILED.`,
-        );
-      }
-
-      // Count verified — swap temp → target inside an explicit transaction so a crash
-      // between DROP and sp_rename rolls back and restores the old target automatically.
-      const swapTx = new sql.Transaction(writePool);
-      await swapTx.begin();
-      try {
-        const swapReq = new sql.Request(swapTx);
-        await swapReq.query(
-          `IF OBJECT_ID(N'${schema}.${tableName}',N'U') IS NOT NULL DROP TABLE ${target}`,
-        );
-        await swapReq.query(`EXEC sp_rename '${schema}.${directTmp}', '${tableName}'`);
-        await swapTx.commit();
-      } catch (swapErr) {
-        await swapTx.rollback().catch(() => undefined);
-        await writePool.request().query(
-          `IF OBJECT_ID(N'${schema}.${directTmp}',N'U') IS NOT NULL DROP TABLE ${directTmpFull}`,
-        ).catch(() => {});
-        throw swapErr;
-      }
-    } else {
-      // ── Staging path (delta replace, TDS, append, upsert, phase2) ─────────────
+    {
+      // ── Staging path (TDS bulk copy via mssql driver) ─────────────────────────
       const destTable = stage;
 
       if (!stagingHasData) {
-        if (useBlob) {
-          // Fast path: stream → clean blob → BULK INSERT into staging
-          const cleanBlobName = `bulkimport/${uploadId}.csv`;
-          try {
-            const blobResult = await bulkInsertFromBlob(
-              uploadId, source, mapping, schema, destTable, opts, onProgress, phase2, knownRowCount, parseStats, pool,
-            );
-            total = blobResult.total;
-            phaseTimings.importMethod = "blob-bulk";
-            phaseTimings.bulkBlob = blobResult;
-
-            let cleanBlobDeleted = false;
-            deleteCleanBlob = async () => {
-              if (cleanBlobDeleted || !env().CATWORLD_AZURE_BLOB_CONNECTION_STRING) return;
-              cleanBlobDeleted = true;
-              const { BlobServiceClient } = await import("@azure/storage-blob");
-              const { env: getEnv } = await import("@/server/env");
-              const eBlob = getEnv();
-              const s = BlobServiceClient.fromConnectionString(eBlob.CATWORLD_AZURE_BLOB_CONNECTION_STRING!);
-              await s.getContainerClient(eBlob.CATWORLD_AZURE_BLOB_CONTAINER)
-                .getBlockBlobClient(blobResult.cleanBlobName).delete().catch(() => {});
-            };
-          } catch (bulkError) {
-            await deleteBulkCleanBlob(cleanBlobName);
-
-            const message = bulkError instanceof Error ? bulkError.message : String(bulkError);
-            const isOleDb      = message.includes('OLE DB provider "BULK"') || message.includes("blob does not exist");
-            // NVARCHAR(4000) staging: if a field value exceeds 4000 chars, BULK INSERT throws
-            // error 8152 ("String or binary data would be truncated") or error number 4864
-            // ("type mismatch" — BULK INSERT uses 4864 for column overflow, not 8152).
-            // Use error.number for 4864 (not message text, which contains row numbers that
-            // can contain "4864" as a substring and produce false positives).
-            const sqlErrNum = (bulkError as Error & { number?: number }).number;
-            const isTruncation = message.includes("String or binary data would be truncated") || sqlErrNum === 8152 || sqlErrNum === 4864;
-
-            if (!isOleDb && !isTruncation) throw bulkError;
-
-            if (isTruncation) {
-              Sentry.addBreadcrumb({ category: "import", level: "warning", message: "BULK INSERT truncation — rebuilding staging as NVARCHAR(MAX)", data: { uploadId } });
-              phaseTimings.importMethod = "tds-fallback-after-truncation";
-              stagingIsTyped = false;
-              await writePool.request().query(
-                `IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL DROP TABLE ${staging};
-                 CREATE TABLE ${staging} (${colDefsMax})`,
-              ).catch(() => {});
-            } else {
-              Sentry.addBreadcrumb({ category: "import", level: "warning", message: "BULK INSERT failed — falling back to TDS", data: { uploadId, error: message.slice(0, 200) } });
-              phaseTimings.importMethod = "tds-fallback-after-bulk-error";
-            }
-
-            await writePool.request()
-              .query(`IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL TRUNCATE TABLE ${staging}`)
-              .catch(() => {});
-
-            const { downloadFile } = await import("@/server/storage");
-            let tdsSource: NodeJS.ReadableStream;
-            try {
-              tdsSource = await downloadFile(`originals/${upload.id}${ext}`);
-            } catch {
-              tdsSource = await downloadFile(upload.blobName);
-            }
-
-            const _r1 = await tdsBulkCopy(writePool, tdsSource, mapping, schema, destTable, opts, knownRowCount, uploadId, onProgress, stagingIsTyped, parseStats);
-            total = _r1.total; reclassifiedCols.push(..._r1.reclassifiedCols);
-          }
-        } else {
-          // TDS path: small CSV or no blob storage configured
-          phaseTimings.importMethod = smallCsv ? "tds-small-csv" : "tds-primary";
-          try {
-            const _r2 = await tdsBulkCopy(writePool, source, mapping, schema, destTable, opts, knownRowCount, uploadId, onProgress, true, parseStats);
-            total = _r2.total; reclassifiedCols.push(..._r2.reclassifiedCols);
-          } catch (tdsErr) {
-            const tdsMsg = tdsErr instanceof Error ? tdsErr.message : String(tdsErr);
-            // 4815 = BCP protocol error (bad value mid-stream); fall back to blob-bulk if storage is available
-            const isBcpErr = tdsMsg.includes("4815") || tdsMsg.toLowerCase().includes("bcp");
-            if (!isBcpErr || !env().CATWORLD_AZURE_BLOB_CONNECTION_STRING) throw tdsErr;
-
-            Sentry.addBreadcrumb({ category: "import", level: "warning", message: "TDS 4815 BCP error — falling back to blob-bulk", data: { uploadId } });
-            phaseTimings.importMethod = "blob-bulk-after-tds-4815";
-            await writePool.request().query(`TRUNCATE TABLE ${staging}`).catch(() => {});
-
-            const { downloadFile } = await import("@/server/storage");
-            let blobSrc: NodeJS.ReadableStream;
-            try { blobSrc = await downloadFile(`originals/${upload.id}${ext}`); }
-            catch { blobSrc = await downloadFile(upload.blobName); }
-
-            const blobResult = await bulkInsertFromBlob(
-              uploadId, blobSrc, mapping, schema, destTable, opts, onProgress, false, knownRowCount, parseStats, writePool,
-            );
-            total = blobResult.total;
-            phaseTimings.bulkBlob = blobResult;
-          }
-        }
+        phaseTimings.importMethod = "tds-primary";
+        const _r = await tdsBulkCopy(writePool, source, mapping, schema, destTable, opts, knownRowCount, uploadId, onProgress, true, parseStats);
+        total = _r.total; reclassifiedCols.push(..._r.reclassifiedCols);
       } else {
         // Idempotent retry: staging already populated, just count what's there.
         // Detect whether staging was created as typed or NVARCHAR(MAX) (truncation fallback).
@@ -566,7 +385,6 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
         await storageConn.atomicSwap(schema, stage, tableName, mappingWithRh, { targetExists });
         inserted = total; updated = 0;
         actual = await storageConn.countRows(schema, tableName);
-        if (typeof deleteCleanBlob === "function") await deleteCleanBlob();
       } else if (upload.mode === "upsert") {
         // mergeSwap: mantém rows de target cujo key NÃO está em staging + todos de staging (lock ~ms)
         if (!upload.keyColumn) throw new Error("Upsert exige coluna-chave");
@@ -581,7 +399,6 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
         });
         inserted = total; updated = 0;
         actual = await storageConn.countRows(schema, tableName);
-        if (typeof deleteCleanBlob === "function") await deleteCleanBlob();
       } else {
         // Transação original para: phase2, replace, append
         const tx = new sql.Transaction(writePool);
@@ -652,8 +469,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
             throw new Error(`Row count ${countStr} exceeds BIGINT range. Verifique a integridade dos dados.`);
 
           await tx.commit();
-          if (typeof deleteCleanBlob === "function") await deleteCleanBlob();
-        } catch (e) {
+          } catch (e) {
           await tx.rollback().catch(() => undefined);
           throw e;
         }
@@ -676,8 +492,6 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
     const MAX_BIGINT = 9223372036854775807n;
     if (actual > MAX_BIGINT || actual < 0n)
       throw new Error(`Row count ${actual.toString()} exceeds BIGINT range. Verifique a integridade dos dados.`);
-
-    if (canUseOpenrowset && typeof deleteCleanBlob === "function") await deleteCleanBlob();
 
     // Upsert table record
     const table = upload.table ?? await prisma.datasetTable.upsert({
@@ -764,17 +578,6 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-async function deleteBulkCleanBlob(cleanBlobName: string): Promise<void> {
-  try {
-    if (!env().CATWORLD_AZURE_BLOB_CONNECTION_STRING) return;
-    const { BlobServiceClient } = await import("@azure/storage-blob");
-    const { env: getEnv } = await import("@/server/env");
-    const e = getEnv();
-    const s = BlobServiceClient.fromConnectionString(e.CATWORLD_AZURE_BLOB_CONNECTION_STRING!);
-    await s.getContainerClient(e.CATWORLD_AZURE_BLOB_CONTAINER).getBlockBlobClient(cleanBlobName).delete().catch(() => {});
-  } catch { /* best-effort */ }
-}
 
 async function checkStagingHasData(pool: sql.ConnectionPool, schema: string, stage: string): Promise<number> {
   try {

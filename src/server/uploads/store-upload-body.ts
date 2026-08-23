@@ -2,14 +2,14 @@ import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import { rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { extname, join } from "node:path";
+import { join } from "node:path";
 import { Readable, pipeline as streamPipeline } from "node:stream";
 import { promisify } from "node:util";
 import { createGunzip } from "node:zlib";
 import type { Upload } from "@prisma/client";
 import { prisma } from "@/server/db";
 import { ApiError } from "@/server/http";
-import { copyFile, writeFile } from "@/server/storage";
+import { writeFile } from "@/server/storage";
 
 const pipeline = promisify(streamPipeline);
 
@@ -43,11 +43,6 @@ export async function storeUploadBody(upload: Upload, body: BodyLike, contentEnc
     }
 
     await writeFile(upload.blobName, Readable.toWeb(createReadStream(tmpPath)) as ReadableStream<Uint8Array>);
-
-    const ext = extname(upload.originalFilename).toLowerCase();
-    await copyFile(upload.blobName, `originals/${upload.id}${ext}`).catch((e) => {
-      console.error("[upload] originals/ copy failed for", upload.id, e instanceof Error ? e.message : e);
-    });
 
     if (!upload.fileHash) {
       await prisma.upload.update({ where: { id: upload.id }, data: { fileHash } });

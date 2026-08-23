@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import ExcelJS from "exceljs";
-import { sanitizeCsvField } from "./importer-bulk-blob";
 import { previewFile, rowsFromFile } from "./parser";
 import { convert } from "./importer";
 
@@ -27,64 +26,7 @@ async function xlsx(rows: unknown[][]) {
 }
 
 // ============================================================
-// 1. sanitizeCsvField — core function for Bulk Blob CSV output
-// ============================================================
-describe("sanitizeCsvField — conversão para CSV do bulk blob", () => {
-  it("preserva zero à esquerda em código", () => {
-    expect(sanitizeCsvField("01234")).toBe('"01234"');
-    expect(sanitizeCsvField("001")).toBe('"001"');
-    expect(sanitizeCsvField("0000")).toBe('"0000"');
-  });
-
-  it("preserva decimal brasileiro como string literal", () => {
-    expect(sanitizeCsvField("1.234,56")).toBe('"1.234,56"');
-    expect(sanitizeCsvField("123,45")).toBe('"123,45"');
-    expect(sanitizeCsvField("0,99")).toBe('"0,99"');
-  });
-
-  it("preserva texto com caracteres especiais", () => {
-    expect(sanitizeCsvField("PAPEL SULFITE 61 X 50 75GR 2\"")).toBe('"PAPEL SULFITE 61 X 50 75GR 2"""');
-    expect(sanitizeCsvField("João & Maria Ltda.")).toBe('"João & Maria Ltda."');
-    expect(sanitizeCsvField("100% algodão")).toBe('"100% algodão"');
-  });
-
-  it("converte nulo/vazio para campo CSV vazio entre aspas", () => {
-    expect(sanitizeCsvField(null)).toBe('""');
-    expect(sanitizeCsvField(undefined)).toBe('""');
-    expect(sanitizeCsvField("")).toBe('""');
-    expect(sanitizeCsvField("   ")).toBe('""');
-  });
-
-  it("substitui pipe (delimitador de campo) por espaço", () => {
-    expect(sanitizeCsvField("a|b|c")).toBe('"a b c"');
-  });
-
-  it("substitui newlines e tabs por espaço", () => {
-    expect(sanitizeCsvField("linha1\nlinha2")).toBe('"linha1 linha2"');
-    expect(sanitizeCsvField("col\tumn")).toBe('"col umn"');
-  });
-
-  it("preserva número como string sem conversão de tipo", () => {
-    expect(sanitizeCsvField(12345)).toBe('"12345"');
-    expect(sanitizeCsvField(3.14)).toBe('"3.14"');
-    expect(sanitizeCsvField(-50)).toBe('"-50"');
-  });
-
-  it("preserva timestamp ISO como string", () => {
-    expect(sanitizeCsvField("2026-01-15T08:30:00")).toBe('"2026-01-15T08:30:00"');
-    expect(sanitizeCsvField("2026-05-04")).toBe('"2026-05-04"');
-  });
-
-  it("lida com campo muito longo (10k+ chars)", () => {
-    const long = "x".repeat(10000);
-    const result = sanitizeCsvField(long);
-    expect(result).toBe('"' + long + '"');
-    expect(result.length).toBe(10002);
-  });
-});
-
-// ============================================================
-// 2. CSV grande (>1MB) com coluna mista número/texto
+// 1. CSV grande (>1MB) com coluna mista número/texto
 // ============================================================
 describe("CSV grande com coluna mista número/texto", () => {
   it("parseia arquivo de 5000+ linhas com coluna que começa numérica e vira texto", async () => {
@@ -209,10 +151,6 @@ describe("CSV com código com zero à esquerda", () => {
     expect(all[2].codigo).toBe("01234");
   });
 
-  it("sanitizeCsvField mantém zero à esquerda", () => {
-    expect(sanitizeCsvField("00123")).toBe('"00123"');
-    expect(sanitizeCsvField("000")).toBe('"000"');
-  });
 });
 
 // ============================================================
@@ -387,27 +325,3 @@ describe("Lógica de retry do bulk insert", () => {
   });
 });
 
-// ============================================================
-// 16. Chain completa: parser → sanitize → hash
-// ============================================================
-describe("Chain parser → sanitizeCsvField preserva valores", () => {
-  it("produz linha CSV consistente a partir de CSV fonte", async () => {
-    const path = await csv(
-      `id,produto,preco\n` +
-      `1,"PAPEL 2""",10.50\n` +
-      `2,CANETA,20.00\n`
-    );
-    const preview = await previewFile(path);
-    const all: Record<string, unknown>[] = [];
-    for await (const row of rowsFromFile(path, preview.columns)) all.push(row);
-    // Simula o que bulkInsertFromBlob faz: sanitize cada campo e junta com pipe
-    const csvLine = preview.columns.map(c => sanitizeCsvField(all[0][c.sqlName])).join("|");
-    expect(csvLine).toContain('"PAPEL 2"""');
-    expect(csvLine).toContain('"10.50"');
-    // Hash md5 deve ser consistente (determinístico)
-    const { createHash } = await import("node:crypto");
-    const hash = createHash("md5").update(csvLine).digest("hex");
-    expect(hash).toHaveLength(32);
-    expect(hash).toMatch(/^[0-9a-f]{32}$/);
-  });
-});

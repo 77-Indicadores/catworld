@@ -7,7 +7,6 @@ import { resolveActor } from "@/server/auth/actor";
 import { canAccess } from "@/server/auth/permissions";
 import { sqlIdentifier, quoteIdentifier } from "@/server/security/naming";
 import { ApiError, handleApiError } from "@/server/http";
-import { env } from "@/server/env";
 
 const inputSchema = z.object({
   filename: z.string().min(1).max(500),
@@ -38,7 +37,6 @@ export async function POST(r: NextRequest, { params }: { params: Promise<{ id: s
     const { filename, tableId } = inputSchema.parse(await r.json());
 
     if (!filename.toLowerCase().endsWith(".csv")) return notCapable("not-csv");
-    if (!env().CATWORLD_AZURE_BLOB_CONNECTION_STRING) return notCapable("storage-unavailable");
 
     const dataset = await prisma.dataset.findUnique({ where: { id: datasetId } });
     if (!dataset) throw new ApiError(404, "DATASET_NOT_FOUND", "Dataset não encontrado");

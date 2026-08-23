@@ -5,7 +5,7 @@ import { basename, extname, join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { spawn } from "node:child_process";
 import { prisma } from "@/server/db";
-import { downloadFile, deleteFile, copyFile } from "@/server/storage";
+import { downloadFile, deleteFile } from "@/server/storage";
 import { env } from "@/server/env";
 import { previewFile, type FilePreview } from "@/server/uploads/parser";
 import { importUpload } from "@/server/uploads/importer";
@@ -51,19 +51,12 @@ async function localFile(upload: { blobName: string; originalFilename: string })
   return { dir, path: converted };
 }
 
-// Downloads from originals/ (falling back to blobName) to a temp file so the import
-// uses the DuckDB server-side path — same parser as the client-side preview.
-async function localOriginals(upload: { id: string; blobName: string; originalFilename: string }) {
-  const ext = extname(upload.originalFilename).toLowerCase();
+// Downloads blobName to a temp file so the import uses the DuckDB server-side path
+// — same parser as the client-side preview.
+async function localOriginals(upload: { blobName: string; originalFilename: string }) {
   const dir = await mkdtemp(join(tmpdir(), "catworld-"));
   const path = join(dir, basename(upload.originalFilename));
-  let stream: NodeJS.ReadableStream;
-  try {
-    stream = await downloadFile(`originals/${upload.id}${ext}`);
-  } catch {
-    stream = await downloadFile(upload.blobName);
-  }
-  await pipeline(stream, createWriteStream(path));
+  await pipeline(await downloadFile(upload.blobName), createWriteStream(path));
   return { dir, path };
 }
 
@@ -202,11 +195,6 @@ async function work(job: Claimed) {
       const file = await localFile(upload);
       try {
         await prisma.upload.update({ where: { id: upload.id }, data: { status: "PREVIEWING", progress: 10 } });
-        // Blob is provably alive (just downloaded). Copy to originals/ so IMPORT_UPLOAD is guaranteed a source.
-        const ext = extname(upload.originalFilename).toLowerCase();
-        await copyFile(upload.blobName, `originals/${upload.id}${ext}`).catch((e) => {
-          console.error("[PREVIEW] originals/ copy failed for", upload.id, e instanceof Error ? e.message : e);
-        });
         const preview = await previewFile(file.path);
         await prisma.upload.update({
           where: { id: upload.id },
@@ -231,11 +219,9 @@ async function work(job: Claimed) {
     }
 
     await prisma.job.update({ where: { id: job.id }, data: { status: "COMPLETED", lockedAt: null, lockedBy: null, heartbeatAt: null, lastError: null } });
-    // Only delete blobs after the import is fully done — not after preview
+    // Only delete the upload file after the import is fully done — not after preview
     if (job.type === "IMPORT_UPLOAD") {
       await deleteFile(upload.blobName).catch(() => {});
-      const ext = extname(upload.originalFilename).toLowerCase();
-      await deleteFile(`originals/${upload.id}${ext}`).catch(() => {});
     }
   } finally {
     clearInterval(heartbeat);
