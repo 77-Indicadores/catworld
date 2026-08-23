@@ -24,6 +24,61 @@ const datasetCache = new Map<string, CachedDataset>();
 const tokenCache   = new Map<string, CachedToken>();
 const countCache   = new Map<string, CachedCount>();
 
+// ── Semáforo OData ────────────────────────────────────────────────────────────
+// Limita consultas DB simultâneas (MSSQL + PG) para não saturar o pool de leitura.
+const ODATA_MAX_CONCURRENT = 3;
+let _odataConcurrent = 0;
+const _odataQueue: Array<() => void> = [];
+
+async function withODataSemaphore<T>(fn: () => Promise<T>): Promise<T> {
+  if (_odataConcurrent < ODATA_MAX_CONCURRENT) {
+    _odataConcurrent++;
+  } else {
+    await new Promise<void>((resolve) => _odataQueue.push(resolve));
+  }
+  try {
+    return await fn();
+  } finally {
+    const next = _odataQueue.shift();
+    if (next) { next(); } else { _odataConcurrent--; }
+  }
+}
+
+// ── Cache de páginas OData ────────────────────────────────────────────────────
+// Reduz carga no banco para consultas repetitivas (ex: Power BI, SDK paginando mesmas páginas).
+// TTL curto (30 s) garante que dados publicados aparecem rapidamente.
+// Chave inclui top/skip/select — páginas diferentes nunca colidem.
+const PAGE_CACHE_TTL = 30_000; // 30 s
+const PAGE_CACHE_MAX = 200;    // entradas máximas (LRU simples via Map.keys() ordering)
+
+type CachedPage = { response: Record<string, unknown>; expiresAt: number };
+const pageCache  = new Map<string, CachedPage>();
+
+function getPageCache(key: string): Record<string, unknown> | null {
+  const entry = pageCache.get(key);
+  if (!entry || Date.now() >= entry.expiresAt) { pageCache.delete(key); return null; }
+  // LRU: re-insert para atualizar posição de evicção
+  pageCache.delete(key);
+  pageCache.set(key, entry);
+  return entry.response;
+}
+
+function setPageCache(key: string, response: Record<string, unknown>) {
+  if (pageCache.size >= PAGE_CACHE_MAX) {
+    const first = pageCache.keys().next().value;
+    if (first !== undefined) pageCache.delete(first);
+  }
+  pageCache.set(key, { response, expiresAt: Date.now() + PAGE_CACHE_TTL });
+}
+
+/** Invalida todas as entradas de cache de uma tabela específica (chamado após upload/sync). */
+export function invalidateODataPageCache(projectSlug: string, datasetSlug: string, tableSqlName?: string) {
+  const prefix = `${projectSlug}/${datasetSlug}/${tableSqlName ?? ""}`;
+  for (const key of pageCache.keys()) {
+    if (key.startsWith(prefix)) pageCache.delete(key);
+  }
+}
+
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
 async function resolveODataActor(request: NextRequest): Promise<Actor> {
@@ -340,7 +395,9 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const response: Record<string, unknown> = { "@odata.context": `${baseUrl}/$metadata#${table.sqlName}` };
 
     if (table.live) {
-      const { rows, totalCount } = await queryLiveTable(table.live, cols, top, skip, needCount, countCacheKey);
+      const { rows, totalCount } = await withODataSemaphore(() =>
+        queryLiveTable(table.live!, cols, top, skip, needCount, countCacheKey),
+      );
       response["value"] = rows.map((r, i) => ({ ...r, _row_number: String(skip + i + 1) }));
       if (needCount) response["@odata.count"] = String(totalCount ?? 0);
       if (rows.length === top) {
@@ -353,32 +410,47 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       }
     } else {
       await syncActorGrants(actor, { datasetIds: [dataset.id] });
-      const colList = cols.map((c) => `[${c.sqlName}]`).join(", ");
-      const dataSql  = `SELECT ${colList}, ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS [_row_number] FROM [${dataset.schemaName}].[${table.sqlName}] ORDER BY (SELECT NULL) OFFSET ${skip} ROWS FETCH NEXT ${top} ROWS ONLY`;
-      const countSql = `SELECT COUNT(*) AS [cnt] FROM [${dataset.schemaName}].[${table.sqlName}]`;
 
-      const cachedCount = getCachedCount(countCacheKey);
-      const [result, countResult] = await Promise.all([
-        executeReadOnly(actor.principal, dataSql, 120, top, [dataset.schemaName], 0, 120, dataset.storageServerId),
-        needCount && cachedCount === null
-          ? executeReadOnly(actor.principal, countSql, 30, 1, [dataset.schemaName], 0, 120, dataset.storageServerId)
-          : Promise.resolve(null),
-      ]);
+      // Cache de página: evita hits ao banco para queries idênticas repetitivas (Power BI, SDK)
+      const pageCacheKey = `${projectSlug}/${datasetSlug}/${table.sqlName}/${top}/${skip}/${selectParam ?? ""}/${needCount}`;
+      const cachedPage = getPageCache(pageCacheKey);
+      if (cachedPage) {
+        Object.assign(response, cachedPage);
+      } else {
+        const colList = cols.map((c) => `[${c.sqlName}]`).join(", ");
+        const dataSql  = `SELECT ${colList}, ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS [_row_number] FROM [${dataset.schemaName}].[${table.sqlName}] ORDER BY (SELECT NULL) OFFSET ${skip} ROWS FETCH NEXT ${top} ROWS ONLY`;
+        const countSql = `SELECT COUNT(*) AS [cnt] FROM [${dataset.schemaName}].[${table.sqlName}]`;
 
-      const typeMap = new Map(cols.map((c) => [c.sqlName, c.sqlType.toUpperCase().replace(/\(.*\)/, "").trim()]));
-      response["value"] = result.rows.map((row) => normalizeRow(row as Record<string, unknown>, typeMap));
-      if (needCount) {
-        const cnt = cachedCount ?? Number((countResult!.rows[0] as Record<string, unknown>)?.cnt ?? 0);
-        setCachedCount(countCacheKey, cnt);
-        response["@odata.count"] = String(cnt);
-      }
-      if (result.rows.length === top) {
-        const next = new URL(`${baseUrl}/${table.sqlName}`);
-        next.searchParams.set("$top", String(top));
-        next.searchParams.set("$skip", String(skip + top));
-        if (selectParam) next.searchParams.set("$select", selectParam);
-        if (needCount) next.searchParams.set("$count", "true");
-        response["@odata.nextLink"] = appendApiKey(next, apiKey);
+        const cachedCount = getCachedCount(countCacheKey);
+        const [result, countResult] = await withODataSemaphore(() => Promise.all([
+          executeReadOnly(actor.principal, dataSql, 120, top, [dataset.schemaName], 0, 120, dataset.storageServerId),
+          needCount && cachedCount === null
+            ? executeReadOnly(actor.principal, countSql, 30, 1, [dataset.schemaName], 0, 120, dataset.storageServerId)
+            : Promise.resolve(null),
+        ]));
+
+        const typeMap = new Map(cols.map((c) => [c.sqlName, c.sqlType.toUpperCase().replace(/\(.*\)/, "").trim()]));
+        response["value"] = result.rows.map((row) => normalizeRow(row as Record<string, unknown>, typeMap));
+        if (needCount) {
+          const cnt = cachedCount ?? Number((countResult!.rows[0] as Record<string, unknown>)?.cnt ?? 0);
+          setCachedCount(countCacheKey, cnt);
+          response["@odata.count"] = String(cnt);
+        }
+        if (result.rows.length === top) {
+          const next = new URL(`${baseUrl}/${table.sqlName}`);
+          next.searchParams.set("$top", String(top));
+          next.searchParams.set("$skip", String(skip + top));
+          if (selectParam) next.searchParams.set("$select", selectParam);
+          if (needCount) next.searchParams.set("$count", "true");
+          response["@odata.nextLink"] = appendApiKey(next, apiKey);
+        }
+
+        // Cacheia a resposta construída (só campos de dados, não @odata.context que já foi definido)
+        const pageCachePayload: Record<string, unknown> = {};
+        if (response["value"] !== undefined) pageCachePayload["value"] = response["value"];
+        if (response["@odata.count"] !== undefined) pageCachePayload["@odata.count"] = response["@odata.count"];
+        if (response["@odata.nextLink"] !== undefined) pageCachePayload["@odata.nextLink"] = response["@odata.nextLink"];
+        setPageCache(pageCacheKey, pageCachePayload);
       }
     }
 

@@ -222,6 +222,9 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
   const pool = await getStoragePool(upload.dataset.storageServerId);
   // StorageConnection reutiliza o mesmo pool interno (singleton por storageServerId)
   const storageConn = await getStorageConnection(upload.dataset.storageServerId);
+  // Pool de escrita separado: DDL de staging e bulk copies usam o pool do MssqlStorageConnection
+  // para não saturar o pool de leitura que serve a API e o OData.
+  const writePool = await (storageConn as unknown as { rawPool(): Promise<sql.ConnectionPool> }).rawPool();
   const target = `${quoteIdentifier(schema)}.${quoteIdentifier(tableName)}`;
   const staging = `${quoteIdentifier(schema)}.${quoteIdentifier(stage)}`;
 
@@ -269,13 +272,13 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
 
   if (stagingIsPartial) {
     console.warn("[importUpload] staging parcial detectado (%d/%d linhas) — descartando e reimportando upload=%s", stagingRowCount, knownRowCount, uploadId);
-    await pool.request().query(`DROP TABLE ${staging}`).catch(() => {});
+    await writePool.request().query(`DROP TABLE ${staging}`).catch(() => {});
   }
 
   const stagingHasData = !stagingIsPartial && stagingRowCount > 0;
 
   if (!stagingHasData && !canUseOpenrowset) {
-    await pool.request().query(
+    await writePool.request().query(
       `IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL DROP TABLE ${staging};
        CREATE TABLE ${staging} (${colDefs})`,
     );
@@ -315,14 +318,14 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
       const directTmpFull = `${quoteIdentifier(schema)}.${quoteIdentifier(directTmp)}`;
 
       // Drop any leftover temp from a previous failed attempt, then create fresh.
-      await pool.request().query(
+      await writePool.request().query(
         `IF OBJECT_ID(N'${schema}.${directTmp}',N'U') IS NOT NULL DROP TABLE ${directTmpFull};
          CREATE TABLE ${directTmpFull} (${typedColumnDefs(mapping)},[_cw_rh] CHAR(32) NULL)`,
       );
 
       try {
         const orResult = await bulkInsertFromBlob(
-          uploadId, source, mapping, schema, directTmp, opts, onProgress, false, knownRowCount, parseStats, pool,
+          uploadId, source, mapping, schema, directTmp, opts, onProgress, false, knownRowCount, parseStats, writePool,
         );
         total = orResult.total;
         inserted = total;
@@ -341,14 +344,14 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
         };
       } catch (orError) {
         // BULK INSERT failed — clean up temp, old target is UNTOUCHED.
-        await pool.request().query(
+        await writePool.request().query(
           `IF OBJECT_ID(N'${schema}.${directTmp}',N'U') IS NOT NULL DROP TABLE ${directTmpFull}`,
         ).catch(() => {});
         await deleteBulkCleanBlob(cleanBlobName);
         throw orError;
       }
 
-      await pool.request().query(`CREATE INDEX [IX__cw_rh] ON ${directTmpFull} ([_cw_rh])`);
+      await writePool.request().query(`CREATE INDEX [IX__cw_rh] ON ${directTmpFull} ([_cw_rh])`);
 
       // Integrity check BEFORE dropping the old target — row count must match parsed count.
       const countStr = (await pool.request().query(
@@ -358,7 +361,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
 
       if (actual !== BigInt(total)) {
         // Count mismatch — drop temp, old target is still intact.
-        await pool.request().query(
+        await writePool.request().query(
           `IF OBJECT_ID(N'${schema}.${directTmp}',N'U') IS NOT NULL DROP TABLE ${directTmpFull}`,
         ).catch(() => {});
         throw new Error(
@@ -369,7 +372,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
 
       // Count verified — swap temp → target inside an explicit transaction so a crash
       // between DROP and sp_rename rolls back and restores the old target automatically.
-      const swapTx = new sql.Transaction(pool);
+      const swapTx = new sql.Transaction(writePool);
       await swapTx.begin();
       try {
         const swapReq = new sql.Request(swapTx);
@@ -380,7 +383,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
         await swapTx.commit();
       } catch (swapErr) {
         await swapTx.rollback().catch(() => undefined);
-        await pool.request().query(
+        await writePool.request().query(
           `IF OBJECT_ID(N'${schema}.${directTmp}',N'U') IS NOT NULL DROP TABLE ${directTmpFull}`,
         ).catch(() => {});
         throw swapErr;
@@ -431,7 +434,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
               Sentry.addBreadcrumb({ category: "import", level: "warning", message: "BULK INSERT truncation — rebuilding staging as NVARCHAR(MAX)", data: { uploadId } });
               phaseTimings.importMethod = "tds-fallback-after-truncation";
               stagingIsTyped = false;
-              await pool.request().query(
+              await writePool.request().query(
                 `IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL DROP TABLE ${staging};
                  CREATE TABLE ${staging} (${colDefsMax})`,
               ).catch(() => {});
@@ -440,7 +443,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
               phaseTimings.importMethod = "tds-fallback-after-bulk-error";
             }
 
-            await pool.request()
+            await writePool.request()
               .query(`IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL TRUNCATE TABLE ${staging}`)
               .catch(() => {});
 
@@ -452,13 +455,13 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
               tdsSource = await downloadFile(upload.blobName);
             }
 
-            total = await tdsBulkCopy(pool, tdsSource, mapping, schema, destTable, opts, knownRowCount, uploadId, onProgress, stagingIsTyped, parseStats);
+            total = await tdsBulkCopy(writePool, tdsSource, mapping, schema, destTable, opts, knownRowCount, uploadId, onProgress, stagingIsTyped, parseStats);
           }
         } else {
           // TDS path: small CSV or no blob storage configured
           phaseTimings.importMethod = smallCsv ? "tds-small-csv" : "tds-primary";
           try {
-            total = await tdsBulkCopy(pool, source, mapping, schema, destTable, opts, knownRowCount, uploadId, onProgress, true, parseStats);
+            total = await tdsBulkCopy(writePool, source, mapping, schema, destTable, opts, knownRowCount, uploadId, onProgress, true, parseStats);
           } catch (tdsErr) {
             const tdsMsg = tdsErr instanceof Error ? tdsErr.message : String(tdsErr);
             // 4815 = BCP protocol error (bad value mid-stream); fall back to blob-bulk if storage is available
@@ -467,7 +470,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
 
             Sentry.addBreadcrumb({ category: "import", level: "warning", message: "TDS 4815 BCP error — falling back to blob-bulk", data: { uploadId } });
             phaseTimings.importMethod = "blob-bulk-after-tds-4815";
-            await pool.request().query(`TRUNCATE TABLE ${staging}`).catch(() => {});
+            await writePool.request().query(`TRUNCATE TABLE ${staging}`).catch(() => {});
 
             const { downloadFile } = await import("@/server/storage");
             let blobSrc: NodeJS.ReadableStream;
@@ -475,7 +478,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
             catch { blobSrc = await downloadFile(upload.blobName); }
 
             const blobResult = await bulkInsertFromBlob(
-              uploadId, blobSrc, mapping, schema, destTable, opts, onProgress, false, knownRowCount, parseStats, pool,
+              uploadId, blobSrc, mapping, schema, destTable, opts, onProgress, false, knownRowCount, parseStats, writePool,
             );
             total = blobResult.total;
             phaseTimings.bulkBlob = blobResult;
@@ -501,7 +504,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
       // Index staging._cw_rh so NOT EXISTS lookups are O(n log n) instead of O(n²)
       // Large staging tables can take >10 min to index — needs explicit 2h timeout.
       if (!stagingHasData) {
-        const idxReq = pool.request();
+        const idxReq = writePool.request();
         (idxReq as unknown as { overrides: { requestTimeout: number } }).overrides.requestTimeout = 7_200_000;
         await idxReq.query(
           `IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL
@@ -510,7 +513,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
       }
       // Ensure target also has the _cw_rh index (older tables may predate it)
       if (deltaReplace && targetExists) {
-        const idxReq2 = pool.request();
+        const idxReq2 = writePool.request();
         (idxReq2 as unknown as { overrides: { requestTimeout: number } }).overrides.requestTimeout = 7_200_000;
         await idxReq2.query(
           `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id=OBJECT_ID(N'${schema}.${tableName}') AND name=N'IX__cw_rh')
@@ -549,7 +552,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
         if (typeof deleteCleanBlob === "function") await deleteCleanBlob();
       } else {
         // Transação original para: phase2, replace, append
-        const tx = new sql.Transaction(pool);
+        const tx = new sql.Transaction(writePool);
         await tx.begin();
         try {
           const request = new sql.Request(tx);
@@ -719,8 +722,8 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
 
     return { tableId: table.id, inserted, updated, rowCount: actual };
   } catch (e) {
-    // Best-effort: drop staging on any failure (no-op for OPENROWSET path — no staging was created)
-    await pool.request()
+    // Best-effort: drop staging on any failure (no-op para OPENROWSET path — sem staging criado)
+    await writePool.request()
       .query(`IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL DROP TABLE ${staging}`)
       .catch(() => undefined);
     throw e;

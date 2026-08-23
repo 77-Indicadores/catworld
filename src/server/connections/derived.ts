@@ -1,6 +1,5 @@
 import { randomUUID } from "crypto";
 import { prisma } from "@/server/db";
-import { getStoragePool } from "@/server/storage/pool";
 import { getStorageConnection } from "@/server/storage/connection";
 import { nextRefreshFromCron } from "./sources";
 
