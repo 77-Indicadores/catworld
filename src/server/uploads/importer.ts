@@ -120,6 +120,13 @@ function convertForTds(v: unknown, sqlType: string): unknown {
 // ─── TDS bulk copy ────────────────────────────────────────────────────────────
 // Used as the primary path for small CSVs/XLS and as automatic fallback when
 // BULK INSERT fails with an OLE DB provider error.
+const MSSQL_BIGINT_MIN = -9223372036854775808n, MSSQL_BIGINT_MAX = 9223372036854775807n;
+
+function mssqlBigIntOverflows(s: string): boolean {
+  if (!s || !/^-?\d+$/.test(s)) return false;
+  try { const b = BigInt(s); return b < MSSQL_BIGINT_MIN || b > MSSQL_BIGINT_MAX; } catch { return false; }
+}
+
 async function tdsBulkCopy(
   pool: sql.ConnectionPool,
   source: string | NodeJS.ReadableStream,
@@ -132,16 +139,34 @@ async function tdsBulkCopy(
   onProgress?: (rows: number) => void,
   typed = true,
   stats?: ParseStats,
-): Promise<number> {
+): Promise<{ total: number; reclassifiedCols: string[] }> {
   const { getWorkerConfig } = await import("@/server/worker/config");
   const { importBatchDelayMs: batchDelay } = await getWorkerConfig();
   const stringify = (v: unknown) => (v == null || String(v).trim() === "" ? null : String(v));
 
   let batch: Record<string, unknown>[] = [];
   let total = 0;
+  const reclassifiedCols: string[] = [];
 
   const flush = async () => {
     if (!batch.length) return;
+
+    // Detecta overflow BIGINT antes do bulk copy — sem perda de dados
+    if (typed) {
+      for (let i = 0; i < mapping.length; i++) {
+        const c = mapping[i]!;
+        if (c.sqlType !== "BIGINT") continue;
+        const hasOverflow = batch.some(row => mssqlBigIntOverflows(String(row[c.sqlName] ?? "").trim()));
+        if (!hasOverflow) continue;
+        // ALTER TABLE staging: BIGINT → NVARCHAR(MAX)
+        await new sql.Request(pool).query(
+          `ALTER TABLE ${quoteIdentifier(schema)}.${quoteIdentifier(destTable)} ALTER COLUMN ${quoteIdentifier(c.sqlName)} NVARCHAR(MAX)`,
+        );
+        mapping[i]!.sqlType = "NVARCHAR(MAX)";
+        if (!reclassifiedCols.includes(c.sqlName)) reclassifiedCols.push(c.sqlName);
+      }
+    }
+
     const bulk = new sql.Table(`${schema}.${destTable}`);
     bulk.create = false;
     for (const c of mapping) {
@@ -172,8 +197,12 @@ async function tdsBulkCopy(
   }
   await flush();
 
+  if (reclassifiedCols.length) {
+    console.warn("[tdsBulkCopy] colunas reclassificadas BIGINT→NVARCHAR por overflow 64-bit: %s upload=%s",
+      reclassifiedCols.join(", "), uploadId);
+  }
   console.log("[tdsBulkCopy] upload=%s rows=%d", uploadId, total);
-  return total;
+  return { total, reclassifiedCols };
 }
 
 // ─── Main import entry point ───────────────────────────────────────────────────
@@ -290,6 +319,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
   let lastProgressMs = Date.now();
   let deleteCleanBlob: (() => Promise<void>) | undefined;
   let actual = 0n;
+  const reclassifiedCols: string[] = [];
 
   try {
     const preview = upload.previewJson ? JSON.parse(upload.previewJson) as FilePreview : null;
@@ -455,13 +485,15 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
               tdsSource = await downloadFile(upload.blobName);
             }
 
-            total = await tdsBulkCopy(writePool, tdsSource, mapping, schema, destTable, opts, knownRowCount, uploadId, onProgress, stagingIsTyped, parseStats);
+            const _r1 = await tdsBulkCopy(writePool, tdsSource, mapping, schema, destTable, opts, knownRowCount, uploadId, onProgress, stagingIsTyped, parseStats);
+            total = _r1.total; reclassifiedCols.push(..._r1.reclassifiedCols);
           }
         } else {
           // TDS path: small CSV or no blob storage configured
           phaseTimings.importMethod = smallCsv ? "tds-small-csv" : "tds-primary";
           try {
-            total = await tdsBulkCopy(writePool, source, mapping, schema, destTable, opts, knownRowCount, uploadId, onProgress, true, parseStats);
+            const _r2 = await tdsBulkCopy(writePool, source, mapping, schema, destTable, opts, knownRowCount, uploadId, onProgress, true, parseStats);
+            total = _r2.total; reclassifiedCols.push(..._r2.reclassifiedCols);
           } catch (tdsErr) {
             const tdsMsg = tdsErr instanceof Error ? tdsErr.message : String(tdsErr);
             // 4815 = BCP protocol error (bad value mid-stream); fall back to blob-bulk if storage is available
@@ -666,6 +698,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
     phaseTimings.fileSeparator = parseStats.fileSeparator ?? null;
     phaseTimings.fallbackReason = parseStats.fallbackReason ?? null;
     phaseTimings.deltaMode = deltaMode;
+    if (reclassifiedCols.length) phaseTimings.reclassifiedCols = reclassifiedCols;
     phaseTimings.toDeleteCount = updated;
     phaseTimings.stagingWasPartial = stagingIsPartial;
     phaseTimings.wasIdempotentRetry = stagingHasData;

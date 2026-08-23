@@ -94,7 +94,11 @@ const RE_INT=/^-?\d+$/;
 const RE_INT_LEADING_ZERO=/^0\d+/;
 const RE_DECIMAL=/^-?\d{1,3}(?:[.,]\d{3})*[,]\d+$|^-?\d+[.,]\d+$/;
 const RE_TIME=/^\d{1,2}:\d{2}(:\d{2})?$/;
-function isInt(t:string){return RE_INT.test(t)&&!RE_INT_LEADING_ZERO.test(t)}
+const BIGINT_MIN=-9223372036854775808n,BIGINT_MAX=9223372036854775807n;
+function isInt(t:string){
+  if(!RE_INT.test(t)||RE_INT_LEADING_ZERO.test(t))return false;
+  try{const b=BigInt(t);return b>=BIGINT_MIN&&b<=BIGINT_MAX}catch{return false}
+}
 function updateStats(s:ColumnStats,raw:unknown){
   const v=raw==null?"":String(raw),trimmed=v.trim();
   if(trimmed===""){s.hasNull=true;return}

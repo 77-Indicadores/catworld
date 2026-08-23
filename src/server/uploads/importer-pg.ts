@@ -22,6 +22,13 @@ import { pgQuote, canonicalToPg } from "@/server/storage/pg-storage";
 
 // ─── Type conversion ──────────────────────────────────────────────────────────
 
+const PG_BIGINT_MIN = -9223372036854775808n, PG_BIGINT_MAX = 9223372036854775807n;
+
+function bigIntOverflows(s: string): boolean {
+  if (!s || !/^-?\d+$/.test(s)) return false;
+  try { const b = BigInt(s); return b < PG_BIGINT_MIN || b > PG_BIGINT_MAX; } catch { return false; }
+}
+
 /** Converte valor raw para string que o Postgres aceita via unnest cast */
 function convertForPg(v: unknown, sqlType: string): string | null {
   const s = v == null ? "" : String(v).trim();
@@ -29,13 +36,7 @@ function convertForPg(v: unknown, sqlType: string): string | null {
 
   if (sqlType === "BIGINT") {
     if (!/^-?\d+$/.test(s)) return null;
-    // PostgreSQL BIGINT é signed 64-bit: -(2^63) a 2^63-1 (19 dígitos max).
-    // Valores fora desse range retornam null para não explodir o cast ::BIGINT.
-    try {
-      const b = BigInt(s);
-      if (b < -9223372036854775808n || b > 9223372036854775807n) return null;
-    } catch { return null; }
-    return s;
+    return s; // range já verificado antes do INSERT via reclassifyOverflowCols
   }
   if (sqlType.startsWith("DECIMAL")) {
     const lastDot = s.lastIndexOf(".");
@@ -61,6 +62,34 @@ function convertForPg(v: unknown, sqlType: string): string | null {
 
 const BATCH_SIZE = 2000;
 
+/**
+ * Escaneia o batch por valores BIGINT fora do range 64-bit.
+ * Quando encontra: ALTER TABLE muda a coluna para TEXT, atualiza mapping in-place.
+ * Retorna os nomes das colunas reclassificadas (para log/aviso no resultado do job).
+ */
+async function reclassifyOverflowCols(
+  conn: PgStorageConnection,
+  schema: string,
+  table: string,
+  mapping: ParsedColumn[],
+  batch: Record<string, unknown>[],
+): Promise<string[]> {
+  const reclassified: string[] = [];
+  const qTable = `${pgQuote(schema)}.${pgQuote(table)}`;
+
+  for (let i = 0; i < mapping.length; i++) {
+    const c = mapping[i]!;
+    if (c.sqlType !== "BIGINT") continue;
+    const hasOverflow = batch.some(row => bigIntOverflows(String(row[c.sqlName] ?? "").trim()));
+    if (!hasOverflow) continue;
+
+    await conn._pool.query(`ALTER TABLE ${qTable} ALTER COLUMN ${pgQuote(c.sqlName)} TYPE TEXT`);
+    mapping[i]!.sqlType = "NVARCHAR(MAX)";
+    reclassified.push(c.sqlName);
+  }
+  return reclassified;
+}
+
 async function flushBatch(
   conn: PgStorageConnection,
   schema: string,
@@ -68,8 +97,13 @@ async function flushBatch(
   mapping: ParsedColumn[],
   batch: Record<string, unknown>[],
   withRh: boolean,
+  reclassifiedCols: string[],
 ): Promise<void> {
   if (!batch.length) return;
+
+  // Detecta e corrige overflow BIGINT antes de inserir — sem perda de dados
+  const newReclassified = await reclassifyOverflowCols(conn, schema, table, mapping, batch);
+  reclassifiedCols.push(...newReclassified);
 
   const cols = [...mapping.map(c => c.sqlName), ...(withRh ? ["_cw_rh"] : [])];
   const colList = cols.map(pgQuote).join(", ");
@@ -176,11 +210,12 @@ export async function importUploadPg(
   let total = 0;
   let lastProgressMs = Date.now();
   let batch: Record<string, unknown>[] = [];
+  const reclassifiedCols: string[] = [];
 
   for await (const row of rowsFromFile(source, mapping, opts)) {
     batch.push(row);
     if (batch.length >= BATCH_SIZE) {
-      await flushBatch(conn, schema, stage, mapping, batch, true);
+      await flushBatch(conn, schema, stage, mapping, batch, true, reclassifiedCols);
       total += batch.length;
       batch = [];
       const now = Date.now();
@@ -193,8 +228,13 @@ export async function importUploadPg(
       }
     }
   }
-  await flushBatch(conn, schema, stage, mapping, batch, true);
+  await flushBatch(conn, schema, stage, mapping, batch, true, reclassifiedCols);
   total += batch.length;
+
+  if (reclassifiedCols.length) {
+    console.warn("[importUploadPg] colunas reclassificadas BIGINT→NVARCHAR por overflow 64-bit: %s upload=%s",
+      reclassifiedCols.join(", "), uploadId);
+  }
 
   // Índice em _cw_rh para upserts/deltas futuros
   await conn.execute(`CREATE INDEX ON ${qStaging} ("_cw_rh")`);
