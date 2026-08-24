@@ -29,7 +29,7 @@ services:
     environment:
       CATWORLD_UPLOAD_DIR: /data/uploads
       CATWORLD_WORKER_ID: worker-sync
-      CATWORLD_WORKER_JOB_TYPES: "SOURCE_REFRESH"
+      CATWORLD_WORKER_JOB_TYPES: "SOURCE_REFRESH,DERIVED_REFRESH"
     volumes:
       - uploads:/data/uploads
     restart: unless-stopped
