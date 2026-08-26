@@ -1,6 +1,6 @@
 "use client";
-import { useEffect, useState } from "react";
-import { CheckCircle2, Trash2, RefreshCw } from "lucide-react";
+import { useEffect, useState, useCallback } from "react";
+import { CheckCircle2, Trash2, RefreshCw, Clock, AlertCircle } from "lucide-react";
 import { PageHeader, Panel } from "@/components/ui/primitives";
 
 type Settings = {
@@ -8,6 +8,20 @@ type Settings = {
   audit_events_days: number;
   uploads_days: number;
   dataset_versions_keep: number;
+};
+
+type CleanupRun = {
+  id: string;
+  started_at: string;
+  finished_at: string | null;
+  duration_ms: number | null;
+  deleted_jobs: number;
+  deleted_audit: number;
+  deleted_uploads: number;
+  deleted_files: number;
+  deleted_orphans: number;
+  deleted_versions: number;
+  error: string | null;
 };
 
 function NumberField({
@@ -50,19 +64,82 @@ function NumberField({
   );
 }
 
+function fmtDate(iso: string) {
+  return new Date(iso).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" });
+}
+
+function fmtDuration(ms: number | null) {
+  if (!ms) return "—";
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+function RunRow({ run }: { run: CleanupRun }) {
+  const failed = !!run.error;
+  const running = !run.finished_at && !run.error;
+  const total = run.deleted_jobs + run.deleted_audit + run.deleted_uploads + run.deleted_versions;
+
+  return (
+    <tr className="text-xs">
+      <td className="py-2 pr-4 whitespace-nowrap text-base-content/70">
+        {fmtDate(run.started_at)}
+      </td>
+      <td className="py-2 pr-4">
+        {running ? (
+          <span className="badge badge-sm badge-warning badge-soft">rodando</span>
+        ) : failed ? (
+          <span className="badge badge-sm badge-error badge-soft flex items-center gap-1">
+            <AlertCircle size={10} /> erro
+          </span>
+        ) : (
+          <span className="badge badge-sm badge-success badge-soft">ok</span>
+        )}
+      </td>
+      <td className="py-2 pr-4 text-base-content/60">{fmtDuration(run.duration_ms)}</td>
+      <td className="py-2 pr-4 tabular-nums">
+        {failed ? (
+          <span className="text-error text-xs truncate max-w-[200px] block" title={run.error ?? ""}>
+            {run.error}
+          </span>
+        ) : (
+          <span className="text-base-content/80">
+            {total > 0 ? `${total} linhas` : "nada"}
+          </span>
+        )}
+      </td>
+      <td className="py-2 text-base-content/50 text-right tabular-nums">
+        {!failed && (
+          <span title={`jobs=${run.deleted_jobs} audit=${run.deleted_audit} uploads=${run.deleted_uploads} arquivos=${run.deleted_files} órfãos=${run.deleted_orphans} versões=${run.deleted_versions}`}>
+            j{run.deleted_jobs} · a{run.deleted_audit} · u{run.deleted_uploads} · v{run.deleted_versions}
+          </span>
+        )}
+      </td>
+    </tr>
+  );
+}
+
 export default function RetentionPage() {
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [history, setHistory] = useState<CleanupRun[]>([]);
   const [saved, setSaved] = useState(false);
   const [saving, setSaving] = useState(false);
   const [purging, setPurging] = useState(false);
   const [purgeOk, setPurgeOk] = useState(false);
   const [error, setError] = useState("");
 
+  const loadHistory = useCallback(() => {
+    fetch("/api/v1/settings/retention/history")
+      .then((r) => r.json())
+      .then((b) => Array.isArray(b.data) && setHistory(b.data))
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     fetch("/api/v1/settings/retention")
       .then((r) => r.json())
       .then((b) => setSettings(b.data));
-  }, []);
+    loadHistory();
+  }, [loadHistory]);
 
   function set(k: keyof Settings, v: number) {
     setSettings((s) => s ? { ...s, [k]: v } : s);
@@ -97,6 +174,7 @@ export default function RetentionPage() {
       setError(b.error?.message ?? "Falha ao enfileirar purga");
     } else {
       setPurgeOk(true);
+      setTimeout(loadHistory, 1500);
     }
   }
 
@@ -188,6 +266,38 @@ export default function RetentionPage() {
         </div>
       </form>
 
+      {/* Histórico de execuções */}
+      <Panel>
+        <div className="p-5 space-y-3">
+          <div className="flex items-center justify-between">
+            <h2 className="font-semibold text-sm text-base-content/70 uppercase tracking-wide">Histórico de limpeza</h2>
+            <button type="button" onClick={loadHistory} className="btn btn-ghost btn-xs">
+              <RefreshCw size={12} /> Atualizar
+            </button>
+          </div>
+          {history.length === 0 ? (
+            <p className="text-sm text-base-content/50 py-4 text-center">Nenhuma execução registrada ainda.</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead>
+                  <tr className="text-xs text-base-content/50 border-b border-base-200">
+                    <th className="pb-2 pr-4 text-left font-medium">Início</th>
+                    <th className="pb-2 pr-4 text-left font-medium">Status</th>
+                    <th className="pb-2 pr-4 text-left font-medium">Duração</th>
+                    <th className="pb-2 pr-4 text-left font-medium">Resultado</th>
+                    <th className="pb-2 text-right font-medium">Detalhes</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-base-200">
+                  {history.map((run) => <RunRow key={run.id} run={run} />)}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </Panel>
+
       <Panel>
         <div className="p-5 space-y-2">
           <h2 className="font-semibold text-sm text-base-content/70 uppercase tracking-wide">Como funciona</h2>
@@ -196,6 +306,7 @@ export default function RetentionPage() {
             <li>Use "Purgar agora" para forçar a limpeza imediatamente (enfileira um job).</li>
             <li>Dados de datasets (tabelas SQL Server) nunca são afetados — apenas metadados internos.</li>
             <li>A janela de retenção conta a partir de <code className="font-mono text-xs">created_at</code> de cada registro.</li>
+            <li>Os detalhes de cada execução ficam no histórico: <code className="font-mono text-xs">j=jobs · a=audit · u=uploads · v=versões</code>.</li>
           </ul>
         </div>
       </Panel>

@@ -356,3 +356,19 @@ model SystemSetting {
 
   @@map("cw_system_settings")
 }
+
+model CleanupRun {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  startedAt       DateTime  @default(now()) @map("started_at") @db.Timestamptz(3)
+  finishedAt      DateTime? @map("finished_at") @db.Timestamptz(3)
+  durationMs      Int?      @map("duration_ms")
+  deletedJobs     Int       @default(0) @map("deleted_jobs")
+  deletedAudit    Int       @default(0) @map("deleted_audit")
+  deletedUploads  Int       @default(0) @map("deleted_uploads")
+  deletedFiles    Int       @default(0) @map("deleted_files")
+  deletedOrphans  Int       @default(0) @map("deleted_orphans")
+  deletedVersions Int       @default(0) @map("deleted_versions")
+  error           String?   @db.Text
+
+  @@map("cw_cleanup_runs")
+}

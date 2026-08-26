@@ -11,12 +11,16 @@ export async function POST(r: NextRequest) {
     const actor = await resolveActor(r);
     requireRole(actor, ["ADMIN"]);
 
-    await prisma.$executeRawUnsafe(
+    // INSERT atômico — evita duplicar se já há um QUEUED/RUNNING
+    const inserted = await prisma.$executeRawUnsafe(
       `INSERT INTO cw_jobs (id, type, status, payload_json, attempts, max_attempts, weight, available_at, created_at, updated_at)
-       VALUES (gen_random_uuid(), 'METADATA_CLEANUP', 'QUEUED', NULL, 0, 1, 0, NOW(), NOW(), NOW())`,
+       SELECT gen_random_uuid(), 'METADATA_CLEANUP', 'QUEUED', NULL, 0, 1, 0, NOW(), NOW(), NOW()
+       WHERE NOT EXISTS (
+         SELECT 1 FROM cw_jobs WHERE type = 'METADATA_CLEANUP' AND status IN ('QUEUED', 'RUNNING')
+       )`,
     );
 
-    return ok({ queued: true });
+    return ok({ queued: inserted > 0 });
   } catch (e) {
     return handleApiError(e);
   }

@@ -70,117 +70,176 @@ async function convertLegacy(path: string, dir: string) {
 }
 
 async function runMetadataCleanup() {
-  // Lê configurações de retenção do Postgres via SQL direto (evita dependência do Prisma client gerado)
-  const rows = await prisma.$queryRawUnsafe<{ key: string; value: string }[]>(
-    `SELECT key, value FROM cw_system_settings WHERE key = ANY($1::text[])`,
-    ["retention.jobs_days", "retention.audit_events_days", "retention.uploads_days", "retention.dataset_versions_keep"],
-  );
-  const cfg = Object.fromEntries(rows.map((r) => [r.key, Number(r.value)]));
-  const jobsDays            = cfg["retention.jobs_days"]             ?? 30;
-  const auditDays           = cfg["retention.audit_events_days"]     ?? 30;
-  const uploadsDays         = cfg["retention.uploads_days"]          ?? 30;
-  const versionsKeep        = cfg["retention.dataset_versions_keep"] ?? 10;
+  const t0 = Date.now();
 
-  const deletedJobs = await prisma.$executeRawUnsafe(
-    `DELETE FROM cw_jobs WHERE status IN ('COMPLETED','FAILED') AND created_at < NOW() - ($1 || ' days')::INTERVAL`,
-    String(jobsDays),
+  // Registra o início da execução e obtém o ID para atualizar ao final
+  const runRow = await prisma.$queryRawUnsafe<{ id: string }[]>(
+    `INSERT INTO cw_cleanup_runs (started_at) VALUES (NOW()) RETURNING id`,
   );
+  const runId = runRow[0]?.id;
 
-  const deletedAudit = await prisma.$executeRawUnsafe(
-    `DELETE FROM cw_audit_events WHERE created_at < NOW() - ($1 || ' days')::INTERVAL`,
-    String(auditDays),
-  );
-
-  // Fetch blobNames before deleting so we can clean up the files on disk.
-  const expiredUploads = await prisma.$queryRawUnsafe<{ blob_name: string }[]>(
-    `SELECT blob_name FROM cw_uploads WHERE status IN ('COMPLETED','FAILED','CANCELLED') AND created_at < NOW() - ($1 || ' days')::INTERVAL`,
-    String(uploadsDays),
-  );
-  const deletedUploads = await prisma.$executeRawUnsafe(
-    `DELETE FROM cw_uploads WHERE status IN ('COMPLETED','FAILED','CANCELLED') AND created_at < NOW() - ($1 || ' days')::INTERVAL`,
-    String(uploadsDays),
-  );
-  // Best-effort: delete files after the DB rows are gone so a partial failure on disk
-  // doesn't block the next cleanup run from retrying.
-  let deletedFiles = 0;
-  for (const { blob_name } of expiredUploads) {
-    await deleteFile(blob_name).catch(() => {});
-    deletedFiles++;
-  }
-
-  // Orphan sweep: find files on disk that have no matching cw_uploads row.
-  // blobName is stored as a relative path (e.g. "uploads/2026-08-23/uuid.csv"),
-  // so we walk the directory recursively and compare relative paths against the DB.
-  // Only touch files older than uploadsDays to avoid racing with active uploads.
-  let orphanFiles = 0;
   try {
-    const uploadDir = env().CATWORLD_UPLOAD_DIR;
-    const { readdir, stat, unlink } = await import("node:fs/promises");
-    const { resolve, relative } = await import("node:path");
-    const cutoff = Date.now() - uploadsDays * 24 * 60 * 60 * 1000;
+    // Lê configurações de retenção do Postgres via SQL direto (evita dependência do Prisma client gerado)
+    const rows = await prisma.$queryRawUnsafe<{ key: string; value: string }[]>(
+      `SELECT key, value FROM cw_system_settings WHERE key = ANY($1::text[])`,
+      ["retention.jobs_days", "retention.audit_events_days", "retention.uploads_days", "retention.dataset_versions_keep"],
+    );
+    const cfg = Object.fromEntries(rows.map((r) => [r.key, Number(r.value)]));
+    const jobsDays     = cfg["retention.jobs_days"]             ?? 30;
+    const auditDays    = cfg["retention.audit_events_days"]     ?? 30;
+    const uploadsDays  = cfg["retention.uploads_days"]          ?? 30;
+    const versionsKeep = cfg["retention.dataset_versions_keep"] ?? 10;
 
-    // Recursive walk — returns paths relative to uploadDir
-    async function walkDir(dir: string): Promise<string[]> {
-      const entries = await readdir(dir, { withFileTypes: true });
-      const results: string[] = [];
-      for (const entry of entries) {
-        const abs = resolve(dir, entry.name);
-        if (entry.isDirectory()) {
-          results.push(...await walkDir(abs));
-        } else if (entry.isFile()) {
-          const s = await stat(abs).catch(() => null);
-          if (s && s.mtimeMs < cutoff) results.push(relative(uploadDir, abs));
-        }
-      }
-      return results;
+    const deletedJobs = await prisma.$executeRawUnsafe(
+      `DELETE FROM cw_jobs WHERE status IN ('COMPLETED','FAILED') AND created_at < NOW() - ($1 || ' days')::INTERVAL`,
+      String(jobsDays),
+    );
+
+    const deletedAudit = await prisma.$executeRawUnsafe(
+      `DELETE FROM cw_audit_events WHERE created_at < NOW() - ($1 || ' days')::INTERVAL`,
+      String(auditDays),
+    );
+
+    // Fetch blobNames before deleting so we can clean up the files on disk.
+    const expiredUploads = await prisma.$queryRawUnsafe<{ blob_name: string }[]>(
+      `SELECT blob_name FROM cw_uploads WHERE status IN ('COMPLETED','FAILED','CANCELLED') AND created_at < NOW() - ($1 || ' days')::INTERVAL`,
+      String(uploadsDays),
+    );
+    const deletedUploads = await prisma.$executeRawUnsafe(
+      `DELETE FROM cw_uploads WHERE status IN ('COMPLETED','FAILED','CANCELLED') AND created_at < NOW() - ($1 || ' days')::INTERVAL`,
+      String(uploadsDays),
+    );
+    // Best-effort: delete files after the DB rows are gone so a partial failure on disk
+    // doesn't block the next cleanup run from retrying.
+    let deletedFiles = 0;
+    for (const { blob_name } of expiredUploads) {
+      await deleteFile(blob_name).catch(() => {});
+      deletedFiles++;
     }
 
-    const candidates = await walkDir(uploadDir);
-    if (candidates.length > 0) {
-      // Build an IN list to avoid ANY($1::text[]) array serialization issues.
-      // Chunk to avoid hitting pg parameter limits on very large directories.
+    // Orphan sweep: find files on disk that have no matching cw_uploads row.
+    // blobName is stored as a relative path (e.g. "uploads/2026-08-23/uuid.csv"),
+    // so we walk the directory recursively and compare relative paths against the DB.
+    // Only touch files older than uploadsDays to avoid racing with active uploads.
+    // Files are processed in chunks to avoid accumulating all paths in memory at once.
+    let orphanFiles = 0;
+    try {
+      const uploadDir = env().CATWORLD_UPLOAD_DIR;
+      const { readdir, stat, unlink } = await import("node:fs/promises");
+      const { resolve, relative } = await import("node:path");
+      const cutoff = Date.now() - uploadsDays * 24 * 60 * 60 * 1000;
       const CHUNK = 500;
-      const knownSet = new Set<string>();
-      for (let i = 0; i < candidates.length; i += CHUNK) {
-        const chunk = candidates.slice(i, i + CHUNK);
+      let chunkBuf: string[] = [];
+
+      // Streaming walk — processes each file in chunks without accumulating all paths
+      async function walkAndProcess(dir: string): Promise<void> {
+        const entries = await readdir(dir, { withFileTypes: true });
+        for (const entry of entries) {
+          const abs = resolve(dir, entry.name);
+          if (entry.isDirectory()) {
+            await walkAndProcess(abs);
+          } else if (entry.isFile()) {
+            const s = await stat(abs).catch(() => null);
+            if (!s || s.mtimeMs >= cutoff) continue;
+            chunkBuf.push(relative(uploadDir, abs));
+            if (chunkBuf.length >= CHUNK) {
+              orphanFiles += await deleteOrphansChunk(chunkBuf, uploadDir);
+              chunkBuf = [];
+            }
+          }
+        }
+      }
+
+      async function deleteOrphansChunk(chunk: string[], baseDir: string): Promise<number> {
         const placeholders = chunk.map((_, j) => `$${j + 1}`).join(",");
-        const rows = await prisma.$queryRawUnsafe<{ blob_name: string }[]>(
+        const knownRows = await prisma.$queryRawUnsafe<{ blob_name: string }[]>(
           `SELECT blob_name FROM cw_uploads WHERE blob_name IN (${placeholders})`,
           ...chunk,
         );
-        for (const r of rows) knownSet.add(r.blob_name);
-      }
-      for (const rel of candidates) {
-        if (!knownSet.has(rel)) {
-          await unlink(resolve(uploadDir, rel)).catch(() => {});
-          orphanFiles++;
+        const known = new Set(knownRows.map(r => r.blob_name));
+        let count = 0;
+        for (const rel of chunk) {
+          if (!known.has(rel)) {
+            await unlink(resolve(baseDir, rel)).catch(() => {});
+            count++;
+          }
         }
+        return count;
       }
+
+      await walkAndProcess(uploadDir);
+      // flush remaining
+      if (chunkBuf.length > 0) {
+        orphanFiles += await deleteOrphansChunk(chunkBuf, uploadDir);
+      }
+    } catch { /* best-effort — don't let orphan sweep fail the whole cleanup */ }
+
+    // Para dataset_versions: mantém apenas os últimos N por table_id
+    const deletedVersions = await prisma.$executeRawUnsafe(
+      `DELETE FROM cw_dataset_versions
+       WHERE id IN (
+         SELECT id FROM (
+           SELECT id, ROW_NUMBER() OVER (PARTITION BY table_id ORDER BY created_at DESC) AS rn
+           FROM cw_dataset_versions
+         ) ranked
+         WHERE rn > $1
+       )`,
+      versionsKeep,
+    );
+
+    const durationMs = Date.now() - t0;
+    console.log(
+      "[METADATA_CLEANUP] jobs=%d audit_events=%d uploads=%d (files=%d orphans=%d) dataset_versions=%d duration=%dms",
+      deletedJobs, deletedAudit, deletedUploads, deletedFiles, orphanFiles, deletedVersions, durationMs,
+    );
+
+    // Persiste resultado e atualiza timestamp do último cleanup
+    if (runId) {
+      await prisma.$executeRawUnsafe(
+        `UPDATE cw_cleanup_runs
+         SET finished_at=NOW(), duration_ms=$2,
+             deleted_jobs=$3, deleted_audit=$4, deleted_uploads=$5,
+             deleted_files=$6, deleted_orphans=$7, deleted_versions=$8
+         WHERE id=$1`,
+        runId,
+        durationMs,
+        Number(deletedJobs),
+        Number(deletedAudit),
+        Number(deletedUploads),
+        deletedFiles,
+        orphanFiles,
+        Number(deletedVersions),
+      );
     }
-  } catch { /* best-effort — don't let orphan sweep fail the whole cleanup */ }
-
-  // Para dataset_versions: mantém apenas os últimos N por table_id
-  const deletedVersions = await prisma.$executeRawUnsafe(
-    `DELETE FROM cw_dataset_versions
-     WHERE id IN (
-       SELECT id FROM (
-         SELECT id, ROW_NUMBER() OVER (PARTITION BY table_id ORDER BY created_at DESC) AS rn
-         FROM cw_dataset_versions
-       ) ranked
-       WHERE rn > $1
-     )`,
-    versionsKeep,
-  );
-
-  console.log(
-    "[METADATA_CLEANUP] jobs=%d audit_events=%d uploads=%d (files=%d orphans=%d) dataset_versions=%d",
-    deletedJobs, deletedAudit, deletedUploads, deletedFiles, orphanFiles, deletedVersions,
-  );
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO cw_system_settings (key, value, updated_at) VALUES ('cleanup.last_run_at', NOW()::text, NOW())
+       ON CONFLICT (key) DO UPDATE SET value = NOW()::text, updated_at = NOW()`,
+    );
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (runId) {
+      await prisma.$executeRawUnsafe(
+        `UPDATE cw_cleanup_runs SET finished_at=NOW(), duration_ms=$2, error=$3 WHERE id=$1`,
+        runId, Date.now() - t0, msg,
+      ).catch(() => {});
+    }
+    throw e;
+  }
 }
 
 async function work(job: Claimed) {
   if (job.type === "METADATA_CLEANUP") {
-    await runMetadataCleanup();
+    const hb = setInterval(
+      () => prisma.job.update({ where: { id: job.id }, data: { heartbeatAt: new Date() } }).catch(
+        (e) => console.warn("[heartbeat] falhou job=%s: %s", job.id, e instanceof Error ? e.message : e)
+      ),
+      15000,
+    );
+    try {
+      await runMetadataCleanup();
+    } finally {
+      clearInterval(hb);
+    }
     await prisma.job.update({ where: { id: job.id }, data: { status: "COMPLETED", lockedAt: null, lockedBy: null, heartbeatAt: null, lastError: null } });
     return;
   }
@@ -478,7 +537,12 @@ async function loop(concurrencyId: number) {
     try {
       await work(job);
     } catch (e) {
-      await fail(job, e);
+      try {
+        await fail(job, e);
+      } catch (fe) {
+        // fail() pode lançar se o DB estiver fora. Loga mas não deixa o loop morrer.
+        console.error("[worker] fail() lançou (DB indisponível?): %s", fe instanceof Error ? fe.message : fe);
+      }
     }
   }
 }
@@ -509,25 +573,25 @@ async function main() {
   const handlesDerivedRefresh = !allowedTypes || allowedTypes.includes("DERIVED_REFRESH");
   const handlesCleanup = !allowedTypes || allowedTypes.includes("METADATA_CLEANUP");
 
-  // Enqueue one METADATA_CLEANUP per day if none is queued/running
+  // Enqueue one METADATA_CLEANUP per day if none is queued/running.
+  // Usa cw_system_settings para rastrear o último cleanup — não cw_jobs, que se auto-deleta.
+  // O INSERT é atômico (WHERE NOT EXISTS) para evitar race condition com múltiplos workers.
   async function scheduleCleanupIfNeeded() {
     if (!handlesCleanup) return;
-    const existing = await prisma.job.findFirst({
-      where: { type: "METADATA_CLEANUP", status: { in: ["QUEUED", "RUNNING"] } },
-    });
-    if (existing) return;
-    const last = await prisma.job.findFirst({
-      where: { type: "METADATA_CLEANUP", status: "COMPLETED" },
-      orderBy: { createdAt: "desc" },
-    });
+    const settingRows = await prisma.$queryRawUnsafe<{ value: string }[]>(
+      `SELECT value FROM cw_system_settings WHERE key = 'cleanup.last_run_at'`,
+    );
+    const lastRunAt = settingRows[0] ? new Date(settingRows[0].value).getTime() : 0;
     const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
-    if (!last || last.createdAt.getTime() < dayAgo) {
-      await prisma.$executeRawUnsafe(
-        `INSERT INTO cw_jobs (id, type, status, payload_json, attempts, max_attempts, weight, available_at, created_at, updated_at)
-         VALUES (gen_random_uuid(), 'METADATA_CLEANUP', 'QUEUED', NULL, 0, 1, 0, NOW(), NOW(), NOW())`,
-      );
-      console.log("[worker] METADATA_CLEANUP agendado");
-    }
+    if (lastRunAt > dayAgo) return; // cleanup recente, não precisa agendar
+    const inserted = await prisma.$executeRawUnsafe(
+      `INSERT INTO cw_jobs (id, type, status, payload_json, attempts, max_attempts, weight, available_at, created_at, updated_at)
+       SELECT gen_random_uuid(), 'METADATA_CLEANUP', 'QUEUED', NULL, 0, 1, 0, NOW(), NOW(), NOW()
+       WHERE NOT EXISTS (
+         SELECT 1 FROM cw_jobs WHERE type = 'METADATA_CLEANUP' AND status IN ('QUEUED', 'RUNNING')
+       )`,
+    );
+    if (inserted > 0) console.log("[worker] METADATA_CLEANUP agendado");
   }
 
   let lastRecovery = 0;
