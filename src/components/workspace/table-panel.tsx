@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { Cable, Columns3, DatabaseZap, Download, FileSpreadsheet, FileText, RefreshCw, Rows3, Trash2, TriangleAlert } from "lucide-react";
+import { Cable, Columns3, DatabaseZap, Download, FileText, RefreshCw, Rows3, Trash2, TriangleAlert } from "lucide-react";
 import { StatusBadge } from "@/components/ui/primitives";
 import { UploadFlow } from "./upload-flow";
 import { fmtCellStr } from "@/lib/fmt-cell";
@@ -51,44 +51,23 @@ function DeleteTableDialog({ id, name, onDeleted }: { id: string; name: string; 
   );
 }
 
-function ExportMenu({ tableId, tableName, tab }: { tableId: string; tableName: string; tab: "data" | "columns" }) {
-  const [loading, setLoading] = useState<string | null>(null);
-
-  async function doExport(format: "csv" | "xlsx", what: "data" | "columns") {
-    const key = `${what}-${format}`;
-    setLoading(key);
-    try {
-      const url = `/api/v1/tables/${tableId}/export?format=${format}&what=${what}`;
-      const res = await fetch(url);
-      if (!res.ok) { const body = await res.json().catch(() => ({})); alert(body.error?.message ?? "Falha ao exportar"); return; }
-      const blob = await res.blob();
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = res.headers.get("content-disposition")?.match(/filename="([^"]+)"/)?.[1] ?? `${tableName}.${format}`;
-      a.click();
-      URL.revokeObjectURL(a.href);
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "Falha de rede ao exportar");
-    } finally {
-      setLoading(null);
-    }
+function ExportMenu({ tableId, tab }: { tableId: string; tab: "data" | "columns" }) {
+  function downloadUrl(what: "data" | "columns") {
+    return `/api/v1/tables/${tableId}/export?what=${what}`;
   }
 
-  const busy = loading !== null;
   return (
     <div className="dropdown dropdown-end">
-      <button tabIndex={0} disabled={busy} className="btn btn-outline btn-sm gap-1">
-        {busy ? <span className="loading loading-spinner loading-xs" /> : <Download size={14} />}
+      <button tabIndex={0} className="btn btn-outline btn-sm gap-1">
+        <Download size={14} />
         Exportar
       </button>
       <ul tabIndex={0} className="dropdown-content menu rounded-box z-50 mt-1 w-52 border border-base-300 bg-base-100 p-1 shadow-lg text-sm">
         {tab === "data" && <>
-          <li><button onClick={() => doExport("csv", "data")} disabled={busy}><FileText size={14} />Dados — CSV</button></li>
-          <li><button onClick={() => doExport("xlsx", "data")} disabled={busy}><FileSpreadsheet size={14} />Dados — Excel (.xlsx)</button></li>
+          <li><a href={downloadUrl("data")}><FileText size={14} />Dados — CSV</a></li>
           <li className="divider my-0.5" />
         </>}
-        <li><button onClick={() => doExport("csv", "columns")} disabled={busy}><FileText size={14} />Colunas — CSV</button></li>
-        <li><button onClick={() => doExport("xlsx", "columns")} disabled={busy}><FileSpreadsheet size={14} />Colunas — Excel (.xlsx)</button></li>
+        <li><a href={downloadUrl("columns")}><FileText size={14} />Colunas — CSV</a></li>
       </ul>
     </div>
   );
@@ -137,7 +116,7 @@ export function TablePanel({ datasetId, table, onChanged, compact }: { datasetId
         {notice && <div className="alert alert-success alert-soft m-3 text-xs p-2">{notice}</div>}
         {(error || table.source?.lastError) && <div className="alert alert-error alert-soft m-3 text-xs p-2">{error || table.source?.lastError}</div>}
         <div className="flex items-center justify-end px-3 py-1.5 border-b border-base-300">
-          <ExportMenu tableId={table.id} tableName={table.name} tab={tab} />
+          <ExportMenu tableId={table.id} tab={tab} />
         </div>
         <div className="flex-1 overflow-auto">
           {loading ? (
@@ -164,7 +143,7 @@ export function TablePanel({ datasetId, table, onChanged, compact }: { datasetId
           <p className="text-xs text-base-content/45">{table.source?.mode === "live" ? "Dados consultados na origem" : `${Number(table.rowCount).toLocaleString("pt-BR")} linhas`} · {table.columns.length} colunas{table.lastDataAt ? ` · atualizado ${new Date(table.lastDataAt).toLocaleString("pt-BR")}` : ""}</p>
           {table.source && <div className="mt-3 rounded-box border border-base-300 bg-base-200/40 p-3 text-xs"><div className="flex flex-wrap items-center gap-2"><span className="badge badge-outline gap-1">{table.source.mode === "live" ? <Cable size={12} /> : <DatabaseZap size={12} />}{sourceMode(table.source)}</span><StatusBadge status={sourceStatus(table.source.lastStatus)} label={table.source.lastStatus ?? "Pronta"} /><span className="text-base-content/60">{table.source.connection.name}</span></div><div className="mt-2 text-base-content/60">Origem: {table.source.sourceKind === "table" ? `${table.source.sourceSchema}.${table.source.sourceTable}` : "consulta personalizada"}{table.source.nextRefreshAt ? ` · próxima ${new Date(table.source.nextRefreshAt).toLocaleString("pt-BR")}` : ""}</div></div>}
         </div>
-        <div className="flex flex-wrap justify-end gap-2"><ExportMenu tableId={table.id} tableName={table.name} tab={tab} />{table.source?.mode === "extract" ? <button onClick={refreshSource} disabled={refreshing} className="btn btn-outline btn-sm"><RefreshCw size={14} className={refreshing ? "animate-spin" : ""} />{refreshing ? "Enfileirando..." : "Atualizar agora"}</button> : <UpdateDataDialog datasetId={datasetId} table={table} onComplete={onChanged} />}<DeleteTableDialog id={table.id} name={table.name} onDeleted={onChanged} /></div>
+        <div className="flex flex-wrap justify-end gap-2"><ExportMenu tableId={table.id} tab={tab} />{table.source?.mode === "extract" ? <button onClick={refreshSource} disabled={refreshing} className="btn btn-outline btn-sm"><RefreshCw size={14} className={refreshing ? "animate-spin" : ""} />{refreshing ? "Enfileirando..." : "Atualizar agora"}</button> : <UpdateDataDialog datasetId={datasetId} table={table} onComplete={onChanged} />}<DeleteTableDialog id={table.id} name={table.name} onDeleted={onChanged} /></div>
       </div>
       {notice && <div className="alert alert-success alert-soft m-4">{notice}</div>}
       {(error || table.source?.lastError) && <div className="alert alert-error alert-soft m-4">{error || table.source?.lastError}</div>}
