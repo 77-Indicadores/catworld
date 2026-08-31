@@ -3,6 +3,8 @@ import { resolveActor } from "@/server/auth/actor";
 import { syncActorGrants } from "@/server/auth/sync-grants";
 import { executeReadOnly } from "@/server/azure/sql";
 import { withPg, quotedPgTable, type PgConnection } from "@/server/connections/postgres";
+import { getStorageConnection } from "@/server/storage/connection";
+import type { PgStorageConnection } from "@/server/storage/pg-storage";
 import { ApiError, handleApiError } from "@/server/http";
 import { prisma } from "@/server/db";
 import { hashToken } from "@/server/security/crypto";
@@ -417,40 +419,79 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       if (cachedPage) {
         Object.assign(response, cachedPage);
       } else {
-        const colList = cols.map((c) => `[${c.sqlName}]`).join(", ");
-        const dataSql  = `SELECT ${colList}, ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS [_row_number] FROM [${dataset.schemaName}].[${table.sqlName}] ORDER BY (SELECT NULL) OFFSET ${skip} ROWS FETCH NEXT ${top} ROWS ONLY`;
-        const countSql = `SELECT COUNT(*) AS [cnt] FROM [${dataset.schemaName}].[${table.sqlName}]`;
-
-        const cachedCount = getCachedCount(countCacheKey);
-        const [result, countResult] = await withODataSemaphore(() => Promise.all([
-          executeReadOnly(actor.principal, dataSql, 120, top, [dataset.schemaName], 0, 120, dataset.storageServerId),
-          needCount && cachedCount === null
-            ? executeReadOnly(actor.principal, countSql, 30, 1, [dataset.schemaName], 0, 120, dataset.storageServerId)
-            : Promise.resolve(null),
-        ]));
-
         const typeMap = new Map(cols.map((c) => [c.sqlName, c.sqlType.toUpperCase().replace(/\(.*\)/, "").trim()]));
-        response["value"] = result.rows.map((row) => normalizeRow(row as Record<string, unknown>, typeMap));
-        if (needCount) {
-          const cnt = cachedCount ?? Number((countResult!.rows[0] as Record<string, unknown>)?.cnt ?? 0);
-          setCachedCount(countCacheKey, cnt);
-          response["@odata.count"] = String(cnt);
-        }
-        if (result.rows.length === top) {
-          const next = new URL(`${baseUrl}/${table.sqlName}`);
-          next.searchParams.set("$top", String(top));
-          next.searchParams.set("$skip", String(skip + top));
-          if (selectParam) next.searchParams.set("$select", selectParam);
-          if (needCount) next.searchParams.set("$count", "true");
-          response["@odata.nextLink"] = appendApiKey(next, apiKey);
-        }
+        let dataRowsLength = 0;
+        const setNextLink = () => {
+          if (dataRowsLength === top) {
+            const next = new URL(`${baseUrl}/${table.sqlName}`);
+            next.searchParams.set("$top", String(top));
+            next.searchParams.set("$skip", String(skip + top));
+            if (selectParam) next.searchParams.set("$select", selectParam);
+            if (needCount) next.searchParams.set("$count", "true");
+            response["@odata.nextLink"] = appendApiKey(next, apiKey);
+          }
+        };
+        const cacheBuilt = () => {
+          const pageCachePayload: Record<string, unknown> = {};
+          if (response["value"] !== undefined) pageCachePayload["value"] = response["value"];
+          if (response["@odata.count"] !== undefined) pageCachePayload["@odata.count"] = response["@odata.count"];
+          if (response["@odata.nextLink"] !== undefined) pageCachePayload["@odata.nextLink"] = response["@odata.nextLink"];
+          setPageCache(pageCacheKey, pageCachePayload);
+        };
 
-        // Cacheia a resposta construída (só campos de dados, não @odata.context que já foi definido)
-        const pageCachePayload: Record<string, unknown> = {};
-        if (response["value"] !== undefined) pageCachePayload["value"] = response["value"];
-        if (response["@odata.count"] !== undefined) pageCachePayload["@odata.count"] = response["@odata.count"];
-        if (response["@odata.nextLink"] !== undefined) pageCachePayload["@odata.nextLink"] = response["@odata.nextLink"];
-        setPageCache(pageCacheKey, pageCachePayload);
+        const q = (n: string) => `"${n.replaceAll('"', '""')}"`;
+        const conn = await getStorageConnection(dataset.storageServerId);
+
+        // ── Storage PostgreSQL ──────────────────────────────────────────────
+        if (conn.provider === "postgres") {
+          const pgConn = conn as PgStorageConnection;
+          const colList = cols.map((c) => q(c.sqlName)).join(", ");
+          const fromExpr = `${q(dataset.schemaName)}.${q(table.sqlName)}`;
+          const dataSql = `SELECT ${colList} FROM ${fromExpr} OFFSET ${skip} LIMIT ${top}`;
+          const countSql = `SELECT COUNT(*) AS cnt FROM ${fromExpr}`;
+
+          const cachedCount = getCachedCount(countCacheKey);
+          const [dataRows, countResult] = await withODataSemaphore(() => Promise.all([
+            pgConn.query<Record<string, unknown>>(dataSql),
+            needCount && cachedCount === null
+              ? pgConn.query<{ cnt: string }>(countSql)
+              : Promise.resolve([]),
+          ]));
+
+          response["value"] = dataRows.map((row, i) => ({ ...normalizeRow(row, typeMap), _row_number: String(skip + i + 1) }));
+          if (needCount) {
+            const cnt = cachedCount ?? Number(countResult[0]?.cnt ?? 0);
+            setCachedCount(countCacheKey, cnt);
+            response["@odata.count"] = String(cnt);
+          }
+          dataRowsLength = dataRows.length;
+          setNextLink();
+          cacheBuilt();
+
+        // ── Storage MSSQL ───────────────────────────────────────────────────
+        } else {
+          const colList = cols.map((c) => `[${c.sqlName}]`).join(", ");
+          const dataSql  = `SELECT ${colList}, ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS [_row_number] FROM [${dataset.schemaName}].[${table.sqlName}] ORDER BY (SELECT NULL) OFFSET ${skip} ROWS FETCH NEXT ${top} ROWS ONLY`;
+          const countSql = `SELECT COUNT(*) AS [cnt] FROM [${dataset.schemaName}].[${table.sqlName}]`;
+
+          const cachedCount = getCachedCount(countCacheKey);
+          const [result, countResult] = await withODataSemaphore(() => Promise.all([
+            executeReadOnly(actor.principal, dataSql, 120, top, [dataset.schemaName], 0, 120, dataset.storageServerId),
+            needCount && cachedCount === null
+              ? executeReadOnly(actor.principal, countSql, 30, 1, [dataset.schemaName], 0, 120, dataset.storageServerId)
+              : Promise.resolve(null),
+          ]));
+
+          response["value"] = result.rows.map((row) => normalizeRow(row as Record<string, unknown>, typeMap));
+          if (needCount) {
+            const cnt = cachedCount ?? Number((countResult!.rows[0] as Record<string, unknown>)?.cnt ?? 0);
+            setCachedCount(countCacheKey, cnt);
+            response["@odata.count"] = String(cnt);
+          }
+          dataRowsLength = result.rows.length;
+          setNextLink();
+          cacheBuilt();
+        }
       }
     }
 
