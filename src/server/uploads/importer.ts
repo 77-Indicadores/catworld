@@ -633,12 +633,15 @@ async function assertCompatible(request: sql.Request, schema: string, table: str
 
 function physicalTypeMatches(row: { type_name: string; precision?: number; scale?: number }, expected: string) {
   const type = row.type_name.toLowerCase();
-  if (expected === "BIGINT") return type === "bigint";
-  if (expected.startsWith("DECIMAL")) return type === "decimal" && Number(row.precision) === 18 && Number(row.scale) === 4;
-  if (expected === "DATE") return type === "date";
-  if (expected === "DATETIME2") return type === "datetime2";
+  // Numeric compatibility: BIGINT ↔ decimal/numeric/int/smallint/tinyint/bigint
+  if (expected === "BIGINT") return ["bigint", "int", "smallint", "tinyint", "decimal", "numeric"].includes(type);
+  // DECIMAL from file may land on decimal/numeric/int family in table
+  if (expected.startsWith("DECIMAL")) return ["decimal", "numeric", "bigint", "int", "smallint", "tinyint"].includes(type);
+  // Date compatibility: DATE and DATETIME2 are interchangeable for append
+  if (expected === "DATE" || expected === "DATETIME2") return ["date", "datetime2", "datetime", "smalldatetime"].includes(type);
   if (expected === "TIME") return type === "time";
-  return type === "nvarchar";
+  // NVARCHAR covers nvarchar, varchar, char, nchar, text
+  return ["nvarchar", "varchar", "char", "nchar", "text"].includes(type);
 }
 
 export function convert(v: unknown, type: string) {
