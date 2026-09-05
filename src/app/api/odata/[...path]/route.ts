@@ -10,21 +10,22 @@ import { prisma } from "@/server/db";
 import { hashToken } from "@/server/security/crypto";
 import { env } from "@/server/env";
 import type { Actor } from "@/server/auth/actor";
+import { TtlCache } from "@/server/cache/ttl-cache";
 
 // ── Caches em memória ─────────────────────────────────────────────────────────
+// Todos os caches abaixo usam TtlCache: TTL + limite de tamanho + varredura
+// periódica ativa, para não crescerem sem limite num processo de vida longa
+// (já causou OOM em produção quando eram Map cru sem eviction — ver
+// git blame / incidente de heap exhaustion no serviço web).
 
 const DATASET_CACHE_TTL = 60_000;
 const TOKEN_CACHE_TTL   = 60_000;
 const COUNT_CACHE_TTL   = 300_000; // 5 min — count não muda entre páginas de um mesmo refresh
 const DEFAULT_TOP       = 5_000;   // Power BI pagina em blocos — 5k reduz de ~52 req para ~11
 
-type CachedDataset = { dataset: Dataset; expiresAt: number };
-type CachedToken   = { actor: Actor; expiresAt: number };
-type CachedCount   = { count: number; expiresAt: number };
-
-const datasetCache = new Map<string, CachedDataset>();
-const tokenCache   = new Map<string, CachedToken>();
-const countCache   = new Map<string, CachedCount>();
+const datasetCache = new TtlCache<string, Dataset>(DATASET_CACHE_TTL, 500);
+const tokenCache   = new TtlCache<string, Actor>(TOKEN_CACHE_TTL, 500);
+const countCache   = new TtlCache<string, number>(COUNT_CACHE_TTL, 2_000);
 
 // ── Semáforo OData ────────────────────────────────────────────────────────────
 // Limita consultas DB simultâneas (MSSQL + PG) para não saturar o pool de leitura.
@@ -51,34 +52,22 @@ async function withODataSemaphore<T>(fn: () => Promise<T>): Promise<T> {
 // TTL curto (30 s) garante que dados publicados aparecem rapidamente.
 // Chave inclui top/skip/select — páginas diferentes nunca colidem.
 const PAGE_CACHE_TTL = 30_000; // 30 s
-const PAGE_CACHE_MAX = 200;    // entradas máximas (LRU simples via Map.keys() ordering)
+const PAGE_CACHE_MAX = 200;    // entradas máximas
 
-type CachedPage = { response: Record<string, unknown>; expiresAt: number };
-const pageCache  = new Map<string, CachedPage>();
+const pageCache = new TtlCache<string, Record<string, unknown>>(PAGE_CACHE_TTL, PAGE_CACHE_MAX);
 
 function getPageCache(key: string): Record<string, unknown> | null {
-  const entry = pageCache.get(key);
-  if (!entry || Date.now() >= entry.expiresAt) { pageCache.delete(key); return null; }
-  // LRU: re-insert para atualizar posição de evicção
-  pageCache.delete(key);
-  pageCache.set(key, entry);
-  return entry.response;
+  return pageCache.get(key);
 }
 
 function setPageCache(key: string, response: Record<string, unknown>) {
-  if (pageCache.size >= PAGE_CACHE_MAX) {
-    const first = pageCache.keys().next().value;
-    if (first !== undefined) pageCache.delete(first);
-  }
-  pageCache.set(key, { response, expiresAt: Date.now() + PAGE_CACHE_TTL });
+  pageCache.set(key, response);
 }
 
 /** Invalida todas as entradas de cache de uma tabela específica (chamado após upload/sync). */
 export function invalidateODataPageCache(projectSlug: string, datasetSlug: string, tableSqlName?: string) {
   const prefix = `${projectSlug}/${datasetSlug}/${tableSqlName ?? ""}`;
-  for (const key of pageCache.keys()) {
-    if (key.startsWith(prefix)) pageCache.delete(key);
-  }
+  pageCache.deleteWhere((key) => key.startsWith(prefix));
 }
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
@@ -102,10 +91,9 @@ async function resolveODataActor(request: NextRequest): Promise<Actor> {
 
 async function resolveApiToken(raw: string): Promise<Actor> {
   const hash = hashToken(raw);
-  const now = Date.now();
 
   const cached = tokenCache.get(hash);
-  if (cached && now < cached.expiresAt) return cached.actor;
+  if (cached) return cached;
 
   const token = await prisma.apiToken.findUnique({ where: { tokenHash: hash } });
   if (!token?.active || (token.expiresAt && token.expiresAt <= new Date())) {
@@ -113,7 +101,7 @@ async function resolveApiToken(raw: string): Promise<Actor> {
   }
 
   const actor: Actor = { type: "token", id: token.id, role: "TOKEN", principal: `cw_t_${token.id.replaceAll("-", "").slice(0, 24)}` };
-  tokenCache.set(hash, { actor, expiresAt: now + TOKEN_CACHE_TTL });
+  tokenCache.set(hash, actor);
 
   // lastUsedAt fire-and-forget — não bloqueia a request
   prisma.apiToken.update({ where: { id: token.id }, data: { lastUsedAt: new Date() } }).catch(() => undefined);
@@ -158,9 +146,8 @@ type Dataset   = { id: string; schemaName: string; storageServerId: string | nul
 
 async function loadDataset(projectSlug: string, datasetSlug: string): Promise<Dataset> {
   const cacheKey = `${projectSlug}/${datasetSlug}`;
-  const now = Date.now();
   const cached = datasetCache.get(cacheKey);
-  if (cached && now < cached.expiresAt) return cached.dataset;
+  if (cached) return cached;
 
   const project = await prisma.project.findFirst({ where: { slug: projectSlug, active: true } });
   if (!project) throw new ApiError(404, "NOT_FOUND", "Projeto não encontrado");
@@ -202,7 +189,7 @@ async function loadDataset(projectSlug: string, datasetSlug: string): Promise<Da
   });
 
   const result: Dataset = { id: dataset.id, schemaName: dataset.schemaName, storageServerId: dataset.storageServerId, tables };
-  datasetCache.set(cacheKey, { dataset: result, expiresAt: now + DATASET_CACHE_TTL });
+  datasetCache.set(cacheKey, result);
   return result;
 }
 
@@ -237,13 +224,11 @@ function normalizeRow(row: Record<string, unknown>, typeMap: Map<string, string>
 // ── Cache de COUNT ────────────────────────────────────────────────────────────
 
 function getCachedCount(key: string): number | null {
-  const entry = countCache.get(key);
-  if (!entry || Date.now() >= entry.expiresAt) return null;
-  return entry.count;
+  return countCache.get(key);
 }
 
 function setCachedCount(key: string, count: number) {
-  countCache.set(key, { count, expiresAt: Date.now() + COUNT_CACHE_TTL });
+  countCache.set(key, count);
 }
 
 // ── Query live ────────────────────────────────────────────────────────────────
