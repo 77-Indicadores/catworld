@@ -20,10 +20,16 @@ export const confirmUploadSchema = z.object({
   deltaToDelete: z.array(z.string().regex(/^[0-9a-f]{32}$/, "Hash inválido")).optional(),
 });
 
-const SMALL_CSV_THRESHOLD = 1_048_576; // 1 MB — TDS path, no Azure SQL INSERT SELECT
+const SMALL_CSV_THRESHOLD = 1_048_576;       // 1 MB — TDS path, no Azure SQL INSERT SELECT
+const LARGE_FILE_THRESHOLD = 50 * 1_048_576; // 50 MB — parse em memoria (DuckDB) fica pesado
+                                              // independente do modo; um replace de 200MB+ nao
+                                              // pode furar o limite de heavy jobs so por nao usar
+                                              // staging (ja causou OOM com varios em paralelo)
 
 function importWeight(sizeBytes: bigint, mode: string): number {
-  if (Number(sizeBytes) <= SMALL_CSV_THRESHOLD) return 1;
+  const size = Number(sizeBytes);
+  if (size <= SMALL_CSV_THRESHOLD) return 1;
+  if (size > LARGE_FILE_THRESHOLD) return 2; // arquivo grande: parse em memoria pesado, qualquer modo
   if (mode === "replace") return 1; // direct BULK INSERT to target, no INSERT SELECT
   return 2; // deltaReplace / append / upsert → staging + INSERT SELECT on Azure SQL
 }
