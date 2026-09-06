@@ -35,12 +35,18 @@ function importWeight(sizeBytes: bigint, mode: string): number {
 }
 
 export async function queuePreviewUpload(id: string) {
+  // PREVIEW_UPLOAD tambem pode ser pesado: XLSX e sempre lido inteiro em memoria
+  // (ExcelJS Workbook, sem streaming) e CSV grande passa pelo DuckDB em memoria —
+  // mesmo custo do IMPORT_UPLOAD. Sem isso, previews de arquivos grandes furavam
+  // o limite de heavy jobs (weight sempre 0) e rodavam todos em paralelo.
+  const upload = await prisma.upload.findUniqueOrThrow({ where: { id }, select: { sizeBytes: true } });
+  const weight = Number(upload.sizeBytes) > LARGE_FILE_THRESHOLD ? 2 : 0;
   const [, job] = await prisma.$transaction([
     prisma.upload.update({
       where: { id },
       data: { status: "QUEUED_PREVIEW", progress: 5, errorMessage: null },
     }),
-    prisma.job.create({ data: { type: "PREVIEW_UPLOAD", uploadId: id, weight: 0 } }),
+    prisma.job.create({ data: { type: "PREVIEW_UPLOAD", uploadId: id, weight } }),
   ]);
   return job;
 }
