@@ -45,8 +45,17 @@ export async function POST(r: NextRequest) {
     if (input.sizeBytes > env().CATWORLD_UPLOAD_MAX_BYTES) {
       throw new ApiError(413, "FILE_TOO_LARGE", "Arquivo excede o limite configurado");
     }
-    if (![".csv", ".xlsx", ".xls"].includes(extname(input.filename).toLowerCase())) {
+    const ext = extname(input.filename).toLowerCase();
+    if (![".csv", ".xlsx", ".xls"].includes(ext)) {
       throw new ApiError(400, "UNSUPPORTED_FORMAT", "Use CSV, XLSX ou XLS");
+    }
+    // XLSX/XLS sao lidos inteiros em memoria (ExcelJS, sem streaming) tanto no preview
+    // quanto no import — um arquivo grande pode estourar a memoria do worker sozinho,
+    // mesmo com o limite de concorrencia de heavy jobs. CSV nao tem essa restricao
+    // (100% streamed via DuckDB/csv-parse).
+    if ((ext === ".xlsx" || ext === ".xls") && input.sizeBytes > env().CATWORLD_XLSX_MAX_BYTES) {
+      const maxMb = Math.round(env().CATWORLD_XLSX_MAX_BYTES / (1024 * 1024));
+      throw new ApiError(413, "XLSX_TOO_LARGE", `Arquivos XLSX/XLS acima de ${maxMb}MB nao sao suportados (lidos inteiros em memoria) — exporte como CSV.`);
     }
 
     const blobName = `uploads/${new Date().toISOString().slice(0, 10)}/${randomUUID()}${extname(input.filename).toLowerCase()}`;

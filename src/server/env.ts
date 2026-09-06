@@ -9,6 +9,10 @@ const schema = z.object({
   CATWORLD_WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(20).default(1),
   CATWORLD_JOB_POLL_MS: z.coerce.number().int().positive().default(2000),
   CATWORLD_UPLOAD_MAX_BYTES: z.coerce.number().int().positive().default(500 * 1024 * 1024),
+  // XLSX e sempre lido inteiro em memoria (ExcelJS Workbook, sem streaming — ver nota em
+  // parser.ts sobre o bug do WorkbookReader streaming). Limite bem mais baixo que o CSV
+  // (que e 100% streamed via DuckDB/csv-parse) pra conter o risco de OOM.
+  CATWORLD_XLSX_MAX_BYTES: z.coerce.number().int().positive().default(100 * 1024 * 1024),
   // Pausa entre batches de import (ms). Reduz pico de DTU sem mudar throughput médio.
   // 0 = máxima velocidade; 200-500 = modo gentil (recomendado para S0/S1)
   CATWORLD_IMPORT_BATCH_DELAY_MS: z.coerce.number().int().min(0).default(200),

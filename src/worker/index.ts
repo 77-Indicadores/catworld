@@ -10,7 +10,7 @@ import { env } from "@/server/env";
 import { previewFile, type FilePreview } from "@/server/uploads/parser";
 import { importUpload } from "@/server/uploads/importer";
 import { queueImportUploadAuto } from "@/server/uploads/actions";
-import { enqueueDueSourceRefreshes, refreshDatasetSource } from "@/server/connections/sources";
+import { enqueueDueSourceRefreshes, refreshDatasetSource, nextRefreshFromCron } from "@/server/connections/sources";
 import { enqueueDueDerivedRefreshes, refreshDerivedTable } from "@/server/connections/derived";
 
 type Claimed = { id: string; type: string; upload_id: string | null; payload_json: string | null; attempts: number; max_attempts: number; weight: number };
@@ -366,8 +366,8 @@ async function fail(job: Claimed, error: unknown) {
     } catch { /* ignore */ }
   }
 
-  const sourceFailureUpdate = sourceRefreshFailureUpdate(job, message, retry);
-  const derivedFailureUpdate = derivedRefreshFailureUpdate(job, message, retry);
+  const sourceFailureUpdate = await sourceRefreshFailureUpdate(job, message, retry);
+  const derivedFailureUpdate = await derivedRefreshFailureUpdate(job, message, retry);
 
   await prisma.$transaction([
     prisma.job.update({
@@ -401,7 +401,12 @@ async function fail(job: Claimed, error: unknown) {
   if (error instanceof Error && sqlError.number) console.error("[FAIL] sqlNumber=%d sqlState=%s", sqlError.number, sqlError.state ?? "");
 }
 
-function sourceRefreshFailureUpdate(job: Claimed, message: string, retry: boolean) {
+// Em falha final (retry=false), nextRefreshAt precisa avancar pro proximo horario do
+// cron — senao a fonte/tabela derivada fica "due" pra sempre e enqueueDue* a
+// recoloca na fila a cada poll do worker, gerando um retry-loop infinito (ja
+// aconteceu em producao: tabela derivada com SQL quebrado sendo re-tentada a
+// cada ~1min por dias). Em retry (ainda ha tentativas), nextRefreshAt fica intacto.
+async function sourceRefreshFailureUpdate(job: Claimed, message: string, retry: boolean) {
   if (job.type !== "SOURCE_REFRESH") return null;
   let payload: { datasetSourceId?: string };
   try {
@@ -410,17 +415,24 @@ function sourceRefreshFailureUpdate(job: Claimed, message: string, retry: boolea
     return null;
   }
   if (!payload.datasetSourceId) return null;
+  let nextRefreshAt: Date | null | undefined;
+  if (retry) {
+    nextRefreshAt = undefined;
+  } else {
+    const source = await prisma.datasetSource.findUnique({ where: { id: payload.datasetSourceId }, select: { refreshCron: true } });
+    nextRefreshAt = nextRefreshFromCron(source?.refreshCron);
+  }
   return prisma.datasetSource.updateMany({
     where: { id: payload.datasetSourceId },
     data: {
       lastStatus: retry ? "queued" : "failed",
       lastError: message,
-      nextRefreshAt: retry ? undefined : new Date(),
+      nextRefreshAt,
     },
   });
 }
 
-function derivedRefreshFailureUpdate(job: Claimed, message: string, retry: boolean) {
+async function derivedRefreshFailureUpdate(job: Claimed, message: string, retry: boolean) {
   if (job.type !== "DERIVED_REFRESH") return null;
   let payload: { derivedTableId?: string };
   try {
@@ -429,11 +441,19 @@ function derivedRefreshFailureUpdate(job: Claimed, message: string, retry: boole
     return null;
   }
   if (!payload.derivedTableId) return null;
+  let nextRefreshAt: Date | null | undefined;
+  if (retry) {
+    nextRefreshAt = undefined;
+  } else {
+    const dt = await prisma.derivedTable.findUnique({ where: { id: payload.derivedTableId }, select: { refreshCron: true } });
+    nextRefreshAt = nextRefreshFromCron(dt?.refreshCron);
+  }
   return prisma.derivedTable.updateMany({
     where: { id: payload.derivedTableId },
     data: {
       lastStatus: retry ? "queued" : "failed",
       lastError: message,
+      nextRefreshAt,
     },
   });
 }

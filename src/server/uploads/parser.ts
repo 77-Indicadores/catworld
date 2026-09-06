@@ -56,6 +56,14 @@ async function previewCsv(path:string){
  return{columns,rows:objects,rowCount:count,encoding,separator,sheetNames:[]};
 }
 
+// P6: ExcelJS.stream.xlsx.WorkbookReader (streaming) foi tentado aqui pra evitar
+// carregar o XLSX inteiro em memoria, mas a lib tem um bug de ordenacao interna
+// (_parseWorksheet acessa this.model.sheets antes de xl/workbook.xml terminar de
+// parsear, dependendo da ordem das entries do zip) que quebra em arquivos gerados
+// pelo proprio ExcelJS — reproduzido em teste com um .xlsx trivial. Carregamento
+// bufferizado (Workbook API) mantido; arquivos grandes devem usar CSV (rota
+// totalmente streamed via DuckDB) — ver CATWORLD_XLSX_MAX_BYTES (env.ts),
+// validado em app/api/v1/uploads/route.ts.
 async function previewXlsx(path:string){
  const workbook=new ExcelJS.Workbook();await workbook.xlsx.readFile(path);const sheet=workbook.worksheets[0];if(!sheet)throw new Error("Planilha sem abas");
  let headers:string[]=[],stats:ColumnStats[]=[];let sampleRows:string[][]=[];let count=0;
@@ -210,6 +218,9 @@ export async function* rowsFromFile(
   if(stats){stats.parseMethod="xlsx";stats.fileEncoding="xlsx"}
   const t0=Date.now();
   if(typeof source==="string"){
+   // Bufferizado (ExcelJS.Workbook) — ver nota em previewXlsx sobre o bug de
+   // ordenacao do WorkbookReader streaming. Tamanho maximo de XLSX e limitado
+   // em outra camada (actions.ts) pra conter o risco de memoria.
    const workbook=new ExcelJS.Workbook();await workbook.xlsx.readFile(source);const sheet=workbook.worksheets[0];if(!sheet)return;
    let header=true,columnIndices:number[]=columns.map((_,i)=>i);
    for(const row of sheet.getRows(1,sheet.rowCount)??[]){
