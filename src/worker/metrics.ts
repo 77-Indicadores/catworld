@@ -48,6 +48,29 @@ export type JobMetricInput = {
   workerLabel: string;
 };
 
+/**
+ * Camada 2 — pulsação geral do worker (independente de qualquer job específico),
+ * gravada em cw_system_settings. Consumida por scripts/worker-healthcheck.mjs
+ * (HEALTHCHECK do Docker) pra reiniciar o container sozinho se o processo travar.
+ *
+ * Diferente do heartbeat por job (que só bate enquanto aquele job roda), esta
+ * função é chamada do loop de recovery, que roda o tempo todo — inclusive
+ * quando o worker está ocioso ou algum job individual está travado. Se o
+ * processo inteiro travar de verdade (não só um job), essa pulsação também para.
+ */
+export async function writeWorkerLiveness(workerId: string): Promise<void> {
+  try {
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO cw_system_settings (key, value, updated_at)
+       VALUES ($1, NOW()::text, NOW())
+       ON CONFLICT (key) DO UPDATE SET value = NOW()::text, updated_at = NOW()`,
+      `worker.liveness.${workerId}`,
+    );
+  } catch (e) {
+    console.warn("[liveness] falhou: %s", e instanceof Error ? e.message : e);
+  }
+}
+
 /** Nunca lança — auditoria não pode derrubar o processamento do job. */
 export async function recordJobMetric(m: JobMetricInput): Promise<void> {
   try {

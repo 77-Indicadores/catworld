@@ -21,6 +21,15 @@ services:
     volumes:
       - uploads:/data/uploads
     restart: unless-stopped
+    # Camada 2 (auditoria): le a pulsacao geral que o worker grava no banco a
+    # cada ~15s (independente de job especifico — ver src/worker/metrics.ts).
+    # Se travar de verdade (nao so um job), o Coolify reinicia sozinho.
+    healthcheck:
+      test: ["CMD", "node", "scripts/worker-healthcheck.mjs"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
 
   worker-sync:
     build: .
@@ -33,6 +42,12 @@ services:
     volumes:
       - uploads:/data/uploads
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "scripts/worker-healthcheck.mjs"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
 
 volumes:
   uploads:

@@ -13,7 +13,7 @@ import { importUpload } from "@/server/uploads/importer";
 import { queueImportUploadAuto } from "@/server/uploads/actions";
 import { enqueueDueSourceRefreshes, refreshDatasetSource, nextRefreshFromCron } from "@/server/connections/sources";
 import { enqueueDueDerivedRefreshes, refreshDerivedTable } from "@/server/connections/derived";
-import { startHeartbeat, currentRssMb, recordJobMetric } from "./metrics";
+import { startHeartbeat, currentRssMb, recordJobMetric, writeWorkerLiveness } from "./metrics";
 
 // Camada 1 (auditoria): o processo do worker (tsx src/worker/index.ts) roda fora
 // do ciclo de vida do Next.js — instrumentation.ts (que inicializa o Sentry pro
@@ -639,8 +639,16 @@ async function main() {
   }
 
   let lastRecovery = 0;
+  let lastLiveness = 0;
+  const workerId = env().CATWORLD_WORKER_ID;
   const recoveryLoop = async () => {
     while (!stopping) {
+      // Camada 2: pulsação geral do worker — roda independente de qualquer job
+      // específico, consumida pelo HEALTHCHECK do Docker (ver scripts/worker-healthcheck.mjs).
+      if (Date.now() - lastLiveness > 15000) {
+        await writeWorkerLiveness(workerId);
+        lastLiveness = Date.now();
+      }
       if (Date.now() - lastRecovery > 60000) {
         try {
           await recoverStale();
