@@ -315,6 +315,9 @@ model Job {
   lockedAt    DateTime? @map("locked_at") @db.Timestamp(3)
   lockedBy    String?   @map("locked_by") @db.VarChar(120)
   heartbeatAt DateTime? @map("heartbeat_at") @db.Timestamp(3)
+  /// RSS (MB) do processo worker na ultima pulsacao — se o job morrer no meio,
+  /// essa e a ultima leitura de memoria antes do processo travar/crashar.
+  heartbeatRssMb Int?   @map("heartbeat_rss_mb")
   weight      Int       @default(0) @db.SmallInt
   lastError   String?   @map("last_error") @db.Text
   createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamp(3)
@@ -323,6 +326,27 @@ model Job {
 
   @@index([status, availableAt])
   @@map("cw_jobs")
+}
+
+/// Auditoria de custo por job — sobrevive a limpeza de cw_jobs (METADATA_CLEANUP
+/// apaga jobs antigos; esta tabela fica pra analise historica de memoria/duracao).
+model JobMetric {
+  id            String   @id @default(uuid()) @db.Uuid
+  jobId         String   @map("job_id") @db.Uuid
+  jobType       String   @map("job_type") @db.VarChar(50)
+  status        String   @db.VarChar(20)
+  weight        Int      @db.SmallInt
+  fileSizeBytes BigInt?  @map("file_size_bytes")
+  rssBeforeMb   Int?     @map("rss_before_mb")
+  rssAfterMb    Int?     @map("rss_after_mb")
+  durationMs    Int?     @map("duration_ms")
+  errorMessage  String?  @map("error_message") @db.Text
+  workerLabel   String?  @map("worker_label") @db.VarChar(120)
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamp(3)
+
+  @@index([createdAt])
+  @@index([jobType, createdAt])
+  @@map("cw_job_metrics")
 }
 
 model StorageServer {

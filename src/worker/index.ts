@@ -4,6 +4,7 @@ import { hostname, tmpdir } from "node:os";
 import { basename, extname, join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { spawn } from "node:child_process";
+import * as Sentry from "@sentry/node";
 import { prisma } from "@/server/db";
 import { downloadFile, deleteFile } from "@/server/storage";
 import { env } from "@/server/env";
@@ -12,6 +13,20 @@ import { importUpload } from "@/server/uploads/importer";
 import { queueImportUploadAuto } from "@/server/uploads/actions";
 import { enqueueDueSourceRefreshes, refreshDatasetSource, nextRefreshFromCron } from "@/server/connections/sources";
 import { enqueueDueDerivedRefreshes, refreshDerivedTable } from "@/server/connections/derived";
+import { startHeartbeat, currentRssMb, recordJobMetric } from "./metrics";
+
+// Camada 1 (auditoria): o processo do worker (tsx src/worker/index.ts) roda fora
+// do ciclo de vida do Next.js — instrumentation.ts (que inicializa o Sentry pro
+// processo "web") nunca é carregado aqui, entao ate agora o worker nao tinha
+// captura de erro nenhuma. Mesmo DSN do sentry.server.config.ts.
+Sentry.init({
+  dsn: "https://43a7acb9f1f89e58168a8e79567281cb@o4511632763191296.ingest.us.sentry.io/4511667797622784",
+  tracesSampleRate: 0.1,
+  enableLogs: true,
+  serverName: `${env().CATWORLD_WORKER_ID}@${hostname()}`,
+});
+process.on("uncaughtException", (e) => { Sentry.captureException(e); console.error("[worker] uncaughtException:", e); });
+process.on("unhandledRejection", (e) => { Sentry.captureException(e); console.error("[worker] unhandledRejection:", e); });
 
 type Claimed = { id: string; type: string; upload_id: string | null; payload_json: string | null; attempts: number; max_attempts: number; weight: number };
 
@@ -229,12 +244,7 @@ async function runMetadataCleanup() {
 
 async function work(job: Claimed) {
   if (job.type === "METADATA_CLEANUP") {
-    const hb = setInterval(
-      () => prisma.job.update({ where: { id: job.id }, data: { heartbeatAt: new Date() } }).catch(
-        (e) => console.warn("[heartbeat] falhou job=%s: %s", job.id, e instanceof Error ? e.message : e)
-      ),
-      15000,
-    );
+    const hb = startHeartbeat(job.id);
     try {
       await runMetadataCleanup();
     } finally {
@@ -247,12 +257,7 @@ async function work(job: Claimed) {
   if (job.type === "SOURCE_REFRESH") {
     const payload = JSON.parse(job.payload_json ?? "{}") as { datasetSourceId?: string };
     if (!payload.datasetSourceId) throw new Error("SOURCE_REFRESH sem datasetSourceId");
-    const hb = setInterval(
-      () => prisma.job.update({ where: { id: job.id }, data: { heartbeatAt: new Date() } }).catch(
-        (e) => console.warn("[heartbeat] falhou job=%s: %s", job.id, e instanceof Error ? e.message : e)
-      ),
-      15000,
-    );
+    const hb = startHeartbeat(job.id);
     try {
       await refreshDatasetSource(payload.datasetSourceId);
     } finally {
@@ -265,12 +270,7 @@ async function work(job: Claimed) {
   if (job.type === "DERIVED_REFRESH") {
     const payload = JSON.parse(job.payload_json ?? "{}") as { derivedTableId?: string };
     if (!payload.derivedTableId) throw new Error("DERIVED_REFRESH sem derivedTableId");
-    const hb = setInterval(
-      () => prisma.job.update({ where: { id: job.id }, data: { heartbeatAt: new Date() } }).catch(
-        (e) => console.warn("[heartbeat] falhou job=%s: %s", job.id, e instanceof Error ? e.message : e)
-      ),
-      15000,
-    );
+    const hb = startHeartbeat(job.id);
     try {
       await refreshDerivedTable(payload.derivedTableId);
     } finally {
@@ -305,12 +305,7 @@ async function work(job: Claimed) {
     }
   }
 
-  const heartbeat = setInterval(
-    () => prisma.job.update({ where: { id: job.id }, data: { heartbeatAt: new Date() } }).catch(
-      (e) => console.warn("[heartbeat] falhou job=%s: %s", job.id, e instanceof Error ? e.message : e)
-    ),
-    15000,
-  );
+  const heartbeat = startHeartbeat(job.id);
 
   try {
     if (job.type === "PREVIEW_UPLOAD") {
@@ -563,9 +558,29 @@ async function loop(concurrencyId: number) {
       await new Promise(r => setTimeout(r, env().CATWORLD_JOB_POLL_MS));
       continue;
     }
+    // Camada 1 (auditoria) — nao influencia nenhuma decisao de agendamento,
+    // so grava custo real por job em cw_job_metrics.
+    const rssBefore = currentRssMb();
+    const t0 = Date.now();
+    let fileSizeBytes: bigint | null = null;
+    if (job.upload_id) {
+      fileSizeBytes = await prisma.upload.findUnique({ where: { id: job.upload_id }, select: { sizeBytes: true } })
+        .then(u => u?.sizeBytes ?? null).catch(() => null);
+    }
     try {
       await work(job);
+      await recordJobMetric({
+        jobId: job.id, jobType: job.type, status: "COMPLETED", weight: job.weight,
+        fileSizeBytes, rssBeforeMb: rssBefore, rssAfterMb: currentRssMb(),
+        durationMs: Date.now() - t0, workerLabel,
+      });
     } catch (e) {
+      await recordJobMetric({
+        jobId: job.id, jobType: job.type, status: "FAILED", weight: job.weight,
+        fileSizeBytes, rssBeforeMb: rssBefore, rssAfterMb: currentRssMb(),
+        durationMs: Date.now() - t0, workerLabel,
+        errorMessage: e instanceof Error ? e.message : String(e),
+      });
       try {
         await fail(job, e);
       } catch (fe) {
