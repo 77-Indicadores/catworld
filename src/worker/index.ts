@@ -366,8 +366,9 @@ async function fail(job: Claimed, error: unknown) {
     } catch { /* ignore */ }
   }
 
-  const sourceFailureUpdate = await sourceRefreshFailureUpdate(job, message, retry);
-  const derivedFailureUpdate = await derivedRefreshFailureUpdate(job, message, retry);
+  const nextRefreshAt = await nextRefreshAtOnFailure(job, retry);
+  const sourceFailureUpdate = sourceRefreshFailureUpdate(job, message, retry, nextRefreshAt);
+  const derivedFailureUpdate = derivedRefreshFailureUpdate(job, message, retry, nextRefreshAt);
 
   await prisma.$transaction([
     prisma.job.update({
@@ -406,7 +407,29 @@ async function fail(job: Claimed, error: unknown) {
 // recoloca na fila a cada poll do worker, gerando um retry-loop infinito (ja
 // aconteceu em producao: tabela derivada com SQL quebrado sendo re-tentada a
 // cada ~1min por dias). Em retry (ainda ha tentativas), nextRefreshAt fica intacto.
-async function sourceRefreshFailureUpdate(job: Claimed, message: string, retry: boolean) {
+// Continuam sincronas (so retornam o PrismaPromise, sem await interno) para nao
+// quebrar a inferencia de overload de prisma.$transaction([...]) mais abaixo —
+// quem precisa buscar o refreshCron faz isso antes, em nextRefreshAtOnFailure.
+async function nextRefreshAtOnFailure(job: Claimed, retry: boolean): Promise<Date | null | undefined> {
+  if (retry) return undefined;
+  try {
+    if (job.type === "SOURCE_REFRESH") {
+      const { datasetSourceId } = JSON.parse(job.payload_json ?? "{}") as { datasetSourceId?: string };
+      if (!datasetSourceId) return undefined;
+      const source = await prisma.datasetSource.findUnique({ where: { id: datasetSourceId }, select: { refreshCron: true } });
+      return nextRefreshFromCron(source?.refreshCron);
+    }
+    if (job.type === "DERIVED_REFRESH") {
+      const { derivedTableId } = JSON.parse(job.payload_json ?? "{}") as { derivedTableId?: string };
+      if (!derivedTableId) return undefined;
+      const dt = await prisma.derivedTable.findUnique({ where: { id: derivedTableId }, select: { refreshCron: true } });
+      return nextRefreshFromCron(dt?.refreshCron);
+    }
+  } catch { /* payload malformado — deixa nextRefreshAt intacto */ }
+  return undefined;
+}
+
+function sourceRefreshFailureUpdate(job: Claimed, message: string, retry: boolean, nextRefreshAt: Date | null | undefined) {
   if (job.type !== "SOURCE_REFRESH") return null;
   let payload: { datasetSourceId?: string };
   try {
@@ -415,13 +438,6 @@ async function sourceRefreshFailureUpdate(job: Claimed, message: string, retry: 
     return null;
   }
   if (!payload.datasetSourceId) return null;
-  let nextRefreshAt: Date | null | undefined;
-  if (retry) {
-    nextRefreshAt = undefined;
-  } else {
-    const source = await prisma.datasetSource.findUnique({ where: { id: payload.datasetSourceId }, select: { refreshCron: true } });
-    nextRefreshAt = nextRefreshFromCron(source?.refreshCron);
-  }
   return prisma.datasetSource.updateMany({
     where: { id: payload.datasetSourceId },
     data: {
@@ -432,7 +448,7 @@ async function sourceRefreshFailureUpdate(job: Claimed, message: string, retry: 
   });
 }
 
-async function derivedRefreshFailureUpdate(job: Claimed, message: string, retry: boolean) {
+function derivedRefreshFailureUpdate(job: Claimed, message: string, retry: boolean, nextRefreshAt: Date | null | undefined) {
   if (job.type !== "DERIVED_REFRESH") return null;
   let payload: { derivedTableId?: string };
   try {
@@ -441,13 +457,6 @@ async function derivedRefreshFailureUpdate(job: Claimed, message: string, retry:
     return null;
   }
   if (!payload.derivedTableId) return null;
-  let nextRefreshAt: Date | null | undefined;
-  if (retry) {
-    nextRefreshAt = undefined;
-  } else {
-    const dt = await prisma.derivedTable.findUnique({ where: { id: payload.derivedTableId }, select: { refreshCron: true } });
-    nextRefreshAt = nextRefreshFromCron(dt?.refreshCron);
-  }
   return prisma.derivedTable.updateMany({
     where: { id: payload.derivedTableId },
     data: {

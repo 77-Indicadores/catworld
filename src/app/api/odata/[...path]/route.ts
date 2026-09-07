@@ -11,6 +11,7 @@ import { hashToken } from "@/server/security/crypto";
 import { env } from "@/server/env";
 import type { Actor } from "@/server/auth/actor";
 import { TtlCache } from "@/server/cache/ttl-cache";
+import { getPageCache, setPageCache } from "@/server/cache/odata-page-cache";
 
 // ── Caches em memória ─────────────────────────────────────────────────────────
 // Todos os caches abaixo usam TtlCache: TTL + limite de tamanho + varredura
@@ -48,27 +49,10 @@ async function withODataSemaphore<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 // ── Cache de páginas OData ────────────────────────────────────────────────────
-// Reduz carga no banco para consultas repetitivas (ex: Power BI, SDK paginando mesmas páginas).
-// TTL curto (30 s) garante que dados publicados aparecem rapidamente.
-// Chave inclui top/skip/select — páginas diferentes nunca colidem.
-const PAGE_CACHE_TTL = 30_000; // 30 s
-const PAGE_CACHE_MAX = 200;    // entradas máximas
-
-const pageCache = new TtlCache<string, Record<string, unknown>>(PAGE_CACHE_TTL, PAGE_CACHE_MAX);
-
-function getPageCache(key: string): Record<string, unknown> | null {
-  return pageCache.get(key);
-}
-
-function setPageCache(key: string, response: Record<string, unknown>) {
-  pageCache.set(key, response);
-}
-
-/** Invalida todas as entradas de cache de uma tabela específica (chamado após upload/sync). */
-export function invalidateODataPageCache(projectSlug: string, datasetSlug: string, tableSqlName?: string) {
-  const prefix = `${projectSlug}/${datasetSlug}/${tableSqlName ?? ""}`;
-  pageCache.deleteWhere((key) => key.startsWith(prefix));
-}
+// getPageCache/setPageCache/invalidateODataPageCache moraram aqui antes; foram
+// movidos pra @/server/cache/odata-page-cache porque route.ts do App Router só
+// pode exportar handlers HTTP — o export de invalidateODataPageCache quebrava
+// o typecheck do Next ("does not satisfy the constraint '{ [x: string]: never; }'").
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
@@ -166,7 +150,7 @@ async function loadDataset(projectSlug: string, datasetSlug: string): Promise<Da
   });
   if (!dataset) throw new ApiError(404, "NOT_FOUND", "Dataset não encontrado");
 
-  const tables: Table[] = dataset.tables.map((t) => {
+  const tables: Table[] = dataset.tables.map((t: (typeof dataset.tables)[number]) => {
     const s = t.source;
     const live: LiveSource | null = s?.mode === "live"
       ? {
