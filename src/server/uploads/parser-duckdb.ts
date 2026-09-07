@@ -12,9 +12,13 @@ import type { ParsedColumn } from "./parser";
 // One DuckDB instance per concurrent import — avoids a singleton bottleneck when
 // multiple workers run simultaneously. Each instance gets its own thread pool so
 // parallel imports don't serialize on the same DuckDB process.
+// memory_limit: teto de seguranca por instancia — sem isso, uma unica instancia
+// (ex: parseando um CSV de centenas de MB) pode tentar usar uma fatia grande da
+// RAM do host sem limite algum. Configuravel via CATWORLD_DUCKDB_MEMORY_LIMIT.
 async function getInstance(): Promise<import("@duckdb/node-api").DuckDBInstance> {
   const { DuckDBInstance } = await import("@duckdb/node-api");
-  return DuckDBInstance.create(":memory:", { threads: "2" });
+  const { env } = await import("@/server/env");
+  return DuckDBInstance.create(":memory:", { threads: "2", memory_limit: env().CATWORLD_DUCKDB_MEMORY_LIMIT });
 }
 
 export async function* rowsFromCsvDuckDB(

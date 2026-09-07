@@ -13,6 +13,10 @@ const schema = z.object({
   // parser.ts sobre o bug do WorkbookReader streaming). Limite bem mais baixo que o CSV
   // (que e 100% streamed via DuckDB/csv-parse) pra conter o risco de OOM.
   CATWORLD_XLSX_MAX_BYTES: z.coerce.number().int().positive().default(100 * 1024 * 1024),
+  // Teto de memoria por instancia DuckDB (uma instancia ":memory:" por import/preview
+  // de CSV — ver parser-duckdb.ts). Sem isso, uma instancia pode tentar usar uma fatia
+  // grande da RAM do host sem limite. Formato aceito pelo proprio DuckDB (ex: "1GB").
+  CATWORLD_DUCKDB_MEMORY_LIMIT: z.string().default("1GB"),
   // Pausa entre batches de import (ms). Reduz pico de DTU sem mudar throughput médio.
   // 0 = máxima velocidade; 200-500 = modo gentil (recomendado para S0/S1)
   CATWORLD_IMPORT_BATCH_DELAY_MS: z.coerce.number().int().min(0).default(200),
