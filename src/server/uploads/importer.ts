@@ -2,6 +2,7 @@ import * as Sentry from "@sentry/nextjs";
 import { extname } from "node:path";
 import sql from "mssql";
 import { prisma } from "@/server/db";
+import { withAdvisoryLock } from "@/server/db/advisory-lock";
 import { sqlPool } from "@/server/azure/sql";
 import { getStoragePool } from "@/server/storage/pool";
 import { getStorageConnection, type ColDef } from "@/server/storage/connection";
@@ -519,8 +520,12 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
     phaseTimings.rowsPerSecond = totalMs > 0 ? Math.round(total / (totalMs / 1000)) : null;
     console.log("[importUpload:perf]", JSON.stringify({ uploadId: upload.id, file: upload.originalFilename, rows: Number(actual), ...phaseTimings }));
 
-    // Update metadata in Postgres via Prisma (single transaction)
-    await prisma.$transaction([
+    // Update metadata in Postgres via Prisma (single transaction).
+    // Guarded by an advisory lock on table.id: concurrent uploads that target the same
+    // dataset table (e.g. parallel workers appending to the same file/table) would otherwise
+    // race between the deleteMany and createMany below, tripping the (table_id, sql_name)
+    // unique constraint on datasetColumn.
+    await withAdvisoryLock(table.id, () => prisma.$transaction([
       prisma.datasetColumn.deleteMany({ where: { tableId: table.id } }),
       prisma.datasetColumn.createMany({
         data: mapping.map((c, i) => ({
@@ -565,7 +570,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
           errorMessage: null,
         },
       }),
-    ]);
+    ]));
 
     return { tableId: table.id, inserted, updated, rowCount: actual };
   } catch (e) {

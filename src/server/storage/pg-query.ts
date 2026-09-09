@@ -6,9 +6,10 @@
  * chama translateMssqlToPg antes de executar.
  */
 
-import type { PoolClient } from "pg";
+import { Query, type PoolClient } from "pg";
 import { validateReadOnlySql } from "@/server/security/sql-safety";
 import { ApiError } from "@/server/http";
+import { MAX_RESULT_BYTES, approxRowBytes } from "@/server/query/protection";
 import { translateMssqlToPg } from "./mssql-to-pg";
 import type { PgStorageConnection } from "./pg-storage";
 
@@ -67,15 +68,57 @@ export async function executeReadOnlyPg(
       await client.query(`SET search_path TO ${searchPath}, public`);
     }
 
-    const result = await client.query(paged);
-    const rows = (result.rows as Record<string, unknown>[]).slice(0, effectiveLimit);
-    const columns = result.fields.map((f) => f.name);
+    // O LIMIT acima protege contra número de linhas, mas não contra colunas
+    // muito largas (TEXT/JSONB sem teto de tamanho) — um resultado "dentro do
+    // limite de linhas" ainda pode estourar memória na hora de ler/serializar.
+    // Usa a classe Query (EventEmitter) em vez do atalho Promise pra poder
+    // medir o tamanho linha a linha à medida que chega, e se estourar, manda
+    // cancelar a query no servidor (pg_cancel_backend numa conexão separada)
+    // — não impede 100% do tráfego já em trânsito, mas evita continuar
+    // acumulando linhas em memória e nunca chega a serializar/cachear a
+    // resposta inteira.
+    const rows: Record<string, unknown>[] = [];
+    let approxBytes = 0;
+    let tooLarge = false;
+    // processID existe em runtime (PoolClient é sempre um Client de fato),
+    // mas não está no tipo PoolClient dos typings do pg.
+    const pid = (client as unknown as { processID?: number }).processID;
+
+    const tooLargeError = () => new ApiError(
+      413,
+      "RESULT_TOO_LARGE",
+      `Resultado excede ${Math.round(MAX_RESULT_BYTES / (1024 * 1024))}MB (colunas muito largas). Selecione menos colunas, filtre mais linhas, ou use "stream": true.`,
+    );
+
+    const columns = await new Promise<string[]>((resolve, reject) => {
+      const query = new Query(paged);
+      client!.query(query);
+
+      query.on("row", (row: Record<string, unknown>) => {
+        if (tooLarge) return;
+        rows.push(row);
+        approxBytes += approxRowBytes(row);
+        if (approxBytes > MAX_RESULT_BYTES) {
+          tooLarge = true;
+          if (pid) conn._pool.query("SELECT pg_cancel_backend($1)", [pid]).catch(() => {});
+        }
+      });
+
+      // pg_cancel_backend faz a query em andamento emitir 'error' (nunca
+      // 'end') — quando tooLarge já foi setado, esse erro é esperado (é a
+      // própria query cancelada voltando) e vira o 413 correto, em vez de
+      // vazar o erro genérico de cancelamento do driver.
+      query.on("error", (err: Error) => reject(tooLarge ? tooLargeError() : err));
+      query.on("end", (result) => tooLarge ? reject(tooLargeError()) : resolve(result.fields.map((f) => f.name)));
+    });
+
+    const limitedRows = rows.slice(0, effectiveLimit);
 
     return {
       columns,
-      rows,
-      rowCount: rows.length,
-      truncated: result.rows.length > effectiveLimit,
+      rows: limitedRows,
+      rowCount: limitedRows.length,
+      truncated: rows.length > effectiveLimit,
       executionTimeMs: Date.now() - started,
     };
   } finally {

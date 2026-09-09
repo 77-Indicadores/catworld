@@ -4,6 +4,7 @@ import { getStoragePool } from "@/server/storage/pool";
 import { quoteIdentifier } from "@/server/security/naming";
 import { validateReadOnlySql } from "@/server/security/sql-safety";
 import { ApiError } from "@/server/http";
+import { MAX_RESULT_BYTES, approxRowBytes } from "@/server/query/protection";
 
 /** Returns the default storage pool (StorageServer with isDefault=true). */
 export function sqlPool(): Promise<sql.ConnectionPool> {
@@ -119,24 +120,85 @@ export async function executeReadOnly(principal: string, query: string, timeout 
   }
 
   const pool = storageServerId ? await getStoragePool(storageServerId) : await sqlPool();
-  const request = new sql.Request(pool);
   const timeoutMs = Math.min(Math.max(timeout, 1), maxTimeoutSeconds) * 1000;
-  // .timeout is a no-op in mssql v12; overrides.requestTimeout is the real field.
-  (request as unknown as { timeout: number }).timeout = timeoutMs;
-  (request as unknown as { overrides: { requestTimeout: number } }).overrides.requestTimeout = timeoutMs;
   const started = Date.now();
+
+  // Sempre pagina no SQL Server (mesmo com offset=0) — antes, offset=0 rodava
+  // a query sem LIMIT nenhum e trazia o recordset inteiro pro Node antes de
+  // truncar em JS, o que por si só já podia estourar memória numa query sem
+  // filtro. Pede limit+1 pra saber se existiam mais linhas do que o limite,
+  // sem precisar de uma segunda query só de contagem; a linha extra é
+  // descartada abaixo e nunca chega ao chamador.
+  const fetchLimit = limit + 1;
+  const hasCte = /^\s*WITH\b/i.test(statement);
+  const paged = hasTopLevelOrderBy(statement)
+    ? `${statement} OFFSET ${offset} ROWS FETCH NEXT ${fetchLimit} ROWS ONLY`
+    : hasCte
+      ? `${statement} ORDER BY (SELECT NULL) OFFSET ${offset} ROWS FETCH NEXT ${fetchLimit} ROWS ONLY`
+      : `SELECT * FROM (${statement}) AS _cw_q ORDER BY (SELECT NULL) OFFSET ${offset} ROWS FETCH NEXT ${fetchLimit} ROWS ONLY`;
+
   try {
-    const hasCte = /^\s*WITH\b/i.test(statement);
-    const paged = offset > 0
-      ? hasTopLevelOrderBy(statement)
-        ? `${statement} OFFSET ${offset} ROWS FETCH NEXT ${limit} ROWS ONLY`
-        : hasCte
-          ? `${statement} ORDER BY (SELECT NULL) OFFSET ${offset} ROWS FETCH NEXT ${limit} ROWS ONLY`
-          : `SELECT * FROM (${statement}) AS _cw_q ORDER BY (SELECT NULL) OFFSET ${offset} ROWS FETCH NEXT ${limit} ROWS ONLY`
-      : statement;
-    const result = await request.query(paged);
-    const rows = result.recordset?.slice(0, limit) ?? [];
-    return { columns: result.recordset?.columns ? Object.keys(result.recordset.columns) : Object.keys(rows[0] ?? {}), rows, rowCount: rows.length, truncated: (result.recordset?.length ?? 0) > limit, executionTimeMs: Date.now() - started };
+    return await new Promise<{ columns: string[]; rows: Record<string, unknown>[]; rowCount: number; truncated: boolean; executionTimeMs: number }>((resolve, reject) => {
+      const request = new sql.Request(pool);
+      // .timeout is a no-op in mssql v12; overrides.requestTimeout is the real field.
+      (request as unknown as { timeout: number }).timeout = timeoutMs;
+      (request as unknown as { overrides: { requestTimeout: number } }).overrides.requestTimeout = timeoutMs;
+      // Streama linha a linha em vez de acumular o recordset inteiro no driver
+      // — permite cancelar a query no MEIO da leitura quando o resultado já
+      // ficou grande demais (colunas NVARCHAR(MAX)/TEXT largas), em vez de só
+      // detectar isso tarde demais, depois que a memória já estourou.
+      request.stream = true;
+
+      let columns: string[] = [];
+      const rows: Record<string, unknown>[] = [];
+      let approxBytes = 0;
+      let tooLarge = false;
+      let settled = false;
+      const finish = (fn: () => void) => { if (!settled) { settled = true; fn(); } };
+
+      request.on("recordset", (cols: Record<string, unknown>) => {
+        columns = Object.keys(cols);
+      });
+
+      request.on("row", (row: Record<string, unknown>) => {
+        if (tooLarge) return;
+        rows.push(row);
+        approxBytes += approxRowBytes(row);
+        if (approxBytes > MAX_RESULT_BYTES) {
+          tooLarge = true;
+          request.cancel();
+        }
+      });
+
+      request.on("error", (err: Error) => {
+        finish(() => {
+          if (tooLarge) {
+            reject(new ApiError(
+              413,
+              "RESULT_TOO_LARGE",
+              `Resultado excede ${Math.round(MAX_RESULT_BYTES / (1024 * 1024))}MB (colunas muito largas). Selecione menos colunas, filtre mais linhas, ou use "stream": true.`,
+            ));
+          } else {
+            reject(err);
+          }
+        });
+      });
+
+      request.on("done", () => {
+        finish(() => {
+          const truncated = rows.length > limit;
+          resolve({
+            columns: columns.length ? columns : Object.keys(rows[0] ?? {}),
+            rows: rows.slice(0, limit),
+            rowCount: Math.min(rows.length, limit),
+            truncated,
+            executionTimeMs: Date.now() - started,
+          });
+        });
+      });
+
+      request.query(paged);
+    });
   } catch (error) {
     Sentry.addBreadcrumb({
       category: "db.query",

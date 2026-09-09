@@ -140,6 +140,12 @@ export async function POST(request: NextRequest) {
     res.headers.set("X-Cache", "MISS");
     return res;
   } catch (e) {
+    // ApiError já carrega o status/code corretos (ex: 413 RESULT_TOO_LARGE,
+    // 404 NOT_FOUND) — não reembalar como QUERY_FAILED genérico. ApiError
+    // também tem uma propriedade "code", então o `"code" in e` abaixo
+    // (pensado pra erros do driver SQL) capturava ApiError por engano e
+    // trocava o status real por 400 antes de chegar no cliente.
+    if (e instanceof ApiError) return handleApiError(e);
     if (e instanceof Error && "code" in e) {
       Sentry.captureException(e);
       return handleApiError(new ApiError(400, "QUERY_FAILED", e.message));

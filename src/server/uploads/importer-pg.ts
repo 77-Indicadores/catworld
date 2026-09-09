@@ -14,6 +14,7 @@
 import { extname } from "node:path";
 import { createHash } from "node:crypto";
 import { prisma } from "@/server/db";
+import { withAdvisoryLock } from "@/server/db/advisory-lock";
 import { sqlIdentifier } from "@/server/security/naming";
 import { previewFile, rowsFromFile, type FilePreview, type ParsedColumn, type RowsFromFileOpts } from "./parser";
 import { normalizeDateLike } from "./date-normalize";
@@ -324,7 +325,11 @@ export async function importUploadPg(
     rowsPerSecond: totalMs > 0 ? Math.round(total / (totalMs / 1000)) : null,
   }));
 
-  await prisma.$transaction([
+  // Guarded by an advisory lock on table.id: concurrent uploads that target the same
+  // dataset table (e.g. parallel workers appending to the same file/table) would otherwise
+  // race between the deleteMany and createMany below, tripping the (table_id, sql_name)
+  // unique constraint on datasetColumn.
+  await withAdvisoryLock(table.id, () => prisma.$transaction([
     prisma.datasetColumn.deleteMany({ where: { tableId: table.id } }),
     prisma.datasetColumn.createMany({
       data: mapping.map((c, i) => ({
@@ -360,7 +365,7 @@ export async function importUploadPg(
         errorMessage: null,
       },
     }),
-  ]);
+  ]));
 
   return { tableId: table.id, inserted, updated, rowCount: actual };
 }

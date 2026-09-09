@@ -20,6 +20,20 @@ const RATE_LIMIT_QUERY  = 60;         // req/min por token — /api/v1/queries
 const RATE_LIMIT_UPLOAD = 10;         // req/min por token — uploads
 const RATE_LIMIT_DEFAULT = 120;       // req/min por token — demais rotas
 
+// O limite de linhas (10.000) não protege contra colunas muito largas
+// (NVARCHAR(MAX)/TEXT sem teto de tamanho) — um resultado "dentro do limite
+// de linhas" ainda pode ser grande o bastante pra estourar memória na hora de
+// ler/serializar. Este teto é aplicado incrementalmente, linha a linha,
+// DURANTE a leitura do driver (ver executeReadOnly em server/azure/sql.ts,
+// que cancela a query no meio quando estoura) — não depois de já ter
+// materializado o resultado inteiro, que seria tarde demais pra evitar o OOM.
+export const MAX_RESULT_BYTES = 50 * 1024 * 1024; // ~50MB
+
+/** Soma incremental de tamanho aproximado (bytes) de uma linha já serializada. */
+export function approxRowBytes(row: Record<string, unknown>): number {
+  return JSON.stringify(row).length;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. Semáforo de concorrência
 // ─────────────────────────────────────────────────────────────────────────────

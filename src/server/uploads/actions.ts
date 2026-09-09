@@ -1,3 +1,4 @@
+import { extname } from "node:path";
 import { z } from "zod";
 import { prisma } from "@/server/db";
 import { canAccess } from "@/server/auth/permissions";
@@ -26,8 +27,22 @@ const LARGE_FILE_THRESHOLD = 50 * 1_048_576; // 50 MB — parse em memoria (Duck
                                               // pode furar o limite de heavy jobs so por nao usar
                                               // staging (ja causou OOM com varios em paralelo)
 
-function importWeight(sizeBytes: bigint, mode: string): number {
+// XLSX e sempre lido inteiro em memoria via ExcelJS Workbook, sem streaming (ver nota
+// em parser.ts sobre o bug do WorkbookReader) — CSV/TSV grande passa pelo DuckDB, que
+// tem teto proprio (CATWORLD_DUCKDB_MEMORY_LIMIT). Producao mostrou um xlsx de 28MB
+// consumindo +1GB de RSS num unico job (cw_job_metrics, ~35x o tamanho do arquivo) —
+// bem abaixo do LARGE_FILE_THRESHOLD de 50MB acima, entao esses jobs nao eram
+// gateados como heavy e varios rodavam em paralelo (concorrencia 5), estourando a
+// memoria do host e derrubando o container ("exited" sem log de erro da aplicacao).
+const XLSX_HEAVY_THRESHOLD = 10 * 1_048_576; // 10 MB — bem mais conservador que o CSV
+
+function isXlsx(filename: string): boolean {
+  return extname(filename).toLowerCase() === ".xlsx";
+}
+
+function importWeight(sizeBytes: bigint, mode: string, filename: string): number {
   const size = Number(sizeBytes);
+  if (isXlsx(filename) && size > XLSX_HEAVY_THRESHOLD) return 2;
   if (size <= SMALL_CSV_THRESHOLD) return 1;
   if (size > LARGE_FILE_THRESHOLD) return 2; // arquivo grande: parse em memoria pesado, qualquer modo
   if (mode === "replace") return 1; // direct BULK INSERT to target, no INSERT SELECT
@@ -39,8 +54,10 @@ export async function queuePreviewUpload(id: string) {
   // (ExcelJS Workbook, sem streaming) e CSV grande passa pelo DuckDB em memoria —
   // mesmo custo do IMPORT_UPLOAD. Sem isso, previews de arquivos grandes furavam
   // o limite de heavy jobs (weight sempre 0) e rodavam todos em paralelo.
-  const upload = await prisma.upload.findUniqueOrThrow({ where: { id }, select: { sizeBytes: true } });
-  const weight = Number(upload.sizeBytes) > LARGE_FILE_THRESHOLD ? 2 : 0;
+  const upload = await prisma.upload.findUniqueOrThrow({ where: { id }, select: { sizeBytes: true, originalFilename: true } });
+  const size = Number(upload.sizeBytes);
+  const heavyThreshold = isXlsx(upload.originalFilename) ? XLSX_HEAVY_THRESHOLD : LARGE_FILE_THRESHOLD;
+  const weight = size > heavyThreshold ? 2 : 0;
   const [, job] = await prisma.$transaction([
     prisma.upload.update({
       where: { id },
@@ -52,9 +69,9 @@ export async function queuePreviewUpload(id: string) {
 }
 
 export async function queueImportUploadAuto(uploadId: string, mapping: z.infer<typeof confirmUploadSchema>["mapping"]) {
-  const upload = await prisma.upload.findUniqueOrThrow({ where: { id: uploadId }, select: { datasetId: true, tableId: true, mode: true, keyColumn: true, sizeBytes: true } });
+  const upload = await prisma.upload.findUniqueOrThrow({ where: { id: uploadId }, select: { datasetId: true, tableId: true, mode: true, keyColumn: true, sizeBytes: true, originalFilename: true } });
   if (!upload.datasetId) throw new Error("Upload sem dataset definido — não é possível auto-confirmar");
-  const weight = importWeight(upload.sizeBytes, upload.mode);
+  const weight = importWeight(upload.sizeBytes, upload.mode, upload.originalFilename);
   const [, job] = await prisma.$transaction([
     prisma.upload.update({
       where: { id: uploadId },
@@ -68,13 +85,13 @@ export async function queueImportUploadAuto(uploadId: string, mapping: z.infer<t
 export async function queueImportUpload(actor: Actor, id: string, input: z.infer<typeof confirmUploadSchema>) {
   const [dataset, upload] = await Promise.all([
     prisma.dataset.findUnique({ where: { id: input.datasetId } }),
-    prisma.upload.findUniqueOrThrow({ where: { id }, select: { sizeBytes: true } }),
+    prisma.upload.findUniqueOrThrow({ where: { id }, select: { sizeBytes: true, originalFilename: true } }),
   ]);
   if (!dataset) throw new ApiError(404, "DATASET_NOT_FOUND", "Dataset não encontrado");
   if (!await canAccess(actor, "WRITE", dataset.projectId, dataset.id)) {
     throw new ApiError(403, "FORBIDDEN", "Permissão insuficiente para este dataset");
   }
-  const weight = importWeight(upload.sizeBytes, input.mode);
+  const weight = importWeight(upload.sizeBytes, input.mode, upload.originalFilename);
 
   const [, job] = await prisma.$transaction([
     prisma.upload.update({

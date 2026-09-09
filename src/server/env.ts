@@ -12,7 +12,13 @@ const schema = z.object({
   // XLSX e sempre lido inteiro em memoria (ExcelJS Workbook, sem streaming — ver nota em
   // parser.ts sobre o bug do WorkbookReader streaming). Limite bem mais baixo que o CSV
   // (que e 100% streamed via DuckDB/csv-parse) pra conter o risco de OOM.
-  CATWORLD_XLSX_MAX_BYTES: z.coerce.number().int().positive().default(100 * 1024 * 1024),
+  // 100MB (valor antigo) se mostrou perigoso demais em producao: um xlsx de so 28MB ja
+  // consumiu +1GB de RSS num unico job (~35x o tamanho do arquivo, medido via
+  // cw_job_metrics) — o container acaba morto pelo OOM killer do host, sem log de erro
+  // da aplicacao ("exited" misterioso). 40MB no pior caso fica em ~1.4GB por job, e o
+  // gate de heavy job (ver XLSX_HEAVY_THRESHOLD em uploads/actions.ts) ja limita xlsx
+  // grande a 1 job concorrente.
+  CATWORLD_XLSX_MAX_BYTES: z.coerce.number().int().positive().default(40 * 1024 * 1024),
   // Teto de memoria por instancia DuckDB (uma instancia ":memory:" por import/preview
   // de CSV — ver parser-duckdb.ts). Sem isso, uma instancia pode tentar usar uma fatia
   // grande da RAM do host sem limite. Formato aceito pelo proprio DuckDB (ex: "1GB").
