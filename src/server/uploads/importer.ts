@@ -2,7 +2,7 @@ import * as Sentry from "@sentry/nextjs";
 import { extname } from "node:path";
 import sql from "mssql";
 import { prisma } from "@/server/db";
-import { withAdvisoryLock } from "@/server/db/advisory-lock";
+import { withAdvisoryLock, advisoryLockKeyForString } from "@/server/db/advisory-lock";
 import { sqlPool } from "@/server/azure/sql";
 import { getStoragePool } from "@/server/storage/pool";
 import { getStorageConnection, type ColDef } from "@/server/storage/connection";
@@ -246,339 +246,357 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
 
   const tableName = upload.table?.sqlName ?? sqlIdentifier(upload.originalFilename.replace(/\.[^.]+$/, ""));
   const schema = upload.dataset.schemaName;
-  const stage = `cw_stage_${upload.id.replaceAll("-", "").slice(0, 20)}`;
-  const pool = await getStoragePool(upload.dataset.storageServerId);
-  // StorageConnection reutiliza o mesmo pool interno (singleton por storageServerId)
-  const storageConn = await getStorageConnection(upload.dataset.storageServerId);
-  // Pool de escrita separado: DDL de staging e bulk copies usam o pool do MssqlStorageConnection
-  // para não saturar o pool de leitura que serve a API e o OData.
-  const writePool = await (storageConn as unknown as { rawPool(): Promise<sql.ConnectionPool> }).rawPool();
-  const target = `${quoteIdentifier(schema)}.${quoteIdentifier(tableName)}`;
-  const staging = `${quoteIdentifier(schema)}.${quoteIdentifier(stage)}`;
 
-  // Typed staging: Node.js pre-converts values (typedCsvField) so BULK INSERT writes native types
-  // and the delta INSERT SELECT becomes a direct column copy — no TRY_CONVERT on Azure SQL (saves DTU).
-  // colDefsMax is kept as fallback when a NVARCHAR value exceeds 4000 chars (rare truncation error).
-  const colDefs    = mapping.map(c => `${quoteIdentifier(c.sqlName)} ${stagingColType(c.sqlType)} NULL`).join(",") + ",[_cw_rh] CHAR(32) NULL";
-  const colDefsMax = mapping.map(c => `${quoteIdentifier(c.sqlName)} NVARCHAR(MAX)  NULL`).join(",") + ",[_cw_rh] CHAR(32) NULL";
-  // Set to false if truncation forces NVARCHAR(MAX) fallback — INSERT SELECT must use TRY_CONVERT then
-  let stagingIsTyped = true;
-
-  const targetExists = Number(
-    (await pool.request().query(`SELECT CASE WHEN OBJECT_ID(N'${schema}.${tableName}',N'U') IS NULL THEN 0 ELSE 1 END AS ok`))
-      .recordset[0].ok,
-  ) === 1;
-
-  // Validate schema compatibility BEFORE creating staging — fail fast on bad append/upsert
-  if ((upload.mode === "append" || upload.mode === "upsert") && targetExists) {
-    await assertCompatible(pool.request(), schema, tableName, mapping);
-  }
-
-  const hasDeltaCol = targetExists && await checkHasDeltaCol(pool, schema, tableName);
-  const schemaOk = targetExists && await schemaMatchesSilent(pool, schema, tableName, mapping);
-  const deltaReplace = upload.mode === "replace" && hasDeltaCol && schemaOk;
-  // Phase 2: SDK pre-computed delta — deltaJson holds JSON array of hashes to delete
-  const phase2 = deltaReplace && upload.deltaJson != null;
-  const toDelete: string[] = phase2 ? (JSON.parse(upload.deltaJson!) as string[]) : [];
-
-  const ext = extname(upload.originalFilename).toLowerCase();
-
-  // ── Idempotency: if staging already exists and has rows, skip data loading ──
-  // This handles retries where the staging was populated but the transaction failed.
-  // BUG2-fix: if staging row count < knownRowCount (for full replace), it means the staging is
-  // incomplete from a mid-stream crash — drop it and re-import from scratch. Trusting a partial
-  // staging would mark the upload COMPLETED with fewer rows than the file actually contains.
-  const stagingRowCount = await checkStagingHasData(pool, schema, stage);
-  const isFullReplaceMode = (upload.mode === "replace" || !targetExists) && !deltaReplace && !phase2;
-  const stagingIsPartial = stagingRowCount > 0 && isFullReplaceMode && knownRowCount > 0 && stagingRowCount < knownRowCount;
-
-  if (stagingIsPartial) {
-    console.warn("[importUpload] staging parcial detectado (%d/%d linhas) — descartando e reimportando upload=%s", stagingRowCount, knownRowCount, uploadId);
-    await writePool.request().query(`DROP TABLE ${staging}`).catch(() => {});
-  }
-
-  const stagingHasData = !stagingIsPartial && stagingRowCount > 0;
-
-  if (!stagingHasData) {
-    await writePool.request().query(
-      `IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL DROP TABLE ${staging};
-       CREATE TABLE ${staging} (${colDefs})`,
-    );
-  } else if (stagingHasData) {
-    console.log("[importUpload] staging já populado (%d linhas), pulando carga (retry idempotente) upload=%s", stagingRowCount, uploadId);
-  }
-
-  let total = 0, inserted = 0, updated = 0;
-  let lastProgressMs = Date.now();
-  let actual = 0n;
-  const reclassifiedCols: string[] = [];
-
+  // Serializa TODO o import por dataset+tabela a partir daqui (staging DDL,
+  // criação de índice, swap atômico, escrita de metadata) — não só o passo
+  // final de metadata (ver withAdvisoryLock mais abaixo, que fica redundante
+  // mas inofensivo dentro deste lock mais amplo). Sem isso, dois uploads
+  // concorrentes pra mesma tabela nova liam ambos targetExists=false e
+  // disparavam CREATE TABLE / CREATE INDEX um em cima do outro ("There is
+  // already an object named ...", "index or statistics ... already exists").
+  const importLockKey = advisoryLockKeyForString(`${upload.dataset.id}:${schema}.${tableName}`);
+  await prisma.$executeRawUnsafe(`SELECT pg_advisory_lock(${importLockKey})`);
   try {
-    const preview = upload.previewJson ? JSON.parse(upload.previewJson) as FilePreview : null;
-    const opts: RowsFromFileOpts = { encoding: preview?.encoding ?? "utf8", separator: preview?.separator ?? ",", ext };
+    return await importUploadForTable();
+  } finally {
+    await prisma.$executeRawUnsafe(`SELECT pg_advisory_unlock(${importLockKey})`).catch(() => {});
+  }
 
-    const onProgress = (n: number) => {
-      const now = Date.now();
-      if (now - lastProgressMs > 10_000) {
-        void prisma.upload.update({
-          where: { id: upload.id },
-          data: { progress: Math.min(75, 35 + Math.floor(n / Math.max(knownRowCount, 1) * 40)) },
-        });
-        lastProgressMs = now;
-      }
-    };
+  async function importUploadForTable() {
+    const stage = `cw_stage_${upload.id.replaceAll("-", "").slice(0, 20)}`;
+    const pool = await getStoragePool(upload.dataset!.storageServerId);
+    // StorageConnection reutiliza o mesmo pool interno (singleton por storageServerId)
+    const storageConn = await getStorageConnection(upload.dataset!.storageServerId);
+    // Pool de escrita separado: DDL de staging e bulk copies usam o pool do MssqlStorageConnection
+    // para não saturar o pool de leitura que serve a API e o OData.
+    const writePool = await (storageConn as unknown as { rawPool(): Promise<sql.ConnectionPool> }).rawPool();
+    const target = `${quoteIdentifier(schema)}.${quoteIdentifier(tableName)}`;
+    const staging = `${quoteIdentifier(schema)}.${quoteIdentifier(stage)}`;
 
-    {
-      // ── Staging path (TDS bulk copy via mssql driver) ─────────────────────────
-      const destTable = stage;
+    // Typed staging: Node.js pre-converts values (typedCsvField) so BULK INSERT writes native types
+    // and the delta INSERT SELECT becomes a direct column copy — no TRY_CONVERT on Azure SQL (saves DTU).
+    // colDefsMax is kept as fallback when a NVARCHAR value exceeds 4000 chars (rare truncation error).
+    const colDefs    = mapping.map(c => `${quoteIdentifier(c.sqlName)} ${stagingColType(c.sqlType)} NULL`).join(",") + ",[_cw_rh] CHAR(32) NULL";
+    const colDefsMax = mapping.map(c => `${quoteIdentifier(c.sqlName)} NVARCHAR(MAX)  NULL`).join(",") + ",[_cw_rh] CHAR(32) NULL";
+    // Set to false if truncation forces NVARCHAR(MAX) fallback — INSERT SELECT must use TRY_CONVERT then
+    let stagingIsTyped = true;
 
-      if (!stagingHasData) {
-        phaseTimings.importMethod = "tds-primary";
-        const _r = await tdsBulkCopy(writePool, source, mapping, schema, destTable, opts, knownRowCount, uploadId, onProgress, true, parseStats);
-        total = _r.total; reclassifiedCols.push(..._r.reclassifiedCols);
-      } else {
-        // Idempotent retry: staging already populated, just count what's there.
-        // Detect whether staging was created as typed or NVARCHAR(MAX) (truncation fallback).
-        const countRes = await pool.request().query(`SELECT COUNT_BIG(*) n FROM ${staging}`);
-        total = Number(countRes.recordset[0].n);
-        phaseTimings.importMethod = "idempotent-retry";
-        const nonNvarcharCol = mapping.find(c => !c.sqlType.startsWith("NVARCHAR") && c.sqlType !== "TEXT");
-        if (nonNvarcharCol) {
-          const colTypeRes = await pool.request().query(
-            `SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS
-             WHERE TABLE_SCHEMA='${schema}' AND TABLE_NAME='${stage}' AND COLUMN_NAME='${nonNvarcharCol.sqlName}'`,
-          );
-          const dt = ((colTypeRes.recordset[0]?.DATA_TYPE as string | undefined) ?? "").toUpperCase();
-          stagingIsTyped = dt !== "NVARCHAR";
-        }
-      }
+    const targetExists = Number(
+      (await pool.request().query(`SELECT CASE WHEN OBJECT_ID(N'${schema}.${tableName}',N'U') IS NULL THEN 0 ELSE 1 END AS ok`))
+        .recordset[0].ok,
+    ) === 1;
 
-      // Index staging._cw_rh so NOT EXISTS lookups are O(n log n) instead of O(n²)
-      // Large staging tables can take >10 min to index — needs explicit 2h timeout.
-      if (!stagingHasData) {
-        const idxReq = writePool.request();
-        (idxReq as unknown as { overrides: { requestTimeout: number } }).overrides.requestTimeout = 7_200_000;
-        await idxReq.query(
-          `IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL
-             CREATE NONCLUSTERED INDEX [IX_stage_rh] ON ${staging} ([_cw_rh])`,
-        );
-      }
-      // Ensure target also has the _cw_rh index (older tables may predate it)
-      if (deltaReplace && targetExists) {
-        const idxReq2 = writePool.request();
-        (idxReq2 as unknown as { overrides: { requestTimeout: number } }).overrides.requestTimeout = 7_200_000;
-        await idxReq2.query(
-          `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id=OBJECT_ID(N'${schema}.${tableName}') AND name=N'IX__cw_rh')
-             CREATE NONCLUSTERED INDEX [IX__cw_rh] ON ${target} ([_cw_rh])`,
-        );
-      }
-
-      // ── Atomic swap / transaction ────────────────────────────────────────────
-      // deltaReplace e upsert usam atomicSwap (lock ~ms em produção).
-      // phase2, replace e append mantêm o caminho de transação original.
-      const mappingWithRh: ColDef[] = [
-        ...mapping.map(c => ({ name: c.sqlName, sqlType: c.sqlType, nullable: true })),
-        { name: "_cw_rh", sqlType: "NVARCHAR(MAX)", nullable: true },
-      ];
-
-      if (deltaReplace && !phase2) {
-        // fullSwap: staging tem o estado completo novo — DROP target + RENAME staging (lock ~ms)
-        await storageConn.atomicSwap(schema, stage, tableName, mappingWithRh, { targetExists });
-        inserted = total; updated = 0;
-        actual = await storageConn.countRows(schema, tableName);
-      } else if (upload.mode === "upsert") {
-        // mergeSwap: mantém rows de target cujo key NÃO está em staging + todos de staging (lock ~ms)
-        if (!upload.keyColumn) throw new Error("Upsert exige coluna-chave");
-        const key = quoteIdentifier(upload.keyColumn);
-        const duplicates = await pool.request().query(
-          `SELECT ${key}, COUNT(*) n FROM ${staging} GROUP BY ${key} HAVING COUNT(*) > 1`,
-        );
-        if (duplicates.recordset.length) throw new Error("Arquivo contém chaves duplicadas para upsert");
-        const mergedName = `cw_mgd_${upload.id.replaceAll("-", "").slice(0, 20)}`;
-        await storageConn.atomicSwap(schema, stage, tableName, mappingWithRh, {
-          targetExists, keyColumn: upload.keyColumn, mergedName,
-        });
-        inserted = total; updated = 0;
-        actual = await storageConn.countRows(schema, tableName);
-      } else {
-        // Transação original para: phase2, replace, append
-        const tx = new sql.Transaction(writePool);
-        await tx.begin();
-        try {
-          const request = new sql.Request(tx);
-          // overrides.requestTimeout is the correct mssql v12 field (not .timeout which is a no-op)
-          (request as unknown as { overrides: { requestTimeout: number } }).overrides.requestTimeout = 7_200_000;
-          const targetColDefs = typedColumnDefs(mapping);
-          const colList = mapping.map(c => quoteIdentifier(c.sqlName)).join(",");
-          // Typed staging: staging already has correct types — direct column copy, no TRY_CONVERT.
-          // NVARCHAR(MAX) staging (truncation fallback): must use TRY_CONVERT to cast strings to types.
-          const typedSelect = stagingIsTyped
-            ? mapping.map(c => `s.${quoteIdentifier(c.sqlName)}`).join(",")
-            : mapping.map(c => typedSelectExpr(c, "s")).join(",");
-
-          if (phase2) {
-            // Phase 2: new rows already BULK inserted into target.
-            // Delete removed rows using batched IN clauses — avoids #cw_del temp table compilation issue.
-            const insertStats = await request.query(`
-              INSERT INTO ${target} (${colList},[_cw_rh])
-                SELECT ${typedSelect},s.[_cw_rh] FROM ${staging} s
-                WHERE NOT EXISTS(SELECT 1 FROM ${target} t WHERE t.[_cw_rh]=s.[_cw_rh])
-              OPTION (MAXDOP 1);
-              SELECT @@ROWCOUNT inserted;
-            `);
-            inserted = Number(insertStats.recordset[0]?.inserted ?? total);
-            if (toDelete.length > 0) {
-              const BATCH = 500;
-              for (let i = 0; i < toDelete.length; i += BATCH) {
-                const batch = toDelete.slice(i, i + BATCH);
-                // Hashes are validated as /^[0-9a-f]{32}$/ at the API layer — safe to inline
-                const placeholders = batch.map(h => `'${h}'`).join(",");
-                const delRes = await request.query(
-                  `DELETE FROM ${target} WHERE [_cw_rh] IN (${placeholders}); SELECT @@ROWCOUNT deleted;`,
-                );
-                updated += Number(delRes.recordset[0]?.deleted ?? 0);
-              }
-            }
-            await request.query(`DROP TABLE ${staging}`);
-          } else if (upload.mode === "replace" || !targetExists) {
-            // Full replace via staging (schema mismatch fallback when OPENROWSET not used)
-            if (targetExists) await request.query(`DROP TABLE ${target}`);
-            await request.query(`
-              CREATE TABLE ${target} (${targetColDefs},[_cw_rh] CHAR(32) NULL);
-              INSERT INTO ${target} (${colList},[_cw_rh])
-                SELECT ${typedSelect},s.[_cw_rh] FROM ${staging} s
-              OPTION (MAXDOP 1);
-              CREATE INDEX [IX__cw_rh] ON ${target} ([_cw_rh]);
-              DROP TABLE ${staging};
-            `);
-            inserted = total;
-          } else if (upload.mode === "append") {
-            await request.query(
-              `INSERT INTO ${target} (${mapping.map(c => quoteIdentifier(c.sqlName)).join(",")})
-               SELECT ${typedSelect} FROM ${staging} s
-               OPTION (MAXDOP 1);
-               DROP TABLE ${staging}`,
-            );
-            inserted = total;
-          }
-
-          const countStr = (await request.query(`SELECT COUNT_BIG(*) count FROM ${target}`)).recordset[0].count as string;
-          actual = BigInt(countStr);
-
-          const MAX_BIGINT = 9223372036854775807n;
-          if (actual > MAX_BIGINT || actual < 0n)
-            throw new Error(`Row count ${countStr} exceeds BIGINT range. Verifique a integridade dos dados.`);
-
-          await tx.commit();
-          } catch (e) {
-          await tx.rollback().catch(() => undefined);
-          throw e;
-        }
-      }
+    // Validate schema compatibility BEFORE creating staging — fail fast on bad append/upsert
+    if ((upload.mode === "append" || upload.mode === "upsert") && targetExists) {
+      await assertCompatible(pool.request(), schema, tableName, mapping);
     }
 
-    // ── Integrity guard ───────────────────────────────────────────────────────
-    // For full replace (no delta, no phase2), physical row count MUST equal the number of
-    // rows parsed from the file (written to clean blob / staging).  A mismatch means BULK
-    // INSERT or the staging INSERT SELECT silently dropped rows — never mark COMPLETED.
-    const isFullReplace = (upload.mode === "replace" || !targetExists) && !deltaReplace && !phase2;
-    if (isFullReplace && actual !== BigInt(total)) {
-      throw new Error(
-        `[integrity] Contagem inconsistente: arquivo produziu ${total} linhas mas tabela física tem ${actual.toString()} linhas. ` +
-        `Upload marcado FAILED para evitar publicação de dados desatualizados.`,
+    const hasDeltaCol = targetExists && await checkHasDeltaCol(pool, schema, tableName);
+    const schemaOk = targetExists && await schemaMatchesSilent(pool, schema, tableName, mapping);
+    const deltaReplace = upload.mode === "replace" && hasDeltaCol && schemaOk;
+    // Phase 2: SDK pre-computed delta — deltaJson holds JSON array of hashes to delete
+    const phase2 = deltaReplace && upload.deltaJson != null;
+    const toDelete: string[] = phase2 ? (JSON.parse(upload.deltaJson!) as string[]) : [];
+
+    const ext = extname(upload.originalFilename).toLowerCase();
+
+    // ── Idempotency: if staging already exists and has rows, skip data loading ──
+    // This handles retries where the staging was populated but the transaction failed.
+    // BUG2-fix: if staging row count < knownRowCount (for full replace), it means the staging is
+    // incomplete from a mid-stream crash — drop it and re-import from scratch. Trusting a partial
+    // staging would mark the upload COMPLETED with fewer rows than the file actually contains.
+    const stagingRowCount = await checkStagingHasData(pool, schema, stage);
+    const isFullReplaceMode = (upload.mode === "replace" || !targetExists) && !deltaReplace && !phase2;
+    const stagingIsPartial = stagingRowCount > 0 && isFullReplaceMode && knownRowCount > 0 && stagingRowCount < knownRowCount;
+
+    if (stagingIsPartial) {
+      console.warn("[importUpload] staging parcial detectado (%d/%d linhas) — descartando e reimportando upload=%s", stagingRowCount, knownRowCount, uploadId);
+      await writePool.request().query(`DROP TABLE ${staging}`).catch(() => {});
+    }
+
+    const stagingHasData = !stagingIsPartial && stagingRowCount > 0;
+
+    if (!stagingHasData) {
+      await writePool.request().query(
+        `IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL DROP TABLE ${staging};
+         CREATE TABLE ${staging} (${colDefs})`,
       );
+    } else if (stagingHasData) {
+      console.log("[importUpload] staging já populado (%d linhas), pulando carga (retry idempotente) upload=%s", stagingRowCount, uploadId);
     }
 
-    // ── Metadata updates (both paths) ─────────────────────────────────────────
-    const MAX_BIGINT = 9223372036854775807n;
-    if (actual > MAX_BIGINT || actual < 0n)
-      throw new Error(`Row count ${actual.toString()} exceeds BIGINT range. Verifique a integridade dos dados.`);
+    let total = 0, inserted = 0, updated = 0;
+    let lastProgressMs = Date.now();
+    let actual = 0n;
+    const reclassifiedCols: string[] = [];
 
-    // Upsert table record
-    const table = upload.table ?? await prisma.datasetTable.upsert({
-      where: { datasetId_sqlName: { datasetId: upload.dataset.id, sqlName: tableName } },
-      update: {},
-      create: { datasetId: upload.dataset.id, name: tableName, sqlName: tableName },
-    });
+    try {
+      const preview = upload.previewJson ? JSON.parse(upload.previewJson) as FilePreview : null;
+      const opts: RowsFromFileOpts = { encoding: preview?.encoding ?? "utf8", separator: preview?.separator ?? ",", ext };
 
-    const deltaMode = phase2 ? "phase2" : deltaReplace ? "delta-replace" : (upload.mode === "replace" || !targetExists) ? "full-replace" : upload.mode;
-    const totalMs = Date.now() - importStarted;
-    phaseTimings.previewRows = knownRowCount;
-    phaseTimings.parsedRows = total;
-    phaseTimings.physicalRows = Number(actual);
-    phaseTimings.totalImportMs = totalMs;
-    phaseTimings.parseMethod = parseStats.parseMethod ?? null;
-    phaseTimings.parseMs = parseStats.parseMs ?? null;
-    phaseTimings.fileEncoding = parseStats.fileEncoding ?? null;
-    phaseTimings.fileSeparator = parseStats.fileSeparator ?? null;
-    phaseTimings.fallbackReason = parseStats.fallbackReason ?? null;
-    phaseTimings.deltaMode = deltaMode;
-    if (reclassifiedCols.length) phaseTimings.reclassifiedCols = reclassifiedCols;
-    phaseTimings.toDeleteCount = updated;
-    phaseTimings.stagingWasPartial = stagingIsPartial;
-    phaseTimings.wasIdempotentRetry = stagingHasData;
-    phaseTimings.rowsPerSecond = totalMs > 0 ? Math.round(total / (totalMs / 1000)) : null;
-    console.log("[importUpload:perf]", JSON.stringify({ uploadId: upload.id, file: upload.originalFilename, rows: Number(actual), ...phaseTimings }));
+      const onProgress = (n: number) => {
+        const now = Date.now();
+        if (now - lastProgressMs > 10_000) {
+          void prisma.upload.update({
+            where: { id: upload.id },
+            data: { progress: Math.min(75, 35 + Math.floor(n / Math.max(knownRowCount, 1) * 40)) },
+          });
+          lastProgressMs = now;
+        }
+      };
 
-    // Update metadata in Postgres via Prisma (single transaction).
-    // Guarded by an advisory lock on table.id: concurrent uploads that target the same
-    // dataset table (e.g. parallel workers appending to the same file/table) would otherwise
-    // race between the deleteMany and createMany below, tripping the (table_id, sql_name)
-    // unique constraint on datasetColumn.
-    await withAdvisoryLock(table.id, () => prisma.$transaction([
-      prisma.datasetColumn.deleteMany({ where: { tableId: table.id } }),
-      prisma.datasetColumn.createMany({
-        data: mapping.map((c, i) => ({
-          tableId: table.id,
-          ordinal: i + 1,
-          originalName: c.originalName,
-          sqlName: c.sqlName,
-          sqlType: c.sqlType,
-          nullable: c.nullable,
-        })),
-      }),
-      prisma.datasetTable.update({
-        where: { id: table.id },
-        data: { rowCount: actual, lastDataAt: new Date() },
-      }),
-      prisma.datasetVersion.create({
-        data: {
-          tableId: table.id,
-          uploadId: upload.id,
-          rowCount: actual,
-          schemaJson: JSON.stringify(mapping),
-        },
-      }),
-      prisma.auditEvent.create({
-        data: {
-          eventType: "UPLOAD_IMPORT_PERF",
-          resourceType: "upload",
-          resourceId: upload.id,
-          detailJson: JSON.stringify({ file: upload.originalFilename, rows: Number(actual), ...phaseTimings }),
-          success: true,
-        },
-      }),
-      prisma.upload.update({
-        where: { id: upload.id },
-        data: {
-          tableId: table.id,
-          status: "COMPLETED",
-          progress: 100,
-          rowCount: actual,
-          insertedCount: inserted,
-          updatedCount: updated,
-          errorMessage: null,
-        },
-      }),
-    ]));
+      {
+        // ── Staging path (TDS bulk copy via mssql driver) ─────────────────────────
+        const destTable = stage;
 
-    return { tableId: table.id, inserted, updated, rowCount: actual };
-  } catch (e) {
-    // Best-effort: drop staging on any failure (no-op para OPENROWSET path — sem staging criado)
-    await writePool.request()
-      .query(`IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL DROP TABLE ${staging}`)
-      .catch(() => undefined);
-    throw e;
+        if (!stagingHasData) {
+          phaseTimings.importMethod = "tds-primary";
+          const _r = await tdsBulkCopy(writePool, source, mapping, schema, destTable, opts, knownRowCount, uploadId, onProgress, true, parseStats);
+          total = _r.total; reclassifiedCols.push(..._r.reclassifiedCols);
+        } else {
+          // Idempotent retry: staging already populated, just count what's there.
+          // Detect whether staging was created as typed or NVARCHAR(MAX) (truncation fallback).
+          const countRes = await pool.request().query(`SELECT COUNT_BIG(*) n FROM ${staging}`);
+          total = Number(countRes.recordset[0].n);
+          phaseTimings.importMethod = "idempotent-retry";
+          const nonNvarcharCol = mapping.find(c => !c.sqlType.startsWith("NVARCHAR") && c.sqlType !== "TEXT");
+          if (nonNvarcharCol) {
+            const colTypeRes = await pool.request().query(
+              `SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+               WHERE TABLE_SCHEMA='${schema}' AND TABLE_NAME='${stage}' AND COLUMN_NAME='${nonNvarcharCol.sqlName}'`,
+            );
+            const dt = ((colTypeRes.recordset[0]?.DATA_TYPE as string | undefined) ?? "").toUpperCase();
+            stagingIsTyped = dt !== "NVARCHAR";
+          }
+        }
+
+        // Index staging._cw_rh so NOT EXISTS lookups are O(n log n) instead of O(n²)
+        // Large staging tables can take >10 min to index — needs explicit 2h timeout.
+        if (!stagingHasData) {
+          const idxReq = writePool.request();
+          (idxReq as unknown as { overrides: { requestTimeout: number } }).overrides.requestTimeout = 7_200_000;
+          await idxReq.query(
+            `IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL
+               CREATE NONCLUSTERED INDEX [IX_stage_rh] ON ${staging} ([_cw_rh])`,
+          );
+        }
+        // Ensure target also has the _cw_rh index (older tables may predate it)
+        if (deltaReplace && targetExists) {
+          const idxReq2 = writePool.request();
+          (idxReq2 as unknown as { overrides: { requestTimeout: number } }).overrides.requestTimeout = 7_200_000;
+          await idxReq2.query(
+            `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id=OBJECT_ID(N'${schema}.${tableName}') AND name=N'IX__cw_rh')
+               CREATE NONCLUSTERED INDEX [IX__cw_rh] ON ${target} ([_cw_rh])`,
+          );
+        }
+
+        // ── Atomic swap / transaction ────────────────────────────────────────────
+        // deltaReplace e upsert usam atomicSwap (lock ~ms em produção).
+        // phase2, replace e append mantêm o caminho de transação original.
+        const mappingWithRh: ColDef[] = [
+          ...mapping.map(c => ({ name: c.sqlName, sqlType: c.sqlType, nullable: true })),
+          { name: "_cw_rh", sqlType: "NVARCHAR(MAX)", nullable: true },
+        ];
+
+        if (deltaReplace && !phase2) {
+          // fullSwap: staging tem o estado completo novo — DROP target + RENAME staging (lock ~ms)
+          await storageConn.atomicSwap(schema, stage, tableName, mappingWithRh, { targetExists });
+          inserted = total; updated = 0;
+          actual = await storageConn.countRows(schema, tableName);
+        } else if (upload.mode === "upsert") {
+          // mergeSwap: mantém rows de target cujo key NÃO está em staging + todos de staging (lock ~ms)
+          if (!upload.keyColumn) throw new Error("Upsert exige coluna-chave");
+          const key = quoteIdentifier(upload.keyColumn);
+          const duplicates = await pool.request().query(
+            `SELECT ${key}, COUNT(*) n FROM ${staging} GROUP BY ${key} HAVING COUNT(*) > 1`,
+          );
+          if (duplicates.recordset.length) throw new Error("Arquivo contém chaves duplicadas para upsert");
+          const mergedName = `cw_mgd_${upload.id.replaceAll("-", "").slice(0, 20)}`;
+          await storageConn.atomicSwap(schema, stage, tableName, mappingWithRh, {
+            targetExists, keyColumn: upload.keyColumn, mergedName,
+          });
+          inserted = total; updated = 0;
+          actual = await storageConn.countRows(schema, tableName);
+        } else {
+          // Transação original para: phase2, replace, append
+          const tx = new sql.Transaction(writePool);
+          await tx.begin();
+          try {
+            const request = new sql.Request(tx);
+            // overrides.requestTimeout is the correct mssql v12 field (not .timeout which is a no-op)
+            (request as unknown as { overrides: { requestTimeout: number } }).overrides.requestTimeout = 7_200_000;
+            const targetColDefs = typedColumnDefs(mapping);
+            const colList = mapping.map(c => quoteIdentifier(c.sqlName)).join(",");
+            // Typed staging: staging already has correct types — direct column copy, no TRY_CONVERT.
+            // NVARCHAR(MAX) staging (truncation fallback): must use TRY_CONVERT to cast strings to types.
+            const typedSelect = stagingIsTyped
+              ? mapping.map(c => `s.${quoteIdentifier(c.sqlName)}`).join(",")
+              : mapping.map(c => typedSelectExpr(c, "s")).join(",");
+
+            if (phase2) {
+              // Phase 2: new rows already BULK inserted into target.
+              // Delete removed rows using batched IN clauses — avoids #cw_del temp table compilation issue.
+              const insertStats = await request.query(`
+                INSERT INTO ${target} (${colList},[_cw_rh])
+                  SELECT ${typedSelect},s.[_cw_rh] FROM ${staging} s
+                  WHERE NOT EXISTS(SELECT 1 FROM ${target} t WHERE t.[_cw_rh]=s.[_cw_rh])
+                OPTION (MAXDOP 1);
+                SELECT @@ROWCOUNT inserted;
+              `);
+              inserted = Number(insertStats.recordset[0]?.inserted ?? total);
+              if (toDelete.length > 0) {
+                const BATCH = 500;
+                for (let i = 0; i < toDelete.length; i += BATCH) {
+                  const batch = toDelete.slice(i, i + BATCH);
+                  // Hashes are validated as /^[0-9a-f]{32}$/ at the API layer — safe to inline
+                  const placeholders = batch.map(h => `'${h}'`).join(",");
+                  const delRes = await request.query(
+                    `DELETE FROM ${target} WHERE [_cw_rh] IN (${placeholders}); SELECT @@ROWCOUNT deleted;`,
+                  );
+                  updated += Number(delRes.recordset[0]?.deleted ?? 0);
+                }
+              }
+              await request.query(`DROP TABLE ${staging}`);
+            } else if (upload.mode === "replace" || !targetExists) {
+              // Full replace via staging (schema mismatch fallback when OPENROWSET not used)
+              if (targetExists) await request.query(`DROP TABLE ${target}`);
+              await request.query(`
+                CREATE TABLE ${target} (${targetColDefs},[_cw_rh] CHAR(32) NULL);
+                INSERT INTO ${target} (${colList},[_cw_rh])
+                  SELECT ${typedSelect},s.[_cw_rh] FROM ${staging} s
+                OPTION (MAXDOP 1);
+                CREATE INDEX [IX__cw_rh] ON ${target} ([_cw_rh]);
+                DROP TABLE ${staging};
+              `);
+              inserted = total;
+            } else if (upload.mode === "append") {
+              await request.query(
+                `INSERT INTO ${target} (${mapping.map(c => quoteIdentifier(c.sqlName)).join(",")})
+                 SELECT ${typedSelect} FROM ${staging} s
+                 OPTION (MAXDOP 1);
+                 DROP TABLE ${staging}`,
+              );
+              inserted = total;
+            }
+
+            const countStr = (await request.query(`SELECT COUNT_BIG(*) count FROM ${target}`)).recordset[0].count as string;
+            actual = BigInt(countStr);
+
+            const MAX_BIGINT = 9223372036854775807n;
+            if (actual > MAX_BIGINT || actual < 0n)
+              throw new Error(`Row count ${countStr} exceeds BIGINT range. Verifique a integridade dos dados.`);
+
+            await tx.commit();
+            } catch (e) {
+            await tx.rollback().catch(() => undefined);
+            throw e;
+          }
+        }
+      }
+
+      // ── Integrity guard ───────────────────────────────────────────────────────
+      // For full replace (no delta, no phase2), physical row count MUST equal the number of
+      // rows parsed from the file (written to clean blob / staging).  A mismatch means BULK
+      // INSERT or the staging INSERT SELECT silently dropped rows — never mark COMPLETED.
+      const isFullReplace = (upload.mode === "replace" || !targetExists) && !deltaReplace && !phase2;
+      if (isFullReplace && actual !== BigInt(total)) {
+        throw new Error(
+          `[integrity] Contagem inconsistente: arquivo produziu ${total} linhas mas tabela física tem ${actual.toString()} linhas. ` +
+          `Upload marcado FAILED para evitar publicação de dados desatualizados.`,
+        );
+      }
+
+      // ── Metadata updates (both paths) ─────────────────────────────────────────
+      const MAX_BIGINT = 9223372036854775807n;
+      if (actual > MAX_BIGINT || actual < 0n)
+        throw new Error(`Row count ${actual.toString()} exceeds BIGINT range. Verifique a integridade dos dados.`);
+
+      // Upsert table record
+      const table = upload.table ?? await prisma.datasetTable.upsert({
+        where: { datasetId_sqlName: { datasetId: upload.dataset!.id, sqlName: tableName } },
+        update: {},
+        create: { datasetId: upload.dataset!.id, name: tableName, sqlName: tableName },
+      });
+
+      const deltaMode = phase2 ? "phase2" : deltaReplace ? "delta-replace" : (upload.mode === "replace" || !targetExists) ? "full-replace" : upload.mode;
+      const totalMs = Date.now() - importStarted;
+      phaseTimings.previewRows = knownRowCount;
+      phaseTimings.parsedRows = total;
+      phaseTimings.physicalRows = Number(actual);
+      phaseTimings.totalImportMs = totalMs;
+      phaseTimings.parseMethod = parseStats.parseMethod ?? null;
+      phaseTimings.parseMs = parseStats.parseMs ?? null;
+      phaseTimings.fileEncoding = parseStats.fileEncoding ?? null;
+      phaseTimings.fileSeparator = parseStats.fileSeparator ?? null;
+      phaseTimings.fallbackReason = parseStats.fallbackReason ?? null;
+      phaseTimings.deltaMode = deltaMode;
+      if (reclassifiedCols.length) phaseTimings.reclassifiedCols = reclassifiedCols;
+      phaseTimings.toDeleteCount = updated;
+      phaseTimings.stagingWasPartial = stagingIsPartial;
+      phaseTimings.wasIdempotentRetry = stagingHasData;
+      phaseTimings.rowsPerSecond = totalMs > 0 ? Math.round(total / (totalMs / 1000)) : null;
+      console.log("[importUpload:perf]", JSON.stringify({ uploadId: upload.id, file: upload.originalFilename, rows: Number(actual), ...phaseTimings }));
+
+      // Update metadata in Postgres via Prisma (single transaction).
+      // Guarded by an advisory lock on table.id: concurrent uploads that target the same
+      // dataset table (e.g. parallel workers appending to the same file/table) would otherwise
+      // race between the deleteMany and createMany below, tripping the (table_id, sql_name)
+      // unique constraint on datasetColumn.
+      await withAdvisoryLock(table.id, () => prisma.$transaction([
+        prisma.datasetColumn.deleteMany({ where: { tableId: table.id } }),
+        prisma.datasetColumn.createMany({
+          data: mapping.map((c, i) => ({
+            tableId: table.id,
+            ordinal: i + 1,
+            originalName: c.originalName,
+            sqlName: c.sqlName,
+            sqlType: c.sqlType,
+            nullable: c.nullable,
+          })),
+        }),
+        prisma.datasetTable.update({
+          where: { id: table.id },
+          data: { rowCount: actual, lastDataAt: new Date() },
+        }),
+        prisma.datasetVersion.create({
+          data: {
+            tableId: table.id,
+            uploadId: upload.id,
+            rowCount: actual,
+            schemaJson: JSON.stringify(mapping),
+          },
+        }),
+        prisma.auditEvent.create({
+          data: {
+            eventType: "UPLOAD_IMPORT_PERF",
+            resourceType: "upload",
+            resourceId: upload.id,
+            detailJson: JSON.stringify({ file: upload.originalFilename, rows: Number(actual), ...phaseTimings }),
+            success: true,
+          },
+        }),
+        prisma.upload.update({
+          where: { id: upload.id },
+          data: {
+            tableId: table.id,
+            status: "COMPLETED",
+            progress: 100,
+            rowCount: actual,
+            insertedCount: inserted,
+            updatedCount: updated,
+            errorMessage: null,
+          },
+        }),
+      ]));
+
+      return { tableId: table.id, inserted, updated, rowCount: actual };
+    } catch (e) {
+      // Best-effort: drop staging on any failure (no-op para OPENROWSET path — sem staging criado)
+      await writePool.request()
+        .query(`IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL DROP TABLE ${staging}`)
+        .catch(() => undefined);
+      throw e;
+    }
   }
 }
 
