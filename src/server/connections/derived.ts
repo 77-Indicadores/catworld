@@ -1,11 +1,8 @@
 import { randomUUID } from "crypto";
 import { prisma } from "@/server/db";
+import { withAdvisoryLock } from "@/server/db/advisory-lock";
 import { getStorageConnection } from "@/server/storage/connection";
 import { nextRefreshFromCron } from "./sources";
-
-function advisoryLockKey(id: string): bigint {
-  return BigInt("0x" + id.replace(/-/g, "").slice(0, 15));
-}
 
 function stagingName(sqlName: string) {
   const safe = sqlName.slice(0, 28).replace(/[^a-z0-9_]/g, "_");
@@ -14,9 +11,7 @@ function stagingName(sqlName: string) {
 }
 
 export async function queueDerivedRefresh(derivedTableId: string) {
-  const lockKey = advisoryLockKey(derivedTableId);
-  await prisma.$executeRawUnsafe(`SELECT pg_advisory_lock(${lockKey})`);
-  try {
+  return withAdvisoryLock(derivedTableId, async () => {
     const existing = await prisma.job.findFirst({
       where: {
         type: "DERIVED_REFRESH",
@@ -37,9 +32,7 @@ export async function queueDerivedRefresh(derivedTableId: string) {
       prisma.derivedTable.update({ where: { id: derivedTableId }, data: { lastStatus: "queued", lastError: null } }),
     ]);
     return job;
-  } finally {
-    await prisma.$executeRawUnsafe(`SELECT pg_advisory_unlock(${lockKey})`).catch(() => {});
-  }
+  });
 }
 
 export async function enqueueDueDerivedRefreshes() {

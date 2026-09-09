@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
 import { Cron } from "croner";
 import { prisma } from "@/server/db";
+import { withAdvisoryLock } from "@/server/db/advisory-lock";
 import { sqlPool, ensureSchema } from "@/server/azure/sql";
 import { getStorageConnection } from "@/server/storage/connection";
 import { sqlIdentifier } from "@/server/security/naming";
@@ -17,17 +18,10 @@ export function nextRefreshFromCron(cronExpr: string | null | undefined, from = 
   }
 }
 
-function advisoryLockKey(id: string): bigint {
-  // Convert first 15 hex chars of UUID (no dashes) to a positive bigint for pg_advisory_lock
-  return BigInt("0x" + id.replace(/-/g, "").slice(0, 15));
-}
-
 export async function queueSourceRefresh(datasetSourceId: string) {
   // Use Postgres advisory lock to prevent race condition where two workers both see "no existing job"
   // and both insert, creating duplicate SOURCE_REFRESH jobs for the same source.
-  const lockKey = advisoryLockKey(datasetSourceId);
-  await prisma.$executeRawUnsafe(`SELECT pg_advisory_lock(${lockKey})`);
-  try {
+  return withAdvisoryLock(datasetSourceId, async () => {
     const existing = await prisma.job.findFirst({
       where: { type: "SOURCE_REFRESH", status: { in: ["QUEUED", "RUNNING"] }, payloadJson: JSON.stringify({ datasetSourceId }) },
     });
@@ -42,9 +36,7 @@ export async function queueSourceRefresh(datasetSourceId: string) {
       prisma.datasetSource.update({ where: { id: datasetSourceId }, data: { lastStatus: "queued", lastError: null } }),
     ]);
     return job;
-  } finally {
-    await prisma.$executeRawUnsafe(`SELECT pg_advisory_unlock(${lockKey})`).catch(() => {});
-  }
+  });
 }
 
 export async function enqueueDueSourceRefreshes() {
