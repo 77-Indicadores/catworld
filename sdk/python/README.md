@@ -84,7 +84,7 @@ pip install "catworld-sdk[dataframe]"
 
 ---
 
-### `upload(path, dataset_id, mode="replace", key_column=None, poll_interval=2)`
+### `upload(path, dataset_id, mode="replace", key_column=None, table_id=None, wait=False, poll_interval=2, timeout=None)`
 
 Envia um arquivo para um dataset.
 
@@ -92,13 +92,17 @@ Envia um arquivo para um dataset.
 result = client.upload(
     "dados.xlsx",
     dataset_id="<dataset-id>",
-    mode="replace",       # "replace" sobrescreve, "append" adiciona, "upsert" atualiza/insere
-    key_column="id",      # obrigatório para mode="upsert"
+    table_id="<table-id>",  # recomendado sempre que o nome do arquivo pode variar
+    mode="replace",         # "replace" sobrescreve, "append" adiciona, "upsert" atualiza/insere
+    key_column="id",        # obrigatório para mode="upsert"
+    wait=True,               # recomendado — veja abaixo
 )
 print(result["status"], result["rowCount"])
 ```
 
-O método aguarda até a importação ser concluída. O arquivo pode ser `.csv`, `.xlsx` ou `.xls`.
+⚠️ **Por padrão (`wait=False`) este método NÃO informa se a importação deu certo.** Ele retorna assim que o arquivo é enfileirado — preview e import rodam em background, e um erro de schema, por exemplo, só aparece depois, olhando `get_upload(upload_id)` ou o painel. **Recomendamos fortemente `wait=True`** em qualquer script que precise saber o resultado: com isso, o método bloqueia até o import terminar (poll em `GET /api/v1/uploads/{id}`) e levanta `UploadError` com a mensagem de erro real do servidor se falhar (ex: `"Schema incompatível. Esperado: ..."`) — em vez de falhar em silêncio.
+
+O arquivo pode ser `.csv`, `.xlsx` ou `.xls`.
 
 **Parâmetros:**
 
@@ -108,7 +112,44 @@ O método aguarda até a importação ser concluída. O arquivo pode ser `.csv`,
 | `dataset_id` | `str` | — | ID do dataset de destino |
 | `mode` | `str` | `"replace"` | Modo de importação: `replace`, `append` ou `upsert` |
 | `key_column` | `str` | `None` | Coluna chave para `mode="upsert"` |
-| `poll_interval` | `float` | `2` | Intervalo de polling em segundos |
+| `table_id` | `str` | `None` | Tabela de destino. Sem isso, o nome vem do nome do arquivo — passe sempre que o nome puder variar entre execuções |
+| `wait` | `bool` | `False` | **Recomendado `True`.** Bloqueia até o import terminar e levanta exceção se falhar |
+| `poll_interval` | `float` | `2` | Intervalo de polling em segundos (só com `wait=True`) |
+| `timeout` | `float` | `None` | Tempo máximo de espera em segundos (só com `wait=True`); `None` = sem limite |
+
+**Erros comuns e como evitá-los:**
+
+| Erro | Causa | Como evitar |
+|---|---|---|
+| `Schema incompatível. Esperado: ...; atual: ...` | `append`/`upsert` com colunas diferentes (nome, ordem ou presença) da tabela já existente | Rode `check_append_compat` antes de subir o arquivo; garanta cabeçalhos estáveis entre execuções |
+| `Schema incompatível: tipos da tabela atual diferem do arquivo` | Uma coluna que antes era só números agora tem texto/decimal (ou vice-versa) — o tipo é reinferido a cada arquivo | Garanta que a exportação de origem produza o mesmo tipo de dado por coluna sempre |
+| `XLSX_TOO_LARGE` | Arquivo `.xlsx`/`.xls` acima do limite (XLSX é lido inteiro em memória) | Exporte como `.csv` para arquivos grandes |
+| Upload nunca sai de `RETRYING`/`FAILED` sempre com o mesmo erro | Erro estrutural (schema), não transitório — retry não resolve | Corrija o schema (veja acima); um `mode="replace"` único recria a tabela do zero com as colunas novas, mas **descarta dados que não estejam no arquivo atual** |
+
+---
+
+### `get_upload(upload_id)`
+
+Consulta o estado atual de um upload — útil com `wait=False`, ou pra checar um upload antigo.
+
+```python
+upload = client.get_upload(upload_id)
+print(upload["status"], upload.get("errorMessage"))
+```
+
+---
+
+### `check_append_compat(dataset_id, table_id, headers)`
+
+Confere, **antes de enviar o arquivo**, se os cabeçalhos batem com o schema físico da tabela — pega o erro mais comum de `append`/`upsert` sem gastar tempo/banda subindo o arquivo primeiro. Aceita cabeçalhos crus (com acento, espaço, etc.) e normaliza internamente do mesmo jeito que o servidor.
+
+```python
+headers = ["Período Início", "Período Fim", "Relatório", "Posto", "Produto", "Total Abastecido"]
+client.check_append_compat(dataset_id, table_id, headers)  # levanta ValidationError se não bater
+client.upload("relatorio.xlsx", dataset_id=dataset_id, table_id=table_id, mode="append")
+```
+
+Só compara nomes e ordem de coluna — **não valida tipo de dado** (isso só o servidor descobre lendo o arquivo de verdade). Se a tabela ainda não existe (upload novo), não levanta erro.
 
 ---
 

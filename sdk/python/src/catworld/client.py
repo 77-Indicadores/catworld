@@ -4,6 +4,8 @@ import hashlib as _hashlib
 import json as _json
 import logging
 import re
+import time as _time
+import unicodedata as _unicodedata
 import zlib as _zlib
 import datetime as _datetime
 from pathlib import Path
@@ -12,8 +14,10 @@ from typing import Any, Iterator
 import httpx
 
 from .exceptions import (
+    CatworldError,
     ConnectionError,
     QueryTimeoutError,
+    UploadError,
     ValidationError,
     from_api_error,
 )
@@ -23,6 +27,33 @@ logger.addHandler(logging.NullHandler())
 
 _PAGE_SIZE = 10_000
 _TIME_RE = re.compile(r"^1970-01-01T(\d{2}:\d{2}:\d{2})")
+_UPLOAD_TERMINAL_STATUSES = {"COMPLETED", "FAILED"}
+
+# Colunas geradas internamente pelo catworld — nunca fazem parte do arquivo
+# do usuário, então nunca entram na comparação de compatibilidade de schema.
+_INTERNAL_COLUMNS = {"_cw_rh"}
+
+
+def _sql_identifier(value: str, max_len: int = 128) -> str:
+    """Replica server/security/naming.ts:sqlIdentifier — normaliza um cabeçalho
+    de coluna pro mesmo nome físico que o servidor vai usar (minúsculas, sem
+    acento, não-alfanumérico vira "_"). Usado por check_append_compat para
+    comparar cabeçalhos crus do arquivo com as colunas já existentes na tabela.
+
+    Não replica o fallback de hash do servidor para nomes > max_len (raro);
+    nesse caso apenas trunca.
+    """
+    normalized = _unicodedata.normalize("NFD", value)
+    normalized = "".join(c for c in normalized if _unicodedata.category(c) != "Mn")
+    normalized = normalized.lower()
+    normalized = re.sub(r"[^a-z0-9_]+", "_", normalized)
+    normalized = re.sub(r"_+", "_", normalized)
+    normalized = normalized.strip("_")
+    if not normalized:
+        normalized = "campo"
+    if normalized[0].isdigit():
+        normalized = f"col_{normalized}"
+    return normalized[:max_len]
 
 
 def _fix_rows(rows: list) -> list:
@@ -357,8 +388,13 @@ class CatworldClient:
             return None
 
         live_source_ids = {table["source"]["id"] for table in live}
+        live_conn_ids = {
+            (table.get("source") or {}).get("connectionId")
+            or ((table.get("source") or {}).get("connection") or {}).get("id")
+            for table in live
+        }
         internal = [table for table in matched if (table.get("source") or {}).get("mode") != "live"]
-        if internal or len(live_source_ids) > 1:
+        if internal or len(live_conn_ids - {None}) > 1:
             raise ValidationError(
                 "Query mistura tabelas live com outras origens. Materialize a fonte como extract ou consulte uma fonte live por vez.",
                 code="MIXED_QUERY_ENGINES",
@@ -372,7 +408,45 @@ class CatworldClient:
         mode: str = "replace",
         key_column: str | None = None,
         table_id: str | None = None,
+        wait: bool = False,
+        poll_interval: float = 2.0,
+        timeout: float | None = None,
     ):
+        """Envia um arquivo para importação.
+
+        Por padrão (``wait=False``), este método retorna assim que o arquivo é
+        enfileirado para processamento (preview/import rodam em background) —
+        NÃO informa se a importação teve sucesso. Use ``get_upload(upload_id)``
+        para checar o resultado depois, ou passe ``wait=True``.
+
+        Com ``wait=True``, o método SÓ RETORNA depois que o preview + import
+        terminarem de rodar no servidor (poll em ``GET /api/v1/uploads/{id}``
+        a cada ``poll_interval`` segundos) e levanta ``UploadError`` se o
+        processamento falhar — com a mensagem de erro real do servidor (ex:
+        "Schema incompatível. Esperado: ..."). **Recomendado** sempre que o
+        chamador precisa saber se a importação realmente deu certo — sem
+        isso, uma falha (ex: schema incompatível) pode passar batido
+        silenciosamente por semanas, só visível olhando o painel ou o banco.
+
+        Args:
+            path: Caminho do arquivo (CSV, XLSX ou XLS).
+            dataset_id: Dataset de destino.
+            mode: "replace" (padrão), "append" ou "upsert".
+            key_column: Obrigatório para mode="upsert" — coluna usada como chave.
+            table_id: Tabela de destino. Se omitido, o nome da tabela é derivado
+                do nome do arquivo — use table_id sempre que o nome do arquivo
+                puder variar entre execuções (ex: tem data no nome).
+            wait: Se True, bloqueia até o import terminar e levanta exceção se
+                falhar. Se False (padrão), retorna imediatamente.
+            poll_interval: Segundos entre verificações de status (só com wait=True).
+            timeout: Segundos máximos de espera (só com wait=True). None = sem limite
+                (o próprio job tem retry/timeout interno no servidor).
+
+        Raises:
+            UploadError: se wait=True e o processamento terminar em FAILED.
+            QueryTimeoutError: se wait=True, timeout for passado e for excedido.
+            ConnectionError: se wait=True e houver falha de rede ao verificar o status.
+        """
         file = Path(path)
         if not file.exists():
             raise FileNotFoundError(f"Arquivo não encontrado: {file}")
@@ -414,8 +488,84 @@ class CatworldClient:
             logger.warning("Conexão encerrada pelo servidor (499), tentativa %s/3...", attempt + 1)
 
         self._request("POST", f"/api/v1/uploads/{upload_id}?action=uploaded")
-        logger.info("Arquivo enviado. Processamento ocorre em background (upload_id=%s)", upload_id)
-        return created["upload"]
+
+        if not wait:
+            logger.info("Arquivo enviado. Processamento ocorre em background (upload_id=%s)", upload_id)
+            return created["upload"]
+
+        logger.info("Arquivo enviado. Aguardando preview + import concluírem (upload_id=%s)...", upload_id)
+        return self._wait_for_upload(upload_id, poll_interval=poll_interval, timeout=timeout)
+
+    def get_upload(self, upload_id: str) -> dict:
+        """Retorna o registro completo do upload (status, errorMessage, rowCount, etc.)."""
+        return self._request("GET", f"/api/v1/uploads/{upload_id}")
+
+    def _wait_for_upload(self, upload_id: str, poll_interval: float, timeout: float | None) -> dict:
+        started = _time.monotonic()
+        while True:
+            try:
+                upload = self.get_upload(upload_id)
+            except CatworldError as exc:
+                # Falha ao CONSULTAR o status não significa que o upload falhou —
+                # não reembala como UploadError, senão fica indistinguível de uma
+                # falha real de importação.
+                raise ConnectionError(f"Falha ao verificar status do upload {upload_id}: {exc}") from exc
+
+            status = upload.get("status")
+            if status == "COMPLETED":
+                logger.info("Upload %s concluído (%s linha(s))", upload_id, upload.get("rowCount", "?"))
+                return upload
+            if status == "FAILED":
+                raise UploadError(
+                    upload.get("errorMessage") or "Falha desconhecida no processamento do upload",
+                    code="UPLOAD_FAILED",
+                )
+
+            if timeout is not None and (_time.monotonic() - started) >= timeout:
+                raise QueryTimeoutError(
+                    f"Upload {upload_id} não concluiu em {timeout}s (status atual: {status})"
+                )
+
+            if poll_interval > 0:
+                _time.sleep(poll_interval)
+
+    def check_append_compat(self, dataset_id: str, table_id: str, headers: list[str]) -> None:
+        """Confere ANTES de subir o arquivo se os nomes/ordem de coluna batem com
+        a tabela física — pega o erro mais comum de append/upsert (schema
+        incompatível) sem gastar tempo/banda enviando o arquivo primeiro.
+
+        Compara só nomes e ordem de coluna (normalizados do mesmo jeito que o
+        servidor normaliza: minúsculas, sem acento, não-alfanumérico vira "_").
+        NÃO valida tipo de dado — isso só o servidor descobre lendo o arquivo de
+        verdade, então uma incompatibilidade de tipo ainda pode aparecer só na
+        hora do import mesmo depois deste check passar.
+
+        Args:
+            dataset_id: Dataset onde a tabela está.
+            table_id: Tabela de destino do upload.
+            headers: Cabeçalhos das colunas do arquivo, na ordem em que aparecem
+                (nomes crus, sem precisar normalizar — isso é feito aqui).
+
+        Raises:
+            ValidationError: se a tabela já existe e os nomes/ordem não baterem
+                (mesmo formato de mensagem do erro real do servidor).
+        """
+        tables = self.tables(dataset_id)
+        table = next((t for t in tables if t.get("id") == table_id), None)
+        if table is None:
+            logger.debug("Tabela %s não encontrada em datasets(%s) — tratando como tabela nova, nada a comparar.", table_id, dataset_id)
+            return
+
+        existing = [c["sqlName"] for c in (table.get("columns") or []) if c.get("sqlName") not in _INTERNAL_COLUMNS]
+        if not existing:
+            return  # tabela ainda sem colunas registradas (nunca importada) — nada a comparar
+
+        expected = [_sql_identifier(h) for h in headers]
+        if expected != existing:
+            raise ValidationError(
+                f"Schema incompatível. Esperado: {', '.join(expected)}; atual: {', '.join(existing)}",
+                code="SCHEMA_INCOMPATIBLE",
+            )
 
     @staticmethod
     def _stream_md5(file: Path, chunk_size: int = 1024 * 1024) -> str:
