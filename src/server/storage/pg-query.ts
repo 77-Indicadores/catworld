@@ -146,9 +146,35 @@ export async function executeReadOnlyPgStream(
   const encoder = new TextEncoder();
   const started = Date.now();
 
+  // Se o cliente HTTP desconecta no meio do stream, o runtime chama cancel()
+  // abaixo e o controller já fica fechado/inválido — sem essa guarda,
+  // controller.enqueue()/close() joga "Invalid state: Controller is already
+  // closed" de dentro do catch/finally, o que é uma exceção não tratada
+  // (nada re-captura um throw dentro de catch/finally aqui) e vira
+  // uncaughtException, derrubando o processo Node inteiro.
+  let closed = false;
+
   // Executa a query completa e emite as linhas em stream
   return new ReadableStream<Uint8Array>({
     async start(controller) {
+      const safeEnqueue = (chunk: Uint8Array) => {
+        if (closed) return;
+        try {
+          controller.enqueue(chunk);
+        } catch {
+          closed = true;
+        }
+      };
+      const safeClose = () => {
+        if (closed) return;
+        closed = true;
+        try {
+          controller.close();
+        } catch {
+          // já fechado pelo runtime (cliente desconectou) — ignora
+        }
+      };
+
       let client: PoolClient | null = null;
       try {
         client = await conn._pool.connect();
@@ -159,20 +185,24 @@ export async function executeReadOnlyPgStream(
         }
         const result = await client.query(statement);
         const columns = result.fields.map((f) => f.name);
-        controller.enqueue(encoder.encode(JSON.stringify({ __columns__: columns }) + "\n"));
+        safeEnqueue(encoder.encode(JSON.stringify({ __columns__: columns }) + "\n"));
         let rowCount = 0;
         for (const row of result.rows as Record<string, unknown>[]) {
-          controller.enqueue(encoder.encode(JSON.stringify(row) + "\n"));
+          if (closed) break; // cliente desconectou — não vale a pena continuar serializando
+          safeEnqueue(encoder.encode(JSON.stringify(row) + "\n"));
           rowCount++;
         }
-        controller.enqueue(encoder.encode(JSON.stringify({ __done__: true, rowCount, executionTimeMs: Date.now() - started }) + "\n"));
+        safeEnqueue(encoder.encode(JSON.stringify({ __done__: true, rowCount, executionTimeMs: Date.now() - started }) + "\n"));
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        controller.enqueue(encoder.encode(JSON.stringify({ __error__: true, message: msg }) + "\n"));
+        safeEnqueue(encoder.encode(JSON.stringify({ __error__: true, message: msg }) + "\n"));
       } finally {
         client?.release();
-        controller.close();
+        safeClose();
       }
+    },
+    cancel() {
+      closed = true;
     },
   });
 }

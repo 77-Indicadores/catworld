@@ -233,36 +233,70 @@ export async function executeReadOnlyStream(
   const encoder = new TextEncoder();
   const started = Date.now();
 
+  // Se o cliente HTTP desconecta no meio do stream (timeout do lado dele,
+  // fechou a conexão), o runtime chama cancel() abaixo e o controller já fica
+  // fechado/inválido — mas a query no SQL Server continua rodando e os
+  // eventos 'row'/'done'/'error' ainda disparam depois. Sem essa guarda,
+  // controller.enqueue()/close() joga "Invalid state: Controller is
+  // already closed" de dentro de um callback de EventEmitter — uma exceção
+  // que ninguém captura, vira uncaughtException e derruba o processo Node
+  // inteiro (não só essa request). `request` e `closed` ficam no escopo de
+  // fora do `start` pra `cancel()` também poder enxergar e agir sobre eles.
+  let request: sql.Request | undefined;
+  let closed = false;
+
   return new ReadableStream<Uint8Array>({
     start(controller) {
-      const request = new sql.Request(pool);
+      request = new sql.Request(pool);
       (request as unknown as { timeout: number }).timeout = timeoutMs;
       (request as unknown as { overrides: { requestTimeout: number } }).overrides = { requestTimeout: timeoutMs };
       request.stream = true;
 
       let rowCount = 0;
+      const safeEnqueue = (chunk: Uint8Array) => {
+        if (closed) return;
+        try {
+          controller.enqueue(chunk);
+        } catch {
+          closed = true;
+        }
+      };
+      const safeClose = () => {
+        if (closed) return;
+        closed = true;
+        try {
+          controller.close();
+        } catch {
+          // já fechado pelo runtime (cliente desconectou) — ignora
+        }
+      };
 
       request.on("recordset", (columns: Record<string, unknown>) => {
-        controller.enqueue(encoder.encode(JSON.stringify({ __columns__: Object.keys(columns) }) + "\n"));
+        safeEnqueue(encoder.encode(JSON.stringify({ __columns__: Object.keys(columns) }) + "\n"));
       });
 
       request.on("row", (row: Record<string, unknown>) => {
         rowCount++;
-        controller.enqueue(encoder.encode(JSON.stringify(row) + "\n"));
+        safeEnqueue(encoder.encode(JSON.stringify(row) + "\n"));
       });
 
       request.on("error", (err: Error) => {
         Sentry.addBreadcrumb({ category: "db.query", message: "executeReadOnlyStream failed", level: "error", data: { sql: statement, principal, schemas } });
-        controller.enqueue(encoder.encode(JSON.stringify({ __error__: true, message: err.message }) + "\n"));
-        controller.close();
+        safeEnqueue(encoder.encode(JSON.stringify({ __error__: true, message: err.message }) + "\n"));
+        safeClose();
       });
 
       request.on("done", () => {
-        controller.enqueue(encoder.encode(JSON.stringify({ __done__: true, rowCount, executionTimeMs: Date.now() - started }) + "\n"));
-        controller.close();
+        safeEnqueue(encoder.encode(JSON.stringify({ __done__: true, rowCount, executionTimeMs: Date.now() - started }) + "\n"));
+        safeClose();
       });
 
       request.query(statement);
+    },
+    // Cliente desconectou/abortou: para de tentar escrever no controller e
+    // cancela a query no SQL Server em vez de deixá-la rodar até o fim à toa.
+    cancel() {
+      request?.cancel();
     },
   });
 }
