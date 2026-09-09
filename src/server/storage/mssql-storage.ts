@@ -283,7 +283,14 @@ export class MssqlStorageConnection implements StorageConnection {
       await tx.begin();
       try {
         const req = new sql.Request(tx);
-        setReqTimeout(req, 30_000);
+        // DROP TABLE precisa de lock exclusivo de schema — qualquer leitura
+        // concorrente na tabela (dashboard, /api/v1/queries, OData) bloqueia até
+        // terminar. 30s já se mostrou curto demais em produção quando um
+        // relatório mais pesado está lendo a tabela no momento do swap
+        // ("Timeout: Request failed to complete in 30000ms"); o job em si já
+        // tem retry (até 5 tentativas), então um timeout mais generoso aqui
+        // reduz falsos positivos sem esconder um lock realmente preso.
+        setReqTimeout(req, 120_000);
         if (targetExists) await req.query(`DROP TABLE ${qTgt}`);
         await req.query(`EXEC sp_rename N'${esc(schema)}.${esc(staging)}', N'${esc(target)}'`);
         await tx.commit();
@@ -340,7 +347,14 @@ export class MssqlStorageConnection implements StorageConnection {
       await tx.begin();
       try {
         const req = new sql.Request(tx);
-        setReqTimeout(req, 30_000);
+        // DROP TABLE precisa de lock exclusivo de schema — qualquer leitura
+        // concorrente na tabela (dashboard, /api/v1/queries, OData) bloqueia até
+        // terminar. 30s já se mostrou curto demais em produção quando um
+        // relatório mais pesado está lendo a tabela no momento do swap
+        // ("Timeout: Request failed to complete in 30000ms"); o job em si já
+        // tem retry (até 5 tentativas), então um timeout mais generoso aqui
+        // reduz falsos positivos sem esconder um lock realmente preso.
+        setReqTimeout(req, 120_000);
         if (targetExists) await req.query(`DROP TABLE ${qTgt}`);
         await req.query(`EXEC sp_rename N'${esc(schema)}.${esc(mergedName)}', N'${esc(target)}'`);
         await tx.commit();
