@@ -22,10 +22,18 @@ export const confirmUploadSchema = z.object({
 });
 
 const SMALL_CSV_THRESHOLD = 1_048_576;       // 1 MB — TDS path, no Azure SQL INSERT SELECT
-const LARGE_FILE_THRESHOLD = 50 * 1_048_576; // 50 MB — parse em memoria (DuckDB) fica pesado
+const LARGE_FILE_THRESHOLD = 15 * 1_048_576; // 15 MB — parse em memoria (DuckDB) fica pesado
                                               // independente do modo; um replace de 200MB+ nao
                                               // pode furar o limite de heavy jobs so por nao usar
-                                              // staging (ja causou OOM com varios em paralelo)
+                                              // staging (ja causou OOM com varios em paralelo).
+                                              // Baixado de 50MB pra 15MB em 2026-09-15: producao
+                                              // mostrou varios CSVs de 15-19MB (abaixo do teto
+                                              // antigo, logo weight<2, nao gateados por
+                                              // maxHeavyJobs) rodando em paralelo — cada um com
+                                              // seu proprio DuckDB (CATWORLD_DUCKDB_MEMORY_LIMIT,
+                                              // default 1GB) — e o host foi a ~12GB de RSS
+                                              // (cw_job_metrics mostrou varios desses jobs com
+                                              // created_at no mesmo segundo, workers diferentes).
 
 // XLSX e sempre lido inteiro em memoria via ExcelJS Workbook, sem streaming (ver nota
 // em parser.ts sobre o bug do WorkbookReader) — CSV/TSV grande passa pelo DuckDB, que
