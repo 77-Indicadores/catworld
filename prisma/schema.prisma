@@ -382,6 +382,19 @@ model SystemSetting {
   @@map("cw_system_settings")
 }
 
+// Lock por linha usado por withImportLock (server/db/import-lock.ts) pra serializar
+// imports concorrentes na mesma tabela SEM segurar uma transacao Postgres aberta
+// durante todo o trabalho externo no SQL Server (ver advisory-lock.ts pro mecanismo
+// antigo, ainda usado pros writes curtos de metadata).
+model ImportLock {
+  lockKey   String   @id @map("lock_key") @db.VarChar(160)
+  lockedAt  DateTime @map("locked_at") @db.Timestamp(3)
+  lockedBy  String   @map("locked_by") @db.VarChar(160)
+  expiresAt DateTime @map("expires_at") @db.Timestamp(3)
+
+  @@map("cw_import_locks")
+}
+
 model CleanupRun {
   id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   startedAt       DateTime  @default(now()) @map("started_at") @db.Timestamptz(3)

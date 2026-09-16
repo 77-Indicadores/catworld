@@ -2,7 +2,8 @@ import * as Sentry from "@sentry/nextjs";
 import { extname } from "node:path";
 import sql from "mssql";
 import { prisma } from "@/server/db";
-import { withAdvisoryLock, withAdvisoryLockForString } from "@/server/db/advisory-lock";
+import { withAdvisoryLock } from "@/server/db/advisory-lock";
+import { withImportLock } from "@/server/db/import-lock";
 import { sqlPool } from "@/server/azure/sql";
 import { getStoragePool } from "@/server/storage/pool";
 import { getStorageConnection, type ColDef } from "@/server/storage/connection";
@@ -255,13 +256,17 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
   // disparavam CREATE TABLE / CREATE INDEX um em cima do outro ("There is
   // already an object named ...", "index or statistics ... already exists").
   //
-  // Usa withAdvisoryLockForString (pg_advisory_xact_lock via prisma.$transaction)
-  // em vez de pg_advisory_lock/unlock direto — a versão anterior usava
-  // $executeRawUnsafe solto, que não garante a mesma conexão física entre o
-  // lock e o unlock sob o pool do Prisma. Isso já causou "deadlock detected"
-  // (40P01) em produção: o lock ficava preso numa conexão que o pool
-  // reciclava, e outro import entrava num ciclo de espera cruzada.
-  return withAdvisoryLockForString(`${upload.dataset.id}:${schema}.${tableName}`, importUploadForTable);
+  // Usa withImportLock (lock por linha em cw_import_locks, sem transação
+  // Postgres de vida longa) em vez do antigo withAdvisoryLockForString
+  // (pg_advisory_xact_lock dentro de prisma.$transaction com timeout fixo).
+  // Motivo da troca: o trabalho protegido aqui é externo (SQL Server) e pode
+  // legitimamente demorar minutos por lock de leitura concorrente na tabela
+  // física (DROP TABLE do swap exige lock exclusivo) — isso não tem relação
+  // com o Postgres, então não devia poder estourar timeout de transação
+  // Postgres. Visto em produção: vendas_completo/ADL falhando ~4x/dia com
+  // "Transaction already closed" após 13-18min mesmo em arquivos pequenos
+  // que normalmente levam <2min.
+  return withImportLock(`${upload.dataset.id}:${schema}.${tableName}`, importUploadForTable);
 
   async function importUploadForTable() {
     const stage = `cw_stage_${upload.id.replaceAll("-", "").slice(0, 20)}`;
