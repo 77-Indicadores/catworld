@@ -42,8 +42,15 @@ async function withLockKey<T>(lockKey: bigint, fn: () => Promise<T>): Promise<T>
     },
     // maxWait: quanto esperar pra conseguir uma conexão do pool antes de desistir.
     // timeout: quanto tempo a transação (e portanto o lock) pode ficar aberta —
+    // subido de 10 pra 30min em 2026-09-16: producao mostrou imports de
+    // vendas_completo/ADL falhando ~4x/dia com "Transaction already closed"
+    // apos 13-18min mesmo em arquivos pequenos (~22k linhas, que normalmente
+    // levam <2min) — sintoma de lock de leitura concorrente na tabela fisica
+    // durante o swap (ver nota em mssql-storage.ts sobre DROP TABLE exigir
+    // lock exclusivo). 30min da margem sem esconder um lock realmente preso
+    // (o job de import ja tem retry proprio, ate 5 tentativas).
     // precisa ser generoso o bastante pro import inteiro caber aqui dentro.
-    { maxWait: 30_000, timeout: 10 * 60_000 },
+    { maxWait: 30_000, timeout: 30 * 60_000 },
   );
 }
 
