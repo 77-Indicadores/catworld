@@ -40,6 +40,11 @@ export async function POST(r: NextRequest) {
       previewJson: z.string().optional(),
       mappingJson: z.string().optional(),
       rowCount: z.number().int().nonnegative().optional(),
+      // Sobrepõe o tipo SQL auto-detectado pra colunas especificas (chave = sqlName
+      // normalizado do cabeçalho, valor = um dos tipos canonicos aceitos em
+      // applyTypeOverrides). Aplicado durante PREVIEW_UPLOAD, antes do import —
+      // ver src/worker/index.ts.
+      typeOverrides: z.record(z.string(), z.string()).optional(),
     }).parse(await r.json());
 
     if (input.sizeBytes > env().CATWORLD_UPLOAD_MAX_BYTES) {
@@ -71,6 +76,7 @@ export async function POST(r: NextRequest) {
         keyColumn: input.keyColumn ?? null,
         previewJson: input.previewJson ?? null,
         mappingJson: input.mappingJson ?? null,
+        typeOverridesJson: input.typeOverrides ? JSON.stringify(input.typeOverrides) : null,
         rowCount: input.rowCount != null ? BigInt(input.rowCount) : null,
       },
     });

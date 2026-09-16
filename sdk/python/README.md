@@ -84,7 +84,7 @@ pip install "catworld-sdk[dataframe]"
 
 ---
 
-### `upload(path, dataset_id, mode="replace", key_column=None, table_id=None, wait=False, poll_interval=2, timeout=None)`
+### `upload(path, dataset_id, mode="replace", key_column=None, table_id=None, column_types=None, wait=False, poll_interval=2, timeout=None, skip_preflight=False)`
 
 Envia um arquivo para um dataset.
 
@@ -104,6 +104,14 @@ print(result["status"], result["rowCount"])
 
 O arquivo pode ser `.csv`, `.xlsx` ou `.xls`.
 
+**Pré-checagens automáticas (desde 0.6.0)** — sempre que `table_id` é informado e `mode` é `"append"` ou `"upsert"`, `upload()` valida localmente *antes de enviar qualquer byte*:
+
+- `mode="upsert"` sem `key_column` falha na hora, sem gastar banda.
+- Para arquivos `.csv`, os cabeçalhos são comparados com o schema físico da tabela (mesma checagem de `check_append_compat`) — pega o erro mais comum de append/upsert de graça. Para `.xlsx`/`.xls` essa parte é pulada (chame `check_append_compat` manualmente se quiser essa cobertura).
+- Em `mode="upsert"`, também confere que `key_column` existe na tabela e **ainda é única nela hoje** (`check_upsert_ready`) — sem isso, uma chave que já não é única na tabela de destino (por exemplo, populada antes por um `append`) faria o upsert mesclar essas duplicatas silenciosamente pra sempre.
+
+Passe `skip_preflight=True` para pular essas checagens (por exemplo, se alguma delas der falso positivo no seu caso).
+
 **Parâmetros:**
 
 | Parâmetro | Tipo | Padrão | Descrição |
@@ -113,16 +121,36 @@ O arquivo pode ser `.csv`, `.xlsx` ou `.xls`.
 | `mode` | `str` | `"replace"` | Modo de importação: `replace`, `append` ou `upsert` |
 | `key_column` | `str` | `None` | Coluna chave para `mode="upsert"` |
 | `table_id` | `str` | `None` | Tabela de destino. Sem isso, o nome vem do nome do arquivo — passe sempre que o nome puder variar entre execuções |
+| `column_types` | `dict[str, str]` | `None` | Sobrepõe o tipo SQL auto-detectado para colunas específicas — veja abaixo |
 | `wait` | `bool` | `False` | **Recomendado `True`.** Bloqueia até o import terminar e levanta exceção se falhar |
 | `poll_interval` | `float` | `2` | Intervalo de polling em segundos (só com `wait=True`) |
 | `timeout` | `float` | `None` | Tempo máximo de espera em segundos (só com `wait=True`); `None` = sem limite |
+| `skip_preflight` | `bool` | `False` | Pula as pré-checagens locais descritas acima |
+
+**Sobrepondo o tipo de uma coluna (`column_types`)**
+
+O servidor infere o tipo SQL de cada coluna olhando uma amostra do arquivo a cada upload — isso pode divergir entre execuções (ex: uma coluna maiormente vazia vira texto numa carga e data em outra), quebrando `append`/`upsert` com `Schema incompatível` mesmo sem mudança real de dado. Use `column_types` para fixar o tipo de uma coluna manualmente:
+
+```python
+client.upload(
+    "vendas.csv",
+    dataset_id="<dataset-id>",
+    table_id="<table-id>",
+    mode="append",
+    column_types={"data_venda": "DATE", "valor": "DECIMAL(18,2)"},
+)
+```
+
+Tipos aceitos: `BIGINT`, `DECIMAL(p,s)` (ex: `DECIMAL(18,2)`), `DATE`, `DATETIME2`, `TIME`, `NVARCHAR(MAX)`. A chave é o nome da coluna (cabeçalho original ou já normalizado); um override com nome ou tipo desconhecido é ignorado silenciosamente pelo servidor (não derruba o upload).
 
 **Erros comuns e como evitá-los:**
 
 | Erro | Causa | Como evitar |
 |---|---|---|
-| `Schema incompatível. Esperado: ...; atual: ...` | `append`/`upsert` com colunas diferentes (nome, ordem ou presença) da tabela já existente | Rode `check_append_compat` antes de subir o arquivo; garanta cabeçalhos estáveis entre execuções |
-| `Schema incompatível: tipos da tabela atual diferem do arquivo` | Uma coluna que antes era só números agora tem texto/decimal (ou vice-versa) — o tipo é reinferido a cada arquivo | Garanta que a exportação de origem produza o mesmo tipo de dado por coluna sempre |
+| `Schema incompatível. Esperado: ...; atual: ...` | `append`/`upsert` com colunas diferentes (nome, ordem ou presença) da tabela já existente | A partir de 0.6.0 isso é pego automaticamente pela pré-checagem, antes do upload; garanta cabeçalhos estáveis entre execuções |
+| `Schema incompatível: tipos da tabela atual diferem do arquivo` | Uma coluna que antes era só números agora tem texto/decimal (ou vice-versa) — o tipo é reinferido a cada arquivo | Use `column_types` para fixar o tipo da coluna, ou garanta que a exportação de origem produza o mesmo tipo sempre |
+| `Coluna-chave '...' já não é única na tabela de destino` | `mode="upsert"` com uma `key_column` que já tem valores duplicados na tabela (ex: populada antes por um `append`) | Pego automaticamente pela pré-checagem; limpe as duplicatas existentes na tabela antes de retomar o upsert |
+| `Arquivo contém chaves duplicadas para upsert na coluna "..."` | O arquivo enviado tem a própria chave duplicada — a mensagem já traz uma amostra dos valores e quantas vezes cada um se repete | Deduplique o arquivo antes de subir, usando os valores listados no erro |
 | `XLSX_TOO_LARGE` | Arquivo `.xlsx`/`.xls` acima do limite (XLSX é lido inteiro em memória) | Exporte como `.csv` para arquivos grandes |
 | Upload nunca sai de `RETRYING`/`FAILED` sempre com o mesmo erro | Erro estrutural (schema), não transitório — retry não resolve | Corrija o schema (veja acima); um `mode="replace"` único recria a tabela do zero com as colunas novas, mas **descarta dados que não estejam no arquivo atual** |
 
@@ -150,6 +178,21 @@ client.upload("relatorio.xlsx", dataset_id=dataset_id, table_id=table_id, mode="
 ```
 
 Só compara nomes e ordem de coluna — **não valida tipo de dado** (isso só o servidor descobre lendo o arquivo de verdade). Se a tabela ainda não existe (upload novo), não levanta erro.
+
+Desde 0.6.0, `upload()` já chama isso automaticamente para arquivos `.csv` (veja "Pré-checagens automáticas" acima) — use este método diretamente só para `.xlsx`/`.xls`, ou pra checar antes de decidir o `table_id`.
+
+---
+
+### `check_upsert_ready(dataset_id, table_id, key_column)`
+
+Confere, **antes de enviar o arquivo**, se `key_column` está pronta para `mode="upsert"`: existe na tabela e ainda não tem valores duplicados nela. O servidor só valida chave duplicada *no arquivo novo* — nunca na tabela já existente — então uma chave que já não é única na tabela de destino faria o upsert mesclar essas duplicatas silenciosamente pra sempre.
+
+```python
+client.check_upsert_ready(dataset_id, table_id, "documento")  # levanta ValidationError se a chave não existir ou já tiver duplicata
+client.upload("clientes.csv", dataset_id=dataset_id, table_id=table_id, mode="upsert", key_column="documento")
+```
+
+Desde 0.6.0, `upload()` já chama isso automaticamente quando `mode="upsert"` (veja "Pré-checagens automáticas" acima) — use este método diretamente só se quiser rodar a checagem separadamente do upload, ou com `skip_preflight=True`.
 
 ---
 

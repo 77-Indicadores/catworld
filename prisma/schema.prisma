@@ -218,6 +218,7 @@ model Upload {
   progress         Int           @default(0)
   previewJson      String?       @map("preview_json") @db.Text
   mappingJson      String?       @map("mapping_json") @db.Text
+  typeOverridesJson String?      @map("type_overrides_json") @db.Text
   rowCount         BigInt?       @map("row_count")
   insertedCount    BigInt?       @map("inserted_count")
   updatedCount     BigInt?       @map("updated_count")

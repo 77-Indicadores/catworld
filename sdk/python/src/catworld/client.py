@@ -408,9 +408,11 @@ class CatworldClient:
         mode: str = "replace",
         key_column: str | None = None,
         table_id: str | None = None,
+        column_types: dict[str, str] | None = None,
         wait: bool = False,
         poll_interval: float = 2.0,
         timeout: float | None = None,
+        skip_preflight: bool = False,
     ):
         """Envia um arquivo para importação.
 
@@ -436,14 +438,41 @@ class CatworldClient:
             table_id: Tabela de destino. Se omitido, o nome da tabela é derivado
                 do nome do arquivo — use table_id sempre que o nome do arquivo
                 puder variar entre execuções (ex: tem data no nome).
+            column_types: Sobrepõe o tipo SQL auto-detectado para colunas específicas.
+                Chave = nome da coluna (cabeçalho original ou já normalizado), valor =
+                um destes tipos: "BIGINT", "DECIMAL(p,s)" (ex: "DECIMAL(10,2)"), "DATE",
+                "DATETIME2", "TIME", "NVARCHAR(MAX)". Útil quando a amostra do arquivo
+                engana a heurística (ex: coluna maiormente vazia detectada como texto
+                quando deveria ser DATE) ou quando dois arquivos do "mesmo" formato
+                divergem de inferência entre execuções, quebrando append/upsert com
+                "Schema incompatível" mesmo sem mudança real de dado. Overrides com
+                nome ou tipo desconhecido são ignorados silenciosamente pelo servidor
+                (não derrubam o upload) — confira os logs do worker se um override
+                não parecer ter sido aplicado.
             wait: Se True, bloqueia até o import terminar e levanta exceção se
                 falhar. Se False (padrão), retorna imediatamente.
             poll_interval: Segundos entre verificações de status (só com wait=True).
             timeout: Segundos máximos de espera (só com wait=True). None = sem limite
                 (o próprio job tem retry/timeout interno no servidor).
+            skip_preflight: Se True, pula as checagens locais abaixo (schema/coluna-chave)
+                e vai direto pro upload. Use se as checagens estiverem dando falso positivo.
+
+        Uma pré-checagem roda automaticamente antes de qualquer byte subir, sempre que
+        ``table_id`` é informado e ``mode`` é "append" ou "upsert" (pulável com
+        ``skip_preflight=True``):
+          - ``mode="upsert"`` sem ``key_column`` falha imediatamente, sem gastar banda.
+          - Nomes/ordem de coluna são comparados com a tabela física (mesma checagem de
+            ``check_append_compat``) — só funciona pra CSV; XLSX não é lido localmente
+            aqui, então essa parte é pulada nesse caso (chame ``check_append_compat`` você
+            mesmo com os headers da planilha, se quiser essa cobertura pra XLSX).
+          - Em ``mode="upsert"``, também confere que ``key_column`` existe e ainda é
+            única na tabela de destino hoje (``check_upsert_ready``) — evita perpetuar
+            chave duplicada silenciosamente num merge futuro.
 
         Raises:
-            UploadError: se wait=True e o processamento terminar em FAILED.
+            ValidationError: falha de pré-checagem (ver acima) — nenhum byte é enviado.
+            UploadError: se wait=True e o processamento terminar em FAILED. A mensagem
+                inclui, para upsert, uma amostra das chaves duplicadas encontradas.
             QueryTimeoutError: se wait=True, timeout for passado e for excedido.
             ConnectionError: se wait=True e houver falha de rede ao verificar o status.
         """
@@ -452,10 +481,16 @@ class CatworldClient:
             raise FileNotFoundError(f"Arquivo não encontrado: {file}")
         size = file.stat().st_size
 
+        if mode == "upsert" and not key_column:
+            raise ValidationError('mode="upsert" exige key_column — nenhum byte foi enviado.', code="KEY_COLUMN_REQUIRED")
+
         logger.info(
             "Iniciando upload: %s (%s) → dataset=%s [modo=%s]",
             file.name, _fmt_bytes(size), dataset_id, mode,
         )
+
+        if not skip_preflight and table_id and mode in ("append", "upsert"):
+            self._upload_preflight(file, dataset_id, table_id, mode, key_column)
 
         file_hash = self._stream_md5(file)
         logger.debug("Hash MD5: %s", file_hash)
@@ -465,6 +500,8 @@ class CatworldClient:
             body["tableId"] = table_id
         if key_column:
             body["keyColumn"] = key_column
+        if column_types:
+            body["typeOverrides"] = column_types
         created = self._request("POST", "/api/v1/uploads", json=body)
 
         if created.get("skip"):
@@ -566,6 +603,103 @@ class CatworldClient:
                 f"Schema incompatível. Esperado: {', '.join(expected)}; atual: {', '.join(existing)}",
                 code="SCHEMA_INCOMPATIBLE",
             )
+
+    def check_upsert_ready(self, dataset_id: str, table_id: str, key_column: str) -> None:
+        """Confere ANTES de subir o arquivo se ``key_column`` está pronta para upsert:
+        existe na tabela física, e a tabela ainda não tem valores duplicados nela.
+
+        Sem essa checagem, um upsert com uma chave que já não é única na tabela de
+        destino (ex: populada antes por um append) mescla silenciosamente essas
+        duplicatas pra sempre — o servidor só valida chave duplicada no arquivo novo,
+        nunca na tabela existente.
+
+        Args:
+            dataset_id: Dataset onde a tabela está.
+            table_id: Tabela de destino do upload.
+            key_column: Nome da coluna-chave (cabeçalho original ou já normalizado).
+
+        Raises:
+            ValidationError: se a coluna não existe na tabela, ou se já há valores
+                duplicados nela hoje (a mensagem traz uma amostra das chaves).
+        """
+        tables = self.tables(dataset_id)
+        table = next((t for t in tables if t.get("id") == table_id), None)
+        if table is None:
+            logger.debug("Tabela %s não encontrada em datasets(%s) — tratando como tabela nova, nada a checar.", table_id, dataset_id)
+            return
+
+        columns = [c["sqlName"] for c in (table.get("columns") or []) if c.get("sqlName") not in _INTERNAL_COLUMNS]
+        if not columns:
+            return  # tabela ainda sem colunas registradas (nunca importada) — nada a checar
+
+        key_norm = _sql_identifier(key_column)
+        if key_norm not in columns:
+            raise ValidationError(
+                f"Coluna-chave '{key_column}' não existe na tabela de destino. Colunas disponíveis: {', '.join(columns)}",
+                code="KEY_COLUMN_NOT_FOUND",
+            )
+
+        table_name = table.get("sqlName") or table.get("name")
+        try:
+            result = self.query(
+                f'SELECT "{key_norm}" AS k, COUNT(*) AS n FROM "{table_name}" GROUP BY "{key_norm}" HAVING COUNT(*) > 1',
+                dataset_id=dataset_id,
+                limit=5,
+            )
+        except ValidationError:
+            raise
+        except CatworldError as exc:
+            # Não bloqueia o upload por uma falha inesperada nessa checagem best-effort
+            # (ex: dialeto SQL do storage não aceitou a query) — só avisa e segue.
+            logger.warning("check_upsert_ready: não foi possível verificar unicidade de '%s' em '%s': %s", key_column, table_name, exc)
+            return
+
+        if result.rows:
+            sample = ", ".join(f"{r.get('k')!r} (x{r.get('n')})" for r in result.rows)
+            raise ValidationError(
+                f"Coluna-chave '{key_column}' já não é única na tabela de destino — um upsert manteria essas "
+                f"duplicatas para sempre: {sample}. Corrija os dados existentes antes de usar mode=\"upsert\".",
+                code="KEY_COLUMN_NOT_UNIQUE",
+            )
+
+    def _upload_preflight(
+        self,
+        file: Path,
+        dataset_id: str,
+        table_id: str,
+        mode: str,
+        key_column: str | None,
+    ) -> None:
+        """Roda as checagens locais de `upload()` antes de qualquer byte subir."""
+        if file.suffix.lower() == ".csv":
+            headers = self._csv_headers(file)
+            if headers:
+                self.check_append_compat(dataset_id, table_id, headers)
+        else:
+            logger.debug("Pré-checagem de schema pulada para %s (só suportada para CSV) — arquivo: %s", file.suffix, file.name)
+
+        if mode == "upsert" and key_column:
+            self.check_upsert_ready(dataset_id, table_id, key_column)
+
+    @staticmethod
+    def _csv_headers(file: Path) -> list[str] | None:
+        """Lê só a primeira linha do CSV pra extrair os cabeçalhos, sem depender
+        de nenhuma lib de parsing pesada. Detecta o separador (`,`/`;`/tab) pela
+        própria linha de cabeçalho — heurística simples, suficiente pra esse fim
+        (a detecção completa/real acontece no servidor, ver server/uploads/parser.ts).
+        """
+        import csv as _csv
+
+        try:
+            with file.open("r", encoding="utf-8-sig", newline="") as f:
+                first_line = f.readline()
+                if not first_line.strip():
+                    return None
+                separator = max((";", ",", "\t"), key=first_line.count)
+                return next(_csv.reader([first_line], delimiter=separator))
+        except (OSError, UnicodeDecodeError, StopIteration) as exc:
+            logger.debug("Não foi possível ler cabeçalhos de %s para pré-checagem: %s", file.name, exc)
+            return None
 
     @staticmethod
     def _stream_md5(file: Path, chunk_size: int = 1024 * 1024) -> str:

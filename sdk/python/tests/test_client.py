@@ -314,3 +314,130 @@ def test_check_append_compat_skips_unknown_table_silently():
 
     with client_with_handler(handler) as client:
         client.check_append_compat("ds_1", "tbl_novo", ["a", "b"])  # tabela nova — sem erro
+
+
+def test_check_upsert_ready_raises_on_unknown_key_column():
+    from catworld import ValidationError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/datasets/ds_1/tables"
+        return httpx.Response(200, json={"data": [
+            {"id": "tbl_1", "sqlName": "clientes", "columns": [{"sqlName": "id"}, {"sqlName": "nome"}]},
+        ]})
+
+    with client_with_handler(handler) as client:
+        with pytest.raises(ValidationError, match="não existe na tabela"):
+            client.check_upsert_ready("ds_1", "tbl_1", "documento")
+
+
+def test_check_upsert_ready_raises_when_key_already_duplicated_in_target():
+    from catworld import ValidationError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/datasets/ds_1/tables":
+            return httpx.Response(200, json={"data": [
+                {"id": "tbl_1", "sqlName": "clientes", "columns": [{"sqlName": "id"}, {"sqlName": "documento"}]},
+            ]})
+        assert request.method == "POST" and request.url.path == "/api/v1/queries"
+        return httpx.Response(200, json={"data": {"rows": [{"k": "123", "n": 2}], "columns": ["k", "n"], "rowCount": 1}})
+
+    with client_with_handler(handler) as client:
+        with pytest.raises(ValidationError, match="já não é única"):
+            client.check_upsert_ready("ds_1", "tbl_1", "documento")
+
+
+def test_check_upsert_ready_passes_when_key_is_unique():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/datasets/ds_1/tables":
+            return httpx.Response(200, json={"data": [
+                {"id": "tbl_1", "sqlName": "clientes", "columns": [{"sqlName": "id"}, {"sqlName": "documento"}]},
+            ]})
+        assert request.method == "POST" and request.url.path == "/api/v1/queries"
+        return httpx.Response(200, json={"data": {"rows": [], "columns": [], "rowCount": 0}})
+
+    with client_with_handler(handler) as client:
+        client.check_upsert_ready("ds_1", "tbl_1", "documento")  # não deve levantar
+
+
+def test_check_upsert_ready_skips_unknown_table_silently():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/datasets/ds_1/tables"
+        return httpx.Response(200, json={"data": []})
+
+    with client_with_handler(handler) as client:
+        client.check_upsert_ready("ds_1", "tbl_novo", "documento")  # tabela nova — sem erro
+
+
+def test_upload_raises_immediately_for_upsert_without_key_column():
+    from catworld import ValidationError
+
+    upload_file = Path("sdk/python/tests/.tmp-upload-no-key.csv")
+    upload_file.write_text("id,name\n1,Mochi\n", encoding="utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"Nenhuma requisição deveria ser feita, mas recebi: {request.method} {request.url}")
+
+    client = CatworldClient("https://catworld.example", "cw_live_test")
+    client._client.close()
+    client._client = httpx.Client(base_url="https://catworld.example", transport=httpx.MockTransport(handler))
+
+    try:
+        with pytest.raises(ValidationError, match="key_column"):
+            client.upload(upload_file, dataset_id="dataset-1", mode="upsert")
+    finally:
+        client.close()
+        upload_file.unlink(missing_ok=True)
+
+
+def test_upload_runs_preflight_and_blocks_before_sending_bytes():
+    from catworld import ValidationError
+
+    upload_file = Path("sdk/python/tests/.tmp-upload-preflight.csv")
+    upload_file.write_text("id,documento\n1,999\n", encoding="utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/datasets/ds_1/tables":
+            return httpx.Response(200, json={"data": [
+                {"id": "tbl_1", "sqlName": "clientes", "columns": [{"sqlName": "outra_coisa"}]},
+            ]})
+        raise AssertionError(f"Upload não deveria prosseguir após falha de preflight: {request.method} {request.url}")
+
+    client = CatworldClient("https://catworld.example", "cw_live_test")
+    client._client.close()
+    client._client = httpx.Client(base_url="https://catworld.example", transport=httpx.MockTransport(handler))
+
+    try:
+        with pytest.raises(ValidationError, match="Schema incompatível"):
+            client.upload(upload_file, dataset_id="ds_1", table_id="tbl_1", mode="append")
+    finally:
+        client.close()
+        upload_file.unlink(missing_ok=True)
+
+
+def test_upload_sends_type_overrides_in_create_body():
+    upload_file = Path("sdk/python/tests/.tmp-upload-overrides.csv")
+    upload_file.write_text("id,dt\n1,2026-01-01\n", encoding="utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/api/v1/uploads":
+            body = json.loads(request.content)
+            assert body["typeOverrides"] == {"dt": "DATE"}
+            return httpx.Response(200, json={"data": {
+                "upload": {"id": "upload-ov", "status": "PENDING_UPLOAD"},
+                "sas": {"url": "https://blob.example/upload-ov"},
+            }})
+        if request.method == "PUT" and request.url.host == "blob.example":
+            return httpx.Response(201, text="")
+        if request.method == "POST" and request.url.params.get("action") == "uploaded":
+            return httpx.Response(200, json={"data": {"ok": True}})
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = CatworldClient("https://catworld.example", "cw_live_test")
+    client._client.close()
+    client._client = httpx.Client(base_url="https://catworld.example", transport=httpx.MockTransport(handler))
+
+    try:
+        client.upload(upload_file, dataset_id="dataset-1", column_types={"dt": "DATE"}, wait=False)
+    finally:
+        client.close()
+        upload_file.unlink(missing_ok=True)

@@ -273,10 +273,14 @@ export async function importUploadPg(
           const key = pgQuote(upload.keyColumn);
 
           // Verifica chaves duplicadas no arquivo
-          const dupRes = await client.query<{ n: string }>(
-            `SELECT COUNT(*) AS n FROM (SELECT ${key}, COUNT(*) c FROM ${qStaging} GROUP BY ${key} HAVING COUNT(*) > 1) x`,
+          const dupRes = await client.query<{ k: unknown; n: string }>(
+            `SELECT ${key} AS k, COUNT(*) n FROM ${qStaging} GROUP BY ${key} HAVING COUNT(*) > 1 LIMIT 20`,
           );
-          if (Number(dupRes.rows[0]?.n) > 0) throw new Error("Arquivo contém chaves duplicadas para upsert");
+          if (dupRes.rows.length > 0) {
+            const sample = dupRes.rows.map(r => `${r.k} (x${r.n})`).join(", ");
+            const more = dupRes.rows.length >= 20 ? " (mostrando as primeiras 20)" : "";
+            throw new Error(`Arquivo contém chaves duplicadas para upsert na coluna "${upload.keyColumn}": ${sample}${more}`);
+          }
 
           const delRes = await client.query(
             `DELETE FROM ${qTarget} t USING ${qStaging} s WHERE t.${key} = s.${key}`,

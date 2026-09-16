@@ -129,6 +129,37 @@ function textSqlType(){
 function headerLooksIdentifier(header:string){return /(^|[_\s-])(cpf|cnpj|cep|telefone|phone|celular|whats|codigo|cod|sku|id|documento|doc)([_\s-]|$)/i.test(header)}
 function columnsFromStats(headers:string[],stats:ColumnStats[]):ParsedColumn[]{const used=new Map<string,number>();return headers.map((header,index)=>{let name=sqlIdentifier(header||`col_${index+1}`);const n=(used.get(name)??0)+1;used.set(name,n);if(n>1)name=`${name}_${n}`;const s=stats[index]??newStats();const forceText=s.looksIdentifier||headerLooksIdentifier(header);const sqlType=s.sampleCount===0?"NVARCHAR(MAX)":forceText?textSqlType():s.allInt?"BIGINT":s.allDecimal?"DECIMAL(18,4)":s.allDateLike&&s.hasTimePart?"DATETIME2":s.allDateLike?"DATE":s.allTime?"TIME":textSqlType();return{originalName:header,sqlName:name,sqlType,nullable:true}})}
 
+// Tipos canônicos aceitos como override — os mesmos que columnsFromStats pode produzir.
+// DECIMAL aceita qualquer precisão/escala (ex: "DECIMAL(10,2)"), o resto é exato.
+const OVERRIDABLE_TYPES = new Set(["BIGINT", "DATE", "DATETIME2", "TIME", "NVARCHAR(MAX)"]);
+function isValidTypeOverride(type: string): boolean {
+  return OVERRIDABLE_TYPES.has(type) || /^DECIMAL\(\d{1,2},\d{1,2}\)$/.test(type);
+}
+
+/**
+ * Aplica overrides de tipo (chave = sqlName ou originalName da coluna, case-insensitive)
+ * por cima da inferência automática. Overrides com nome desconhecido ou tipo inválido
+ * são ignorados (não derrubam o import) — devolve a lista de nomes de fato aplicados.
+ */
+export function applyTypeOverrides(columns: ParsedColumn[], overrides: Record<string, string> | null | undefined): { columns: ParsedColumn[]; applied: string[]; ignored: string[] } {
+  if (!overrides || !Object.keys(overrides).length) return { columns, applied: [], ignored: [] };
+  const byKey = new Map<string, ParsedColumn>();
+  for (const c of columns) {
+    byKey.set(c.sqlName.toLowerCase(), c);
+    byKey.set(c.originalName.toLowerCase(), c);
+  }
+  const applied: string[] = [];
+  const ignored: string[] = [];
+  for (const [rawName, rawType] of Object.entries(overrides)) {
+    const type = rawType.toUpperCase().trim();
+    const col = byKey.get(rawName.toLowerCase());
+    if (!col || !isValidTypeOverride(type)) { ignored.push(rawName); continue; }
+    col.sqlType = type;
+    applied.push(col.sqlName);
+  }
+  return { columns, applied, ignored };
+}
+
 function xlsxColumnIndices(headers:string[],columns:ParsedColumn[]){
  let cursor=0;
  return columns.map((column,index)=>{

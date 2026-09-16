@@ -8,7 +8,7 @@ import * as Sentry from "@sentry/node";
 import { prisma } from "@/server/db";
 import { downloadFile, deleteFile } from "@/server/storage";
 import { env } from "@/server/env";
-import { previewFile, type FilePreview } from "@/server/uploads/parser";
+import { previewFile, applyTypeOverrides, type FilePreview } from "@/server/uploads/parser";
 import { importUpload } from "@/server/uploads/importer";
 import { queueImportUploadAuto } from "@/server/uploads/actions";
 import { enqueueDueSourceRefreshes, refreshDatasetSource, nextRefreshFromCron } from "@/server/connections/sources";
@@ -313,6 +313,10 @@ async function work(job: Claimed) {
       try {
         await prisma.upload.update({ where: { id: upload.id }, data: { status: "PREVIEWING", progress: 10 } });
         const preview = await previewFile(file.path);
+        const overrides = upload.typeOverridesJson ? JSON.parse(upload.typeOverridesJson) as Record<string, string> : null;
+        const { applied, ignored } = applyTypeOverrides(preview.columns, overrides);
+        if (applied.length) console.log("[worker] type overrides aplicados upload=%s: %s", upload.id, applied.join(", "));
+        if (ignored.length) console.warn("[worker] type overrides ignorados (coluna ou tipo inválido) upload=%s: %s", upload.id, ignored.join(", "));
         await prisma.upload.update({
           where: { id: upload.id },
           data: { previewJson: JSON.stringify(preview), rowCount: BigInt(preview.rowCount) },

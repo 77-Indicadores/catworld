@@ -394,9 +394,19 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
         // ── Atomic swap / transaction ────────────────────────────────────────────
         // deltaReplace e upsert usam atomicSwap (lock ~ms em produção).
         // phase2, replace e append mantêm o caminho de transação original.
+        // _cw_rh é sempre um hash MD5 hex (32 chars, fixo) — em todo outro lugar
+        // do arquivo é declarado CHAR(32) (colDefs/colDefsMax acima, full replace
+        // abaixo). Aqui estava NVARCHAR(MAX) por engano: como atomicSwap (upsert/
+        // mergeSwap) usa esse mapping pra CREATE TABLE da tabela mesclada que vira
+        // o novo target, isso deixava _cw_rh permanentemente NVARCHAR(MAX) na
+        // tabela física — e NVARCHAR(MAX) nunca pode ser coluna de índice no SQL
+        // Server, então um replace/upsert seguinte que tenta garantir o índice
+        // IX__cw_rh nessa tabela falha com "Column '_cw_rh' ... invalid for use
+        // as a key column in an index" (visto em producao em cta_economia_por_veiculo
+        // e outras tabelas que já passaram por upsert).
         const mappingWithRh: ColDef[] = [
           ...mapping.map(c => ({ name: c.sqlName, sqlType: c.sqlType, nullable: true })),
-          { name: "_cw_rh", sqlType: "NVARCHAR(MAX)", nullable: true },
+          { name: "_cw_rh", sqlType: "CHAR(32)", nullable: true },
         ];
 
         if (deltaReplace && !phase2) {
@@ -409,9 +419,13 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
           if (!upload.keyColumn) throw new Error("Upsert exige coluna-chave");
           const key = quoteIdentifier(upload.keyColumn);
           const duplicates = await pool.request().query(
-            `SELECT ${key}, COUNT(*) n FROM ${staging} GROUP BY ${key} HAVING COUNT(*) > 1`,
+            `SELECT TOP 20 ${key} AS k, COUNT(*) n FROM ${staging} GROUP BY ${key} HAVING COUNT(*) > 1`,
           );
-          if (duplicates.recordset.length) throw new Error("Arquivo contém chaves duplicadas para upsert");
+          if (duplicates.recordset.length) {
+            const sample = duplicates.recordset.map((r: { k: unknown; n: number }) => `${r.k} (x${r.n})`).join(", ");
+            const more = duplicates.recordset.length >= 20 ? " (mostrando as primeiras 20)" : "";
+            throw new Error(`Arquivo contém chaves duplicadas para upsert na coluna "${upload.keyColumn}": ${sample}${more}`);
+          }
           const mergedName = `cw_mgd_${upload.id.replaceAll("-", "").slice(0, 20)}`;
           await storageConn.atomicSwap(schema, stage, tableName, mappingWithRh, {
             targetExists, keyColumn: upload.keyColumn, mergedName,

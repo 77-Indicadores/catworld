@@ -36,6 +36,7 @@ function upload(overrides: Partial<Parameters<typeof storeUploadBody>[0]> = {}) 
     progress: 0,
     previewJson: null,
     mappingJson: null,
+    typeOverridesJson: null,
     rowCount: null,
     insertedCount: null,
     updatedCount: null,
