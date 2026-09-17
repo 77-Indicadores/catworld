@@ -10,7 +10,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const actor = await resolveActor(request);
     const source = await prisma.datasetSource.findUniqueOrThrow({ where: { id: (await params).id }, include: { dataset: true } });
     if (!await canAccess(actor, "WRITE", source.dataset.projectId, source.datasetId) && actor.role !== "ADMIN") throw new ApiError(403, "FORBIDDEN", "Sem permissao para atualizar a fonte");
-    return ok(await queueSourceRefresh(source.id), undefined, 202);
+    const body = await request.json().catch(() => ({}));
+    const reconciliation = body?.reconciliation === true;
+    return ok(await queueSourceRefresh(source.id, { reconciliation }), undefined, 202);
   } catch (e) {
     return handleApiError(e);
   }

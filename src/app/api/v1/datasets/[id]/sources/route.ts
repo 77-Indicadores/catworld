@@ -38,6 +38,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       refreshCron: z.string().max(100).nullable().optional(),
       keyColumn: z.string().max(128).nullable().optional(),
       deltaColumn: z.string().max(128).nullable().optional(),
+      reconciliationCron: z.string().max(100).nullable().optional(),
+      sourceSqlReconciliation: z.string().nullable().optional(),
       sourceGroupId: z.string().uuid().optional(),
     }).parse(await request.json());
     if (input.sourceKind === "table" && input.sourceTables?.length) {

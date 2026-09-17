@@ -17,6 +17,7 @@ type Source = {
   sourceSchema: string | null; sourceTable: string | null; sourceSql: string | null;
   refreshCron: string | null;
   keyColumn: string | null; deltaColumn: string | null; active: boolean;
+  reconciliationCron: string | null; sourceSqlReconciliation: string | null;
   lastStatus: string | null; lastRowCount: string | null; lastError: string | null;
   lastRefreshedAt: string | null; nextRefreshAt: string | null;
   connection: { id: string; name: string };

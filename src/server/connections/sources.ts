@@ -18,12 +18,23 @@ export function nextRefreshFromCron(cronExpr: string | null | undefined, from = 
   }
 }
 
-export async function queueSourceRefresh(datasetSourceId: string) {
+export async function queueSourceRefresh(datasetSourceId: string, opts?: { reconciliation?: boolean }) {
+  const reconciliation = !!opts?.reconciliation;
   // Use Postgres advisory lock to prevent race condition where two workers both see "no existing job"
   // and both insert, creating duplicate SOURCE_REFRESH jobs for the same source.
   return withAdvisoryLock(datasetSourceId, async () => {
-    const existing = await prisma.job.findFirst({
-      where: { type: "SOURCE_REFRESH", status: { in: ["QUEUED", "RUNNING"] }, payloadJson: JSON.stringify({ datasetSourceId }) },
+    const candidates = await prisma.job.findMany({
+      where: { type: "SOURCE_REFRESH", status: { in: ["QUEUED", "RUNNING"] } },
+      select: { id: true, status: true, payloadJson: true },
+    });
+    // Compara campos parseados, não a string exata — um job de reconciliação em fila
+    // nao deve ser confundido com (nem deduplicado contra) um refresh normal do mesmo
+    // source, e vice-versa.
+    const existing = candidates.find(j => {
+      try {
+        const p = JSON.parse(j.payloadJson ?? "{}") as { datasetSourceId?: string; reconciliation?: boolean };
+        return p.datasetSourceId === datasetSourceId && !!p.reconciliation === reconciliation;
+      } catch { return false; }
     });
     if (existing) {
       if (existing.status === "QUEUED") {
@@ -32,7 +43,7 @@ export async function queueSourceRefresh(datasetSourceId: string) {
       return existing;
     }
     const [job] = await prisma.$transaction([
-      prisma.job.create({ data: { type: "SOURCE_REFRESH", payloadJson: JSON.stringify({ datasetSourceId }), maxAttempts: 3, weight: 2 } }),
+      prisma.job.create({ data: { type: "SOURCE_REFRESH", payloadJson: JSON.stringify({ datasetSourceId, reconciliation }), maxAttempts: 3, weight: 2 } }),
       prisma.datasetSource.update({ where: { id: datasetSourceId }, data: { lastStatus: "queued", lastError: null } }),
     ]);
     return job;
@@ -87,6 +98,53 @@ export async function enqueueDueSourceRefreshes() {
   }
 }
 
+/** Espelha enqueueDueSourceRefreshes, mas para o cron secundário de reconciliação
+ * (full snapshot periódico — ver refreshDatasetSource com opts.reconciliation). */
+export async function enqueueDueReconciliations() {
+  const { getWorkerConfig } = await import("@/server/worker/config");
+  const { maxSyncsPerStorage } = await getWorkerConfig();
+
+  const runningJobs = await prisma.job.findMany({
+    where: { type: "SOURCE_REFRESH", status: "RUNNING" },
+    select: { payloadJson: true },
+  });
+  const runningSources = runningJobs.map(j => {
+    try { return (JSON.parse(j.payloadJson ?? "") as { datasetSourceId?: string }).datasetSourceId ?? null; } catch { return null; }
+  }).filter((id): id is string => id != null);
+
+  const runningSyncsPerStorage = new Map<string, number>();
+  if (runningSources.length) {
+    const sourceDatasets = await prisma.datasetSource.findMany({
+      where: { id: { in: runningSources } },
+      select: { dataset: { select: { storageServerId: true } } },
+    });
+    for (const s of sourceDatasets) {
+      const sid = s.dataset.storageServerId ?? "__default__";
+      runningSyncsPerStorage.set(sid, (runningSyncsPerStorage.get(sid) ?? 0) + 1);
+    }
+  }
+
+  const due = await prisma.datasetSource.findMany({
+    where: {
+      active: true,
+      mode: "extract",
+      reconciliationCron: { not: null },
+      nextReconciliationAt: { lte: new Date() },
+    },
+    select: { id: true, dataset: { select: { storageServerId: true } } },
+    orderBy: { nextReconciliationAt: "asc" },
+    take: 50,
+  });
+
+  for (const source of due) {
+    const sid = source.dataset.storageServerId ?? "__default__";
+    const running = runningSyncsPerStorage.get(sid) ?? 0;
+    if (running >= maxSyncsPerStorage) continue;
+    runningSyncsPerStorage.set(sid, running + 1);
+    await queueSourceRefresh(source.id, { reconciliation: true });
+  }
+}
+
 export async function createDatasetSource(input: {
   datasetId: string;
   connectionId: string;
@@ -99,6 +157,8 @@ export async function createDatasetSource(input: {
   refreshCron?: string | null;
   keyColumn?: string | null;
   deltaColumn?: string | null;
+  reconciliationCron?: string | null;
+  sourceSqlReconciliation?: string | null;
   sourceGroupId?: string;
 }) {
   const [dataset, connection] = await Promise.all([
@@ -110,6 +170,11 @@ export async function createDatasetSource(input: {
   if (!["postgres", "mssql"].includes(connection.provider)) throw new ApiError(400, "UNSUPPORTED_PROVIDER", `Provider ${connection.provider} nao suportado`);
   if (input.sourceKind === "table" && (!input.sourceSchema || !input.sourceTable)) throw new ApiError(400, "INVALID_SOURCE", "Tabela exige schema e nome");
   if (input.sourceKind === "query" && !input.sourceSql?.trim()) throw new ApiError(400, "INVALID_SOURCE", "Consulta obrigatoria");
+  // Sem a consulta de reconciliacao, fullSnapshot rodaria sobre a query janelada
+  // normal e marcaria quase tudo como excluido por engano.
+  if (input.reconciliationCron?.trim() && input.sourceKind === "query" && !input.sourceSqlReconciliation?.trim()) {
+    throw new ApiError(400, "RECONCILIATION_SQL_REQUIRED", "Fontes por consulta exigem uma consulta de reconciliacao (sem filtro de data) para habilitar o cron de reconciliacao");
+  }
 
   const columns = input.sourceKind === "table"
     ? (connection.provider === "mssql" ? await tableColumnsMssql(connection, input.sourceSchema!, input.sourceTable!) : await tableColumns(connection, input.sourceSchema!, input.sourceTable!))
@@ -140,6 +205,9 @@ export async function createDatasetSource(input: {
       keyColumn: input.keyColumn ?? null,
       deltaColumn: input.sourceKind === "table" ? (input.deltaColumn ?? null) : null,
       refreshCron: input.mode === "live" ? null : (input.refreshCron ?? null),
+      reconciliationCron: input.mode === "live" ? null : (input.reconciliationCron ?? null),
+      sourceSqlReconciliation: input.sourceKind === "query" ? (input.sourceSqlReconciliation ?? null) : null,
+      nextReconciliationAt: input.mode === "extract" ? nextRefreshFromCron(input.reconciliationCron) : null,
       lastStatus: input.mode === "live" ? "ready" : "queued",
       nextRefreshAt: input.mode === "extract" ? nextRefreshFromCron(input.refreshCron) : null,
     },
@@ -179,7 +247,8 @@ export async function createDatasetSources(input: {
   return sources;
 }
 
-export async function refreshDatasetSource(datasetSourceId: string) {
+export async function refreshDatasetSource(datasetSourceId: string, opts?: { reconciliation?: boolean }) {
+  const reconciliation = !!opts?.reconciliation;
   const source = await prisma.datasetSource.findUnique({
     where: { id: datasetSourceId },
     include: { dataset: true, connection: true, targetTable: true },
@@ -187,14 +256,22 @@ export async function refreshDatasetSource(datasetSourceId: string) {
   if (!source || !source.active) throw new ApiError(404, "SOURCE_NOT_FOUND", "Fonte não encontrada");
   if (source.mode !== "extract") throw new ApiError(400, "INVALID_SOURCE_MODE", "Apenas fontes extract podem ser atualizadas");
   if (!source.targetTable) throw new ApiError(400, "SOURCE_NO_TARGET_TABLE", "Fonte sem tabela de destino");
+  if (reconciliation && source.sourceKind === "query" && !source.sourceSqlReconciliation?.trim()) {
+    throw new ApiError(400, "RECONCILIATION_SQL_REQUIRED", "Fonte sem consulta de reconciliacao configurada");
+  }
 
   const isMssql = source.connection.provider === "mssql";
 
-  // Delta: only fetch rows newer than lastDeltaValue (table sources only, requires keyColumn for upsert)
-  const useDelta = !!(source.deltaColumn && source.lastDeltaValue && source.keyColumn && source.sourceKind === "table");
+  // Delta: only fetch rows newer than lastDeltaValue (table sources only, requires keyColumn for upsert).
+  // Numa rodada de reconciliacao, o delta e ignorado de proposito: le a tabela inteira
+  // (sem WHERE) para poder detectar exclusoes que a busca parcial nunca veria.
+  const useDelta = !reconciliation && !!(source.deltaColumn && source.lastDeltaValue && source.keyColumn && source.sourceKind === "table");
+  // Reconciliacao em fonte por consulta usa o SQL sem filtro de data (sourceSqlReconciliation),
+  // nunca o sourceSql janelado normal — ja validado acima que existe quando reconciliation=true.
+  const effectiveSourceSql = reconciliation && source.sourceKind === "query" ? source.sourceSqlReconciliation! : source.sourceSql!;
   const baseTableQuery = source.sourceKind === "table"
     ? `SELECT * FROM ${isMssql ? quotedMssqlTable(source.sourceSchema!, source.sourceTable!) : quotedPgTable(source.sourceSchema!, source.sourceTable!)}`
-    : source.sourceSql!;
+    : effectiveSourceSql;
   const quoteCol = (col: string) => isMssql ? `[${col.replace(/]/g, "]]")}]` : `"${col.replace(/"/g, '""')}"`;
   const query = useDelta
     ? `${baseTableQuery} WHERE ${quoteCol(source.deltaColumn!)} > '${source.lastDeltaValue!.replace(/'/g, "''")}'`
@@ -202,7 +279,7 @@ export async function refreshDatasetSource(datasetSourceId: string) {
 
   const columns = source.sourceKind === "table"
     ? (isMssql ? await tableColumnsMssql(source.connection, source.sourceSchema!, source.sourceTable!) : await tableColumns(source.connection, source.sourceSchema!, source.sourceTable!))
-    : (isMssql ? await queryColumnsMssql(source.connection, source.sourceSql!) : await queryColumns(source.connection, source.sourceSql!));
+    : (isMssql ? await queryColumnsMssql(source.connection, effectiveSourceSql) : await queryColumns(source.connection, effectiveSourceSql));
 
   const storageConn = await getStorageConnection(source.dataset.storageServerId);
   const schema = source.dataset.schemaName;
@@ -243,14 +320,19 @@ export async function refreshDatasetSource(datasetSourceId: string) {
     const hasTarget = await storageConn.tableExists(schema, table);
     const useKeyMerge = !!source.keyColumn && hasTarget;
     if (useKeyMerge) await assertKeyColumnSafe(storageConn, schema, stage, source.keyColumn!);
-    // fullSnapshot: staging representa 100% do estado atual da origem (não uma busca
-    // parcial por deltaColumn) — só nesse caso é seguro tratar "ausente da staging" como
-    // excluído na origem (ver Parte D do plano de incremental).
+    // fullSnapshot: só é seguro tratar "ausente da staging" como excluído na origem
+    // quando a staging representa 100% do estado atual — ou seja, em reconciliação
+    // (sempre) ou em sourceKind "table" sem deltaColumn (fetch sempre completo, nunca
+    // parcial). Fontes por consulta fora da reconciliação são, por padrão, tratadas
+    // como parciais (o filtro de janela fica embutido no SQL do usuário e o Catworld
+    // não tem como saber se ele cobre 100% da origem) — nunca marcam exclusão por conta
+    // própria, só quando reconciliation=true.
+    const fullSnapshot = reconciliation || (source.sourceKind === "table" && !useDelta);
     await storageConn.atomicSwap(schema, stage, table, stageCols, {
       targetExists: hasTarget,
       keyColumn: useKeyMerge ? source.keyColumn : null,
       mergedName: useKeyMerge ? `cw_mgd_${source.id.replaceAll("-", "").slice(0, 20)}` : undefined,
-      fullSnapshot: !useDelta,
+      fullSnapshot,
     });
 
     const finalRowCount = await storageConn.countRows(schema, table);
@@ -263,7 +345,9 @@ export async function refreshDatasetSource(datasetSourceId: string) {
         lastRowCount: finalRowCount,
         lastError: null,
         lastRefreshedAt: new Date(),
-        nextRefreshAt: nextRefreshFromCron(source.refreshCron),
+        ...(reconciliation
+          ? { nextReconciliationAt: nextRefreshFromCron(source.reconciliationCron), lastReconciliationAt: new Date() }
+          : { nextRefreshAt: nextRefreshFromCron(source.refreshCron) }),
         ...(newDeltaValue !== undefined ? { lastDeltaValue: newDeltaValue } : {}),
       },
     });
@@ -273,7 +357,13 @@ export async function refreshDatasetSource(datasetSourceId: string) {
     const message = e instanceof Error ? e.message : String(e);
     await prisma.datasetSource.update({
       where: { id: source.id },
-      data: { lastStatus: "failed", lastError: message, nextRefreshAt: nextRefreshFromCron(source.refreshCron) },
+      data: {
+        lastStatus: "failed",
+        lastError: message,
+        ...(reconciliation
+          ? { nextReconciliationAt: nextRefreshFromCron(source.reconciliationCron) }
+          : { nextRefreshAt: nextRefreshFromCron(source.refreshCron) }),
+      },
     });
     throw e;
   }

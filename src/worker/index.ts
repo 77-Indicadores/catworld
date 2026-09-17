@@ -11,7 +11,7 @@ import { env } from "@/server/env";
 import { previewFile, applyTypeOverrides, type FilePreview } from "@/server/uploads/parser";
 import { importUpload } from "@/server/uploads/importer";
 import { queueImportUploadAuto } from "@/server/uploads/actions";
-import { enqueueDueSourceRefreshes, refreshDatasetSource, nextRefreshFromCron } from "@/server/connections/sources";
+import { enqueueDueSourceRefreshes, enqueueDueReconciliations, refreshDatasetSource, nextRefreshFromCron } from "@/server/connections/sources";
 import { enqueueDueDerivedRefreshes, refreshDerivedTable } from "@/server/connections/derived";
 import { startHeartbeat, currentRssMb, recordJobMetric, writeWorkerLiveness } from "./metrics";
 
@@ -255,11 +255,11 @@ async function work(job: Claimed) {
   }
 
   if (job.type === "SOURCE_REFRESH") {
-    const payload = JSON.parse(job.payload_json ?? "{}") as { datasetSourceId?: string };
+    const payload = JSON.parse(job.payload_json ?? "{}") as { datasetSourceId?: string; reconciliation?: boolean };
     if (!payload.datasetSourceId) throw new Error("SOURCE_REFRESH sem datasetSourceId");
     const hb = startHeartbeat(job.id);
     try {
-      await refreshDatasetSource(payload.datasetSourceId);
+      await refreshDatasetSource(payload.datasetSourceId, { reconciliation: !!payload.reconciliation });
     } finally {
       clearInterval(hb);
     }
@@ -413,10 +413,10 @@ async function nextRefreshAtOnFailure(job: Claimed, retry: boolean): Promise<Dat
   if (retry) return undefined;
   try {
     if (job.type === "SOURCE_REFRESH") {
-      const { datasetSourceId } = JSON.parse(job.payload_json ?? "{}") as { datasetSourceId?: string };
+      const { datasetSourceId, reconciliation } = JSON.parse(job.payload_json ?? "{}") as { datasetSourceId?: string; reconciliation?: boolean };
       if (!datasetSourceId) return undefined;
-      const source = await prisma.datasetSource.findUnique({ where: { id: datasetSourceId }, select: { refreshCron: true } });
-      return nextRefreshFromCron(source?.refreshCron);
+      const source = await prisma.datasetSource.findUnique({ where: { id: datasetSourceId }, select: { refreshCron: true, reconciliationCron: true } });
+      return nextRefreshFromCron(reconciliation ? source?.reconciliationCron : source?.refreshCron);
     }
     if (job.type === "DERIVED_REFRESH") {
       const { derivedTableId } = JSON.parse(job.payload_json ?? "{}") as { derivedTableId?: string };
@@ -430,9 +430,9 @@ async function nextRefreshAtOnFailure(job: Claimed, retry: boolean): Promise<Dat
 
 function sourceRefreshFailureUpdate(job: Claimed, message: string, retry: boolean, nextRefreshAt: Date | null | undefined) {
   if (job.type !== "SOURCE_REFRESH") return null;
-  let payload: { datasetSourceId?: string };
+  let payload: { datasetSourceId?: string; reconciliation?: boolean };
   try {
-    payload = JSON.parse(job.payload_json ?? "{}") as { datasetSourceId?: string };
+    payload = JSON.parse(job.payload_json ?? "{}") as { datasetSourceId?: string; reconciliation?: boolean };
   } catch {
     return null;
   }
@@ -442,7 +442,7 @@ function sourceRefreshFailureUpdate(job: Claimed, message: string, retry: boolea
     data: {
       lastStatus: retry ? "queued" : "failed",
       lastError: message,
-      nextRefreshAt,
+      ...(payload.reconciliation ? { nextReconciliationAt: nextRefreshAt } : { nextRefreshAt }),
     },
   });
 }
@@ -656,7 +656,7 @@ async function main() {
       if (Date.now() - lastRecovery > 60000) {
         try {
           await recoverStale();
-          if (handlesSourceRefresh) await enqueueDueSourceRefreshes();
+          if (handlesSourceRefresh) { await enqueueDueSourceRefreshes(); await enqueueDueReconciliations(); }
           if (handlesDerivedRefresh) await enqueueDueDerivedRefreshes();
           await scheduleCleanupIfNeeded();
         } catch (e) {

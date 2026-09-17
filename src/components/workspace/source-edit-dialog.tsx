@@ -12,6 +12,8 @@ type Source = {
   refreshCron: string | null;
   keyColumn: string | null;
   deltaColumn: string | null;
+  reconciliationCron: string | null;
+  sourceSqlReconciliation: string | null;
   sourceKind: string;
   sourceSql?: string | null;
   connection: { id: string; name: string };
@@ -41,6 +43,8 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
   const [refreshCron, setRefreshCron] = useState(source.refreshCron ?? "");
   const [keyColumn, setKeyColumn] = useState(source.keyColumn ?? "");
   const [deltaColumn, setDeltaColumn] = useState(source.deltaColumn ?? "");
+  const [reconciliationCron, setReconciliationCron] = useState(source.reconciliationCron ?? "");
+  const [sourceSqlReconciliation, setSourceSqlReconciliation] = useState(source.sourceSqlReconciliation ?? "");
   const [sql, setSql] = useState(source.sourceSql ?? "");
   const [sqlTested, setSqlTested] = useState(source.sourceSql ?? "");
   const [sqlStatus, setSqlStatus] = useState<"idle" | "ok" | "error">("ok");
@@ -55,6 +59,8 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
     setRefreshCron(source.refreshCron ?? "");
     setKeyColumn(source.keyColumn ?? "");
     setDeltaColumn(source.deltaColumn ?? "");
+    setReconciliationCron(source.reconciliationCron ?? "");
+    setSourceSqlReconciliation(source.sourceSqlReconciliation ?? "");
     setSql(source.sourceSql ?? "");
     setSqlTested(source.sourceSql ?? "");
     setSqlStatus("ok");
@@ -78,6 +84,9 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
     if (source.sourceKind === "query" && (sqlStatus !== "ok" || sql !== sqlTested)) {
       setError("Teste a consulta antes de salvar."); return;
     }
+    if (reconciliationCron.trim() && source.sourceKind === "query" && !sourceSqlReconciliation.trim()) {
+      setError("Informe a consulta de reconciliação (sem filtro de data) para habilitar o cron de reconciliação."); return;
+    }
     setLoading(true); setError("");
     const body: Record<string, unknown> = {
       name: name.trim(),
@@ -85,6 +94,8 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
       refreshCron: mode === "live" ? null : (refreshCron.trim() || null),
       keyColumn: keyColumn.trim() || null,
       deltaColumn: deltaColumn.trim() || null,
+      reconciliationCron: mode === "live" ? null : (reconciliationCron.trim() || null),
+      sourceSqlReconciliation: source.sourceKind === "query" ? (sourceSqlReconciliation.trim() || null) : null,
     };
     if (source.sourceKind === "query") body.sourceSql = sql;
     const response = await fetch(`/api/v1/dataset-sources/${source.id}`, {
@@ -183,6 +194,40 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
                 <input className="input mt-1 w-full font-mono text-sm" placeholder="ex: updated_at" value={deltaColumn} onChange={(e) => setDeltaColumn(e.target.value)} />
                 <span className="label-text-alt mt-1 text-base-content/55">Requer coluna-chave. Cada carga busca apenas registros com valor maior que o último carregado.</span>
               </label>
+            )}
+
+            {mode === "extract" && keyColumn.trim() && (
+              <div className="rounded-box border border-base-300 p-3 space-y-3">
+                <div>
+                  <span className="label-text font-medium">Reconciliação periódica <span className="font-normal text-base-content/50">(opcional)</span></span>
+                  <p className="mt-0.5 text-xs text-base-content/55">Roda um snapshot completo (sem filtro incremental) pra detectar exclusões que a carga incremental normal não veria — rede de segurança, ex: uma vez por semana.</p>
+                </div>
+                <label className="form-control w-full">
+                  <span className="label-text text-sm">Agendamento (cron UTC)</span>
+                  <input
+                    className="input mt-1 w-full font-mono text-sm"
+                    placeholder="ex: 0 2 * * 0  —  vazio = desativado"
+                    value={reconciliationCron}
+                    onChange={(e) => setReconciliationCron(e.target.value)}
+                  />
+                  {reconciliationCron.trim() && <CronPreview cron={reconciliationCron} />}
+                </label>
+                {source.sourceKind === "query" ? (
+                  <label className="form-control w-full">
+                    <span className="label-text text-sm">Consulta de reconciliação (sem filtro de data)</span>
+                    <textarea
+                      className="textarea mt-1 h-32 w-full font-mono text-sm"
+                      placeholder="Mesma consulta, sem o WHERE de janela — deve trazer o estado completo da origem"
+                      value={sourceSqlReconciliation}
+                      onChange={(e) => setSourceSqlReconciliation(e.target.value)}
+                      spellCheck={false}
+                    />
+                    <span className="label-text-alt mt-1 text-base-content/55">Obrigatória se o cron acima estiver preenchido — linhas ausentes aqui são marcadas como excluídas.</span>
+                  </label>
+                ) : (
+                  <p className="text-xs text-base-content/55">Reconciliação lê a tabela inteira, ignorando a coluna delta nessa rodada.</p>
+                )}
+              </div>
             )}
           </div>
 

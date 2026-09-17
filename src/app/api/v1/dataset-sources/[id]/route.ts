@@ -31,6 +31,8 @@ const patchSchema = z.object({
   keyColumn: z.string().max(128).nullable().optional(),
   deltaColumn: z.string().max(128).nullable().optional(),
   sourceSql: z.string().min(1).nullable().optional(),
+  reconciliationCron: z.string().max(100).nullable().optional(),
+  sourceSqlReconciliation: z.string().min(1).nullable().optional(),
   active: z.boolean().optional(),
 });
 
@@ -38,7 +40,7 @@ async function authorise(request: NextRequest, id: string) {
   const actor = await resolveActor(request);
   const source = await prisma.datasetSource.findUniqueOrThrow({
     where: { id },
-    select: { datasetId: true, dataset: { select: { projectId: true } } },
+    select: { datasetId: true, sourceKind: true, sourceSqlReconciliation: true, dataset: { select: { projectId: true } } },
   });
   if (actor.role !== "ADMIN" && !await canAccess(actor, "WRITE", source.dataset.projectId, source.datasetId)) {
     throw new ApiError(403, "FORBIDDEN", "Sem permissão para modificar esta fonte");
@@ -49,12 +51,21 @@ async function authorise(request: NextRequest, id: string) {
 export async function PATCH(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const id = (await params).id;
-    await authorise(request, id);
+    const { source } = await authorise(request, id);
     const input = patchSchema.parse(await request.json());
 
     const effectiveCron = input.mode === "live" ? null : input.refreshCron;
     const nextAt = effectiveCron !== undefined
       ? (effectiveCron ? nextRefreshFromCron(effectiveCron) : null)
+      : undefined;
+
+    const effectiveReconciliationCron = input.mode === "live" ? null : input.reconciliationCron;
+    const effectiveReconciliationSql = input.sourceSqlReconciliation !== undefined ? input.sourceSqlReconciliation : source.sourceSqlReconciliation;
+    if (effectiveReconciliationCron && source.sourceKind === "query" && !effectiveReconciliationSql?.trim()) {
+      throw new ApiError(400, "RECONCILIATION_SQL_REQUIRED", "Fontes por consulta exigem uma consulta de reconciliacao (sem filtro de data) para habilitar o cron de reconciliacao");
+    }
+    const nextReconciliationAt = effectiveReconciliationCron !== undefined
+      ? (effectiveReconciliationCron ? nextRefreshFromCron(effectiveReconciliationCron) : null)
       : undefined;
 
     return ok(await prisma.datasetSource.update({
@@ -63,6 +74,8 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
         ...input,
         ...(effectiveCron !== undefined ? { refreshCron: effectiveCron, nextRefreshAt: nextAt } : {}),
         ...(input.mode === "live" ? { refreshCron: null, nextRefreshAt: null } : {}),
+        ...(effectiveReconciliationCron !== undefined ? { reconciliationCron: effectiveReconciliationCron, nextReconciliationAt } : {}),
+        ...(input.mode === "live" ? { reconciliationCron: null, nextReconciliationAt: null } : {}),
       },
     }));
   } catch (e) {

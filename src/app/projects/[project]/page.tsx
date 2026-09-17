@@ -49,6 +49,8 @@ export default async function ProjectPage({ params }: { params: Promise<{ projec
           refreshCron: t.source.refreshCron,
           keyColumn: t.source.keyColumn,
           deltaColumn: t.source.deltaColumn,
+          reconciliationCron: t.source.reconciliationCron,
+          sourceSqlReconciliation: t.source.sourceSqlReconciliation,
           lastStatus: t.source.lastStatus,
           lastRowCount: t.source.lastRowCount ? String(t.source.lastRowCount) : null,
           lastError: t.source.lastError,
