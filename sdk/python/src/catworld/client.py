@@ -143,6 +143,29 @@ class CatworldClient:
     def rows(self, table_id: str, limit: int = 100):
         return self._request("GET", f"/api/v1/tables/{table_id}/rows", params={"limit": limit})
 
+    def changes(self, table_id: str, since: str | _datetime.datetime | None = None, limit: int = 1000) -> dict:
+        """Puxa só o que mudou numa tabela extract desde `since` (ISO string ou datetime).
+
+        Retorna {"rows": [...], "removedKeys": [...] | None, "nextSince": str}.
+        `removedKeys` é None se a fonte nunca teve upsert habilitado (sem keyColumn,
+        sem como saber o que foi excluído). Guarde `nextSince` e passe como `since` na
+        próxima chamada para continuar de onde parou — se nada mudou, `nextSince` volta
+        igual ao `since` recebido, então é seguro chamar em loop (polling).
+
+        `since=None` na primeira chamada busca a tabela inteira como baseline (ainda
+        sujeita a `limit`); use o `nextSince` retornado para as chamadas seguintes.
+        """
+        params: dict[str, Any] = {"limit": limit}
+        if since is not None:
+            params["since"] = since.isoformat() if isinstance(since, _datetime.datetime) else since
+        body = self._request_full("GET", f"/api/v1/tables/{table_id}/rows", params=params)
+        meta = body.get("meta") or {}
+        return {
+            "rows": body.get("data") or [],
+            "removedKeys": meta.get("removedKeys"),
+            "nextSince": meta.get("nextSince"),
+        }
+
     def source_info(self, source_id: str):
         """Retorna metadados de uma fonte: lastRefreshedAt, nextRefreshAt, lastRowCount, lastStatus, refreshPolicy, mode."""
         return self._request("GET", f"/api/v1/dataset-sources/{source_id}")
@@ -413,6 +436,7 @@ class CatworldClient:
         poll_interval: float = 2.0,
         timeout: float | None = None,
         skip_preflight: bool = False,
+        full_snapshot: bool = False,
     ):
         """Envia um arquivo para importação.
 
@@ -456,6 +480,13 @@ class CatworldClient:
                 (o próprio job tem retry/timeout interno no servidor).
             skip_preflight: Se True, pula as checagens locais abaixo (schema/coluna-chave)
                 e vai direto pro upload. Use se as checagens estiverem dando falso positivo.
+            full_snapshot: Só relevante com mode="upsert". True indica que o arquivo é
+                100% do estado atual da origem (não um lote parcial) — o Catworld passa
+                a marcar como excluídas (e reportar em ``changes()``/``rows(since=...)``)
+                as linhas que existiam antes e não aparecem mais no arquivo. Default
+                False preserva o comportamento atual (upsert parcial, sem inferir
+                exclusão) — só ative se o arquivo enviado representar mesmo 100% dos
+                registros vivos na origem a cada envio.
 
         Uma pré-checagem roda automaticamente antes de qualquer byte subir, sempre que
         ``table_id`` é informado e ``mode`` é "append" ou "upsert" (pulável com
@@ -500,6 +531,8 @@ class CatworldClient:
             body["tableId"] = table_id
         if key_column:
             body["keyColumn"] = key_column
+        if full_snapshot:
+            body["fullSnapshot"] = full_snapshot
         if column_types:
             body["typeOverrides"] = column_types
         created = self._request("POST", "/api/v1/uploads", json=body)
@@ -723,6 +756,12 @@ class CatworldClient:
             yield tail
 
     def _request(self, method: str, path: str, **kwargs) -> Any:
+        return self._request_full(method, path, **kwargs)["data"]
+
+    def _request_full(self, method: str, path: str, **kwargs) -> dict:
+        """Como _request, mas devolve o corpo completo {"data", "meta", "error"} —
+        usado quando o chamador precisa do `meta` (ex: changes(), que lê removedKeys/
+        nextSince de lá)."""
         try:
             response = self._client.request(method, path, **kwargs)
         except httpx.TimeoutException as exc:
@@ -731,7 +770,7 @@ class CatworldClient:
             raise ConnectionError(f"Falha de conexão com o servidor: {exc}") from exc
 
         if response.is_success:
-            return response.json()["data"]
+            return response.json()
 
         try:
             body = response.json()

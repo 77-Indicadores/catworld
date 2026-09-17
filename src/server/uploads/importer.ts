@@ -433,7 +433,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
           }
           const mergedName = `cw_mgd_${upload.id.replaceAll("-", "").slice(0, 20)}`;
           await storageConn.atomicSwap(schema, stage, tableName, mappingWithRh, {
-            targetExists, keyColumn: upload.keyColumn, mergedName,
+            targetExists, keyColumn: upload.keyColumn, mergedName, fullSnapshot: upload.fullSnapshot,
           });
           inserted = total; updated = 0;
           actual = await storageConn.countRows(schema, tableName);

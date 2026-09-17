@@ -3,8 +3,9 @@ import { decryptSecret } from "@/server/security/crypto";
 import { validateReadOnlySql } from "@/server/security/sql-safety";
 import { ApiError } from "@/server/http";
 import { sqlIdentifier } from "@/server/security/naming";
+import { resolveEffectiveTarget, type SshTunnelConnection } from "./ssh-tunnel";
 
-export type PgConnection = {
+export type PgConnection = SshTunnelConnection & {
   server: string;
   port: number | null;
   databaseName: string;
@@ -21,12 +22,12 @@ export type SourceColumn = {
   pgType?: string;
 };
 
-function config(connection: PgConnection): ClientConfig {
+function config(connection: PgConnection, target: { host: string; port: number }): ClientConfig {
   const { password } = JSON.parse(decryptSecret(connection.encryptedCredentials)) as { password: string };
   const sslMode = connection.sslMode || "require";
   return {
-    host: connection.server,
-    port: connection.port ?? 5432,
+    host: target.host,
+    port: target.port,
     database: connection.databaseName,
     user: connection.username,
     password,
@@ -37,12 +38,17 @@ function config(connection: PgConnection): ClientConfig {
 }
 
 export async function withPg<T>(connection: PgConnection, fn: (client: Client) => Promise<T>) {
-  const client = new Client(config(connection));
-  await client.connect();
+  const tunnel = await resolveEffectiveTarget(connection, 5432);
   try {
-    return await fn(client);
+    const client = new Client(config(connection, tunnel));
+    await client.connect();
+    try {
+      return await fn(client);
+    } finally {
+      await client.end().catch(() => undefined);
+    }
   } finally {
-    await client.end().catch(() => undefined);
+    await tunnel.close().catch(() => undefined);
   }
 }
 
@@ -139,7 +145,8 @@ export async function executePostgresReadOnly(connection: PgConnection, query: s
 
 export async function* streamPostgresRows(connection: PgConnection, query: string, batchSize = 1000): AsyncGenerator<Record<string, unknown>[]> {
   const statement = safeStatement(query);
-  const client = new Client(config(connection));
+  const tunnel = await resolveEffectiveTarget(connection, 5432);
+  const client = new Client(config(connection, tunnel));
   await client.connect();
   try {
     let offset = 0;
@@ -152,6 +159,7 @@ export async function* streamPostgresRows(connection: PgConnection, query: strin
     }
   } finally {
     await client.end().catch(() => undefined);
+    await tunnel.close().catch(() => undefined);
   }
 }
 

@@ -159,6 +159,12 @@ model Connection {
   username             String    @db.VarChar(255)
   encryptedCredentials String    @map("encrypted_credentials") @db.VarChar(2000)
   metadataJson         String?   @map("metadata_json") @db.Text
+  sshTunnelEnabled     Boolean   @default(false) @map("ssh_tunnel_enabled")
+  sshHost              String?   @map("ssh_host") @db.VarChar(255)
+  sshPort              Int?      @map("ssh_port")
+  sshUsername          String?   @map("ssh_username") @db.VarChar(255)
+  sshAuthMethod        String?   @map("ssh_auth_method") @db.VarChar(16)
+  sshEncryptedSecret   String?   @map("ssh_encrypted_secret") @db.VarChar(4000)
   active               Boolean   @default(true)
   lastStatus           String?   @map("last_status") @db.VarChar(32)
   lastLatencyMs        Int?      @map("last_latency_ms")
@@ -214,6 +220,7 @@ model Upload {
   sizeBytes        BigInt        @map("size_bytes")
   mode             String        @default("replace") @db.VarChar(20)
   keyColumn        String?       @map("key_column") @db.VarChar(128)
+  fullSnapshot     Boolean       @default(false) @map("full_snapshot")
   status           String        @default("PENDING_UPLOAD") @db.VarChar(32)
   progress         Int           @default(0)
   previewJson      String?       @map("preview_json") @db.Text

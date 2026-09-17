@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { Cron } from "croner";
-import { Cable, CheckCircle2, DatabaseZap, Play, Plus, RefreshCw, Search, Table2 } from "lucide-react";
+import { Cable, CheckCircle2, CircleSlash, DatabaseZap, GitMerge, Play, Plus, RefreshCw, Search, Table2 } from "lucide-react";
 
 function CronPreview({ cron }: { cron: string }) {
   try {
@@ -19,7 +19,19 @@ type Connection = { id: string; name: string; provider: string; server: string; 
 type SchemaRow = { schema: string };
 type TableRow = { schema: string; table: string };
 type Column = { originalName: string; sqlName: string; sqlType: string };
-type Step = "origin" | "mode" | "preview";
+type Step = "origin" | "mode" | "incremental" | "preview";
+
+function suggestKeyColumn(cols: Column[]): string {
+  const byName = cols.find(c => /^id$/i.test(c.originalName)) ?? cols.find(c => /_id$|Id$/.test(c.originalName));
+  return byName?.originalName ?? cols[0]?.originalName ?? "";
+}
+
+function suggestDeltaColumn(cols: Column[]): string {
+  const isDateType = (t: string) => /DATE|TIME/i.test(t);
+  const candidate = cols.find(c => isDateType(c.sqlType) && /updated|modified|update/i.test(c.originalName))
+    ?? cols.find(c => isDateType(c.sqlType) && /(_at|data)$/i.test(c.originalName));
+  return candidate?.originalName ?? "";
+}
 
 function Field({ label, hint, children, wide = false }: { label: string; hint?: string; children: React.ReactNode; wide?: boolean }) {
   return <label className={`form-control w-full ${wide ? "lg:col-span-2" : ""}`}><span className="label-text font-medium">{label}</span><div className="mt-1">{children}</div>{hint && <span className="label-text-alt mt-1 text-base-content/55">{hint}</span>}</label>;
@@ -50,9 +62,15 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
   const [loading, setLoading] = useState(false);
   const [loadingMeta, setLoadingMeta] = useState(false);
   const [error, setError] = useState("");
+  const [incrementalEnabled, setIncrementalEnabled] = useState(false);
+  const [keyColumn, setKeyColumn] = useState("");
+  const [deltaColumn, setDeltaColumn] = useState("");
+  const [incrementalColumns, setIncrementalColumns] = useState<Column[]>([]);
+  const [loadingIncrementalColumns, setLoadingIncrementalColumns] = useState(false);
 
   async function open() {
     setStep("origin"); setError(""); setColumns([]); setSelectedTables([]); setQueryStatus("idle"); setQueryTestedSql(""); setTableSearch(""); setRefreshCron("");
+    setIncrementalEnabled(false); setKeyColumn(""); setDeltaColumn(""); setIncrementalColumns([]);
     ref.current?.showModal();
     setLoadingMeta(true);
     const response = await fetch("/api/v1/connections");
@@ -97,6 +115,34 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
     setStep("preview");
   }
 
+  async function enterIncrementalStep() {
+    if (mode !== "extract") { await preview(); return; }
+    if (sourceKind === "query") {
+      if (queryStatus !== "ok" || queryTestedSql !== sourceSql) {
+        const ok = await testQuery();
+        if (!ok) return;
+      }
+      setIncrementalColumns(columns);
+      if (!keyColumn) setKeyColumn(suggestKeyColumn(columns));
+      setStep("incremental");
+      return;
+    }
+    // sourceKind "table": busca colunas da primeira tabela selecionada como amostra para sugestao
+    setStep("incremental");
+    if (!selectedTables[0]) return;
+    setLoadingIncrementalColumns(true);
+    try {
+      const response = await fetch(`/api/v1/connections/${connectionId}/columns?schema=${encodeURIComponent(schema)}&table=${encodeURIComponent(selectedTables[0])}`);
+      const body = await response.json();
+      const cols: Column[] = body.data ?? [];
+      setIncrementalColumns(cols);
+      if (!keyColumn) setKeyColumn(suggestKeyColumn(cols));
+      if (!deltaColumn) setDeltaColumn(suggestDeltaColumn(cols));
+    } finally {
+      setLoadingIncrementalColumns(false);
+    }
+  }
+
   async function testQuery() {
     if (!connectionId || sourceKind !== "query") return false;
     setLoading(true); setError(""); setQueryStatus("idle");
@@ -123,6 +169,8 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
           sourceSchema: schema,
           sourceTables: selectedTables,
           refreshCron: mode === "live" ? null : (refreshCron.trim() || null),
+          keyColumn: mode === "extract" && incrementalEnabled ? (keyColumn.trim() || null) : null,
+          deltaColumn: mode === "extract" && incrementalEnabled ? (deltaColumn.trim() || null) : null,
         } : {
           connectionId,
           name: queryName,
@@ -130,6 +178,7 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
           sourceKind,
           sourceSql,
           refreshCron: mode === "live" ? null : (refreshCron.trim() || null),
+          keyColumn: mode === "extract" && incrementalEnabled ? (keyColumn.trim() || null) : null,
         }),
       });
       const body = await response.json();
@@ -156,7 +205,7 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
         <div className="modal-box max-w-4xl">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div><h3 className="text-lg font-bold">Adicionar fonte de dados</h3><p className="mt-1 text-sm text-base-content/60">Escolha uma ou mais tabelas, ou crie uma fonte a partir de uma consulta.</p></div>
-            <div className="flex flex-wrap gap-2"><StepItem label="Origem" active={step === "origin"} done={step !== "origin"} /><StepItem label="Uso" active={step === "mode"} done={step === "preview"} /><StepItem label="Revisao" active={step === "preview"} done={false} /></div>
+            <div className="flex flex-wrap gap-2"><StepItem label="Origem" active={step === "origin"} done={step !== "origin"} /><StepItem label="Uso" active={step === "mode"} done={step === "incremental" || step === "preview"} /><StepItem label="Sincronizacao" active={step === "incremental"} done={step === "preview"} /><StepItem label="Revisao" active={step === "preview"} done={false} /></div>
           </div>
 
           {loadingMeta && <div className="alert alert-info alert-soft mt-4"><span className="loading loading-spinner loading-sm" />Carregando metadados da conexao...</div>}
@@ -247,16 +296,56 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
             </div>
           )}
 
+          {step === "incremental" && (
+            <div className="mt-5 space-y-5">
+              <div className="grid gap-4 lg:grid-cols-2">
+                <button type="button" onClick={() => setIncrementalEnabled(false)} className={`rounded-box border p-4 text-left ${!incrementalEnabled ? "border-primary bg-primary/10" : "border-base-300 bg-base-100"}`}><CircleSlash className="text-primary" size={22} /><h4 className="mt-3 font-semibold">Substituir tudo a cada carga</h4><p className="mt-1 text-sm text-base-content/60">Comportamento padrao. Cada atualizacao apaga e recria a tabela com o resultado mais recente.</p></button>
+                <button type="button" onClick={() => setIncrementalEnabled(true)} className={`rounded-box border p-4 text-left ${incrementalEnabled ? "border-primary bg-primary/10" : "border-base-300 bg-base-100"}`}><GitMerge className="text-primary" size={22} /><h4 className="mt-3 font-semibold">Sincronizacao incremental</h4><p className="mt-1 text-sm text-base-content/60">Atualiza (upsert) por uma coluna-chave: registros novos entram, registros existentes sao atualizados.</p></button>
+              </div>
+              {incrementalEnabled && (
+                <div className="grid gap-4 lg:grid-cols-2">
+                  {loadingIncrementalColumns && <div className="lg:col-span-2 text-sm text-base-content/50"><span className="loading loading-spinner loading-xs mr-2" />Carregando colunas...</div>}
+                  <Field label="Coluna-chave (obrigatoria)" hint="Cada linha nova (chave inexistente) e inserida; cada linha existente (mesma chave) e atualizada.">
+                    {incrementalColumns.length > 0 ? (
+                      <select className="select w-full font-mono text-sm" value={keyColumn} onChange={(e) => setKeyColumn(e.target.value)}>
+                        <option value="">Selecione...</option>
+                        {incrementalColumns.map((c) => <option key={c.originalName} value={c.originalName}>{c.originalName}</option>)}
+                      </select>
+                    ) : (
+                      <input className="input w-full font-mono text-sm" placeholder="ex: id" value={keyColumn} onChange={(e) => setKeyColumn(e.target.value)} />
+                    )}
+                  </Field>
+                  {sourceKind === "table" ? (
+                    <Field label="Coluna delta (opcional)" hint="Requer coluna-chave. Cada carga busca apenas registros com valor maior que o ultimo carregado.">
+                      <select className="select w-full font-mono text-sm" value={deltaColumn} onChange={(e) => setDeltaColumn(e.target.value)}>
+                        <option value="">Nenhuma (sempre busca tudo)</option>
+                        {incrementalColumns.map((c) => <option key={c.originalName} value={c.originalName}>{c.originalName}</option>)}
+                      </select>
+                    </Field>
+                  ) : (
+                    <div className="rounded-box border border-base-300 bg-base-200/40 p-3 text-sm text-base-content/60">Para consultas customizadas, o filtro incremental (janela de datas, cortes) deve estar embutido no proprio SQL. O Catworld apenas atualiza (upsert) pela coluna-chave informada.</div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
           {step === "preview" && (
             <div className="mt-5 space-y-4">
-              <div className="rounded-box border border-base-300 bg-base-200/40 p-4 text-sm"><strong>{modeLabel}</strong><span className="ml-2 text-base-content/60">{sourceKind === "table" ? `${selectedTables.length} tabela(s) de ${schema}` : queryName}</span></div>
+              <div className="rounded-box border border-base-300 bg-base-200/40 p-4 text-sm"><strong>{modeLabel}</strong><span className="ml-2 text-base-content/60">{sourceKind === "table" ? `${selectedTables.length} tabela(s) de ${schema}` : queryName}</span>{mode === "extract" && <span className="ml-2 text-base-content/60">· {incrementalEnabled && keyColumn.trim() ? `Incremental por "${keyColumn.trim()}"${deltaColumn.trim() ? ` (delta: ${deltaColumn.trim()})` : ""}` : "Substitui tudo a cada carga"}</span>}</div>
               {sourceKind === "table" ? <div className="max-h-72 overflow-auto rounded-box border border-base-300"><table className="table table-sm"><thead><tr><th>Tabela {providerLabel}</th><th>Nome no Catworld</th></tr></thead><tbody>{selectedTables.map((t) => <tr key={t}><td className="font-mono text-xs">{schema}.{t}</td><td>{t}</td></tr>)}</tbody></table></div> : columns.length > 0 ? <div className="max-h-72 overflow-auto rounded-box border border-base-300"><table className="table table-sm"><thead><tr><th>Coluna na origem</th><th>Nome no Catworld</th><th>Tipo</th></tr></thead><tbody>{columns.map((c) => <tr key={c.sqlName}><td>{c.originalName}</td><td className="font-mono text-xs">{c.sqlName}</td><td>{c.sqlType}</td></tr>)}</tbody></table></div> : <div className="alert alert-warning alert-soft">Nenhuma coluna carregada. Volte e gere a previa novamente.</div>}
             </div>
           )}
 
           <div className="modal-action justify-between">
-            <div>{step !== "origin" && <button type="button" className="btn btn-ghost btn-sm" onClick={() => setStep(step === "preview" ? "mode" : "origin")}>Voltar</button>}</div>
-            <div className="flex gap-2"><button type="button" onClick={() => ref.current?.close()} className="btn btn-ghost btn-sm">Fechar</button>{step === "origin" && <button type="button" disabled={!canChooseOrigin} className="btn btn-primary btn-sm" onClick={() => setStep("mode")}>Continuar</button>}{step === "mode" && <button type="button" disabled={loading} className="btn btn-primary btn-sm" onClick={preview}><RefreshCw size={14} />{loading ? "Carregando..." : sourceKind === "query" ? "Revisar consulta" : "Gerar previa"}</button>}{step === "preview" && <button type="button" onClick={create} disabled={loading || (sourceKind === "query" && columns.length === 0)} className="btn btn-primary btn-sm">{loading ? "Criando..." : "Criar fonte(s)"}</button>}</div>
+            <div>{step !== "origin" && <button type="button" className="btn btn-ghost btn-sm" onClick={() => setStep(step === "preview" ? (mode === "extract" ? "incremental" : "mode") : step === "incremental" ? "mode" : "origin")}>Voltar</button>}</div>
+            <div className="flex gap-2">
+              <button type="button" onClick={() => ref.current?.close()} className="btn btn-ghost btn-sm">Fechar</button>
+              {step === "origin" && <button type="button" disabled={!canChooseOrigin} className="btn btn-primary btn-sm" onClick={() => setStep("mode")}>Continuar</button>}
+              {step === "mode" && <button type="button" disabled={loading} className="btn btn-primary btn-sm" onClick={enterIncrementalStep}><RefreshCw size={14} />{loading ? "Carregando..." : "Continuar"}</button>}
+              {step === "incremental" && <button type="button" disabled={loading || (incrementalEnabled && !keyColumn.trim())} className="btn btn-primary btn-sm" onClick={preview}><RefreshCw size={14} />{loading ? "Carregando..." : sourceKind === "query" ? "Revisar consulta" : "Gerar previa"}</button>}
+              {step === "preview" && <button type="button" onClick={create} disabled={loading || (sourceKind === "query" && columns.length === 0)} className="btn btn-primary btn-sm">{loading ? "Criando..." : "Criar fonte(s)"}</button>}
+            </div>
           </div>
         </div>
         <form method="dialog" className="modal-backdrop"><button>fechar</button></form>

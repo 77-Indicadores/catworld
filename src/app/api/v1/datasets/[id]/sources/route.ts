@@ -37,6 +37,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       sourceSql: z.string().optional().nullable(),
       refreshCron: z.string().max(100).nullable().optional(),
       keyColumn: z.string().max(128).nullable().optional(),
+      deltaColumn: z.string().max(128).nullable().optional(),
       sourceGroupId: z.string().uuid().optional(),
     }).parse(await request.json());
     if (input.sourceKind === "table" && input.sourceTables?.length) {
@@ -47,6 +48,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         sourceSchema: input.sourceSchema ?? "",
         sourceTables: input.sourceTables,
         refreshCron: input.refreshCron,
+        keyColumn: input.keyColumn,
+        deltaColumn: input.deltaColumn,
         sourceGroupId: input.sourceGroupId,
       }), undefined, 201);
     }

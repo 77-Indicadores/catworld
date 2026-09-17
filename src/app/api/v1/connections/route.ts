@@ -16,12 +16,45 @@ const visible = {
   sslMode: true,
   username: true,
   active: true,
+  sshTunnelEnabled: true,
+  sshHost: true,
+  sshPort: true,
+  sshUsername: true,
+  sshAuthMethod: true,
   lastStatus: true,
   lastLatencyMs: true,
   lastCheckedAt: true,
   createdAt: true,
   updatedAt: true,
 } as const;
+
+const sshTunnelSchema = z.object({
+  sshTunnelEnabled: z.boolean().default(false),
+  sshHost: z.string().min(1).optional(),
+  sshPort: z.coerce.number().int().min(1).max(65535).default(22).optional(),
+  sshUsername: z.string().min(1).optional(),
+  sshAuthMethod: z.enum(["password", "privateKey"]).optional(),
+  sshPassword: z.string().optional(),
+  sshPrivateKey: z.string().optional(),
+  sshPassphrase: z.string().optional(),
+});
+
+function buildSshTunnelData(input: z.infer<typeof sshTunnelSchema>) {
+  const { sshTunnelEnabled, sshHost, sshPort, sshUsername, sshAuthMethod, sshPassword, sshPrivateKey, sshPassphrase } = input;
+  if (!sshTunnelEnabled) {
+    return { sshTunnelEnabled: false, sshHost: null, sshPort: null, sshUsername: null, sshAuthMethod: null, sshEncryptedSecret: null };
+  }
+  if (!sshHost || !sshUsername || !sshAuthMethod) throw new Error("Tunel SSH exige host, usuario e metodo de autenticacao");
+  const secret = sshAuthMethod === "password" ? { password: sshPassword } : { privateKey: sshPrivateKey, passphrase: sshPassphrase };
+  return {
+    sshTunnelEnabled: true,
+    sshHost,
+    sshPort: sshPort ?? 22,
+    sshUsername,
+    sshAuthMethod,
+    sshEncryptedSecret: encryptSecret(JSON.stringify(secret)),
+  };
+}
 
 export async function GET(request: NextRequest) {
   try {
@@ -47,7 +80,7 @@ export async function POST(request: NextRequest) {
       sslMode: z.enum(["disable", "require", "verify-full"]).default("require"),
       username: z.string().min(1),
       password: z.string().min(1),
-    });
+    }).merge(sshTunnelSchema);
     const mssqlSchema = z.object({
       provider: z.literal("mssql"),
       name: z.string().min(2),
@@ -59,22 +92,30 @@ export async function POST(request: NextRequest) {
       trustServerCert: z.boolean().default(false),
       username: z.string().min(1),
       password: z.string().min(1),
-    });
+    }).merge(sshTunnelSchema);
     const raw = await request.json();
     const providerRaw = (raw as Record<string, unknown>)?.provider ?? "postgres";
     if (providerRaw === "mssql") {
       const input = mssqlSchema.parse(raw);
-      const { password, encrypt, trustServerCert, ...data } = input;
+      const { password, encrypt, trustServerCert, sshTunnelEnabled, sshHost, sshPort, sshUsername, sshAuthMethod, sshPassword, sshPrivateKey, sshPassphrase, ...data } = input;
       const sslMode = encrypt ? (trustServerCert ? "encrypt-trust" : "encrypt") : (trustServerCert ? "no-encrypt-trust" : "no-encrypt");
       return ok(await prisma.connection.create({
-        data: { ...data, sslMode, encryptedCredentials: encryptSecret(JSON.stringify({ password, encrypt, trustServerCert })) },
+        data: {
+          ...data, sslMode,
+          encryptedCredentials: encryptSecret(JSON.stringify({ password, encrypt, trustServerCert })),
+          ...buildSshTunnelData({ sshTunnelEnabled, sshHost, sshPort, sshUsername, sshAuthMethod, sshPassword, sshPrivateKey, sshPassphrase }),
+        },
         select: visible,
       }), undefined, 201);
     }
     const input = postgresSchema.parse(raw);
-    const { password, ...data } = input;
+    const { password, sshTunnelEnabled, sshHost, sshPort, sshUsername, sshAuthMethod, sshPassword, sshPrivateKey, sshPassphrase, ...data } = input;
     return ok(await prisma.connection.create({
-      data: { ...data, encryptedCredentials: encryptSecret(JSON.stringify({ password })) },
+      data: {
+        ...data,
+        encryptedCredentials: encryptSecret(JSON.stringify({ password })),
+        ...buildSshTunnelData({ sshTunnelEnabled, sshHost, sshPort, sshUsername, sshAuthMethod, sshPassword, sshPrivateKey, sshPassphrase }),
+      },
       select: visible,
     }), undefined, 201);
   } catch (e) {

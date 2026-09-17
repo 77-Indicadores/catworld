@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { CheckCircle2, CloudCog, DatabaseZap, Pencil, Plus, RefreshCw, Server, Trash2, XCircle } from "lucide-react";
 import { EmptyState, PageHeader, Panel, StatusBadge } from "@/components/ui/primitives";
 
-type Connection = { id: string; name: string; provider: string; environment: string; server: string; port: number | null; databaseName: string; sslMode: string; username: string; active: boolean; lastStatus: string | null; lastLatencyMs: number | null; lastCheckedAt: string | null };
+type Connection = { id: string; name: string; provider: string; environment: string; server: string; port: number | null; databaseName: string; sslMode: string; username: string; active: boolean; lastStatus: string | null; lastLatencyMs: number | null; lastCheckedAt: string | null; sshTunnelEnabled?: boolean; sshHost?: string | null; sshPort?: number | null; sshUsername?: string | null; sshAuthMethod?: string | null };
 type TestState = null | { ok: true; latencyMs: number; database?: string } | { ok: false; message: string };
 
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
@@ -32,6 +32,8 @@ export default function ConnectionsPage() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [provider, setProvider] = useState<"postgres" | "mssql">("postgres");
+  const [sshEnabled, setSshEnabled] = useState(false);
+  const [sshAuthMethod, setSshAuthMethod] = useState<"password" | "privateKey">("password");
   const dialog = useRef<HTMLDialogElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
 
@@ -51,8 +53,8 @@ export default function ConnectionsPage() {
     return () => { cancelled = true; };
   }, []);
 
-  function openCreate() { setEditing(null); setProvider("postgres"); setError(""); setNotice(""); setFormTest(null); dialog.current?.showModal(); }
-  function openEdit(c: Connection) { setEditing(c); setProvider(c.provider === "mssql" ? "mssql" : "postgres"); setError(""); setNotice(""); setFormTest(null); dialog.current?.showModal(); }
+  function openCreate() { setEditing(null); setProvider("postgres"); setSshEnabled(false); setSshAuthMethod("password"); setError(""); setNotice(""); setFormTest(null); dialog.current?.showModal(); }
+  function openEdit(c: Connection) { setEditing(c); setProvider(c.provider === "mssql" ? "mssql" : "postgres"); setSshEnabled(!!c.sshTunnelEnabled); setSshAuthMethod(c.sshAuthMethod === "privateKey" ? "privateKey" : "password"); setError(""); setNotice(""); setFormTest(null); dialog.current?.showModal(); }
 
   function formPayload(form: HTMLFormElement) {
     const f = new FormData(form);
@@ -62,6 +64,11 @@ export default function ConnectionsPage() {
       payload.encrypt = f.get("encrypt") === "on";
       payload.trustServerCert = f.get("trustServerCert") === "on";
       delete payload.sslMode;
+    }
+    payload.sshTunnelEnabled = f.get("sshTunnelEnabled") === "on";
+    if (!payload.sshTunnelEnabled) {
+      delete payload.sshHost; delete payload.sshPort; delete payload.sshUsername; delete payload.sshAuthMethod;
+      delete payload.sshPassword; delete payload.sshPrivateKey; delete payload.sshPassphrase;
     }
     return payload;
   }
@@ -133,7 +140,7 @@ export default function ConnectionsPage() {
                         <h2 className="font-semibold">{c.name}</h2>
                         <StatusBadge status={c.lastStatus === "healthy" ? "healthy" : c.lastStatus ? "warning" : "inactive"} />
                       </div>
-                      <p className="text-xs text-base-content/45">{c.environment} · {providerLabel(c.provider)}</p>
+                      <p className="text-xs text-base-content/45">{c.environment} · {providerLabel(c.provider)}{c.sshTunnelEnabled ? " · Túnel SSH" : ""}</p>
                     </div>
                   </div>
                   <div className="flex gap-1">
@@ -225,6 +232,46 @@ export default function ConnectionsPage() {
                   <input required={!editing} type="password" name="password" className="input w-full" onChange={() => setFormTest(null)} />
                 </Field>
               </div>
+            </section>
+
+            <section>
+              <label className="flex cursor-pointer items-center gap-2">
+                <input type="checkbox" name="sshTunnelEnabled" className="checkbox checkbox-sm" checked={sshEnabled} onChange={(e) => { setSshEnabled(e.target.checked); setFormTest(null); }} />
+                <span className="text-sm font-semibold">Túnel SSH (opcional)</span>
+              </label>
+              {sshEnabled && (
+                <div className="mt-3 grid gap-4 sm:grid-cols-2">
+                  <Field label="Host SSH" hint="Servidor de salto usado para acessar o banco.">
+                    <input required name="sshHost" defaultValue={editing?.sshHost ?? ""} className="input w-full" onChange={() => setFormTest(null)} />
+                  </Field>
+                  <Field label="Porta SSH">
+                    <input required name="sshPort" defaultValue={editing?.sshPort ?? 22} className="input w-full" inputMode="numeric" onChange={() => setFormTest(null)} />
+                  </Field>
+                  <Field label="Usuário SSH">
+                    <input required name="sshUsername" defaultValue={editing?.sshUsername ?? ""} className="input w-full" onChange={() => setFormTest(null)} />
+                  </Field>
+                  <Field label="Autenticação">
+                    <select name="sshAuthMethod" value={sshAuthMethod} onChange={(e) => { setSshAuthMethod(e.target.value as "password" | "privateKey"); setFormTest(null); }} className="select w-full">
+                      <option value="password">Senha</option>
+                      <option value="privateKey">Chave privada</option>
+                    </select>
+                  </Field>
+                  {sshAuthMethod === "password" ? (
+                    <Field label="Senha SSH" hint={editing?.sshTunnelEnabled ? "Deixe em branco para manter a senha atual." : undefined}>
+                      <input type="password" name="sshPassword" className="input w-full" onChange={() => setFormTest(null)} />
+                    </Field>
+                  ) : (
+                    <>
+                      <Field label="Chave privada" hint={editing?.sshTunnelEnabled ? "Deixe em branco para manter a chave atual." : "Cole a chave privada (PEM)."}>
+                        <textarea name="sshPrivateKey" className="textarea h-24 w-full font-mono text-xs" onChange={() => setFormTest(null)} />
+                      </Field>
+                      <Field label="Passphrase (opcional)">
+                        <input type="password" name="sshPassphrase" className="input w-full" onChange={() => setFormTest(null)} />
+                      </Field>
+                    </>
+                  )}
+                </div>
+              )}
             </section>
 
             {/* Test result inline */}

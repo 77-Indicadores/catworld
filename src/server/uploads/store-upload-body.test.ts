@@ -32,6 +32,7 @@ function upload(overrides: Partial<Parameters<typeof storeUploadBody>[0]> = {}) 
     tableId: null,
     mode: "replace",
     keyColumn: null,
+    fullSnapshot: false,
     status: "PENDING_UPLOAD",
     progress: 0,
     previewJson: null,

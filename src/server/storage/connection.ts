@@ -10,6 +10,15 @@
 import { prisma } from "@/server/db";
 import { decryptSecret } from "@/server/security/crypto";
 
+/**
+ * Colunas internas gerenciadas pelo Catworld, injetadas por atomicSwap direto no DDL —
+ * nunca aparecem em ColDef/cols passados pelos callers nem no catálogo DatasetColumn
+ * (mesmo padrão de _cw_rh em importer.ts). Usadas para "puxar só o que mudou" (ver
+ * src/app/api/v1/tables/[id]/rows/route.ts).
+ */
+export const CW_SYNCED_AT = "cw_synced_at";
+export const CW_DELETED_AT = "cw_deleted_at";
+
 export type ColDef = {
   name: string;
   /** Tipo canônico: BIGINT | DECIMAL(18,4) | DATE | DATETIME2 | TIME | NVARCHAR(MAX) */
@@ -85,6 +94,12 @@ export interface StorageConnection {
       keyColumn?: string | null;
       /** Nome da tabela intermediária para mergeSwap. Obrigatório se keyColumn fornecido. */
       mergedName?: string;
+      /**
+       * true quando a staging representa 100% do estado atual da origem (não uma busca
+       * parcial por delta). Só nesse caso é seguro tratar "ausente da staging" como excluído
+       * — habilita a marcação de cw_deleted_at em mergeSwap. Default false.
+       */
+      fullSnapshot?: boolean;
     },
   ): Promise<void>;
 }

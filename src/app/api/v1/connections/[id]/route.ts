@@ -5,7 +5,7 @@ import { resolveActor, requireRole } from "@/server/auth/actor";
 import { encryptSecret, decryptSecret } from "@/server/security/crypto";
 import { handleApiError, ok } from "@/server/http";
 
-const visible = { id: true, name: true, provider: true, environment: true, server: true, port: true, databaseName: true, sslMode: true, username: true, active: true, lastStatus: true, lastLatencyMs: true, lastCheckedAt: true, createdAt: true, updatedAt: true } as const;
+const visible = { id: true, name: true, provider: true, environment: true, server: true, port: true, databaseName: true, sslMode: true, username: true, active: true, sshTunnelEnabled: true, sshHost: true, sshPort: true, sshUsername: true, sshAuthMethod: true, lastStatus: true, lastLatencyMs: true, lastCheckedAt: true, createdAt: true, updatedAt: true } as const;
 
 export async function PATCH(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -24,8 +24,16 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       encrypt: z.boolean().optional(),
       trustServerCert: z.boolean().optional(),
       active: z.boolean().optional(),
+      sshTunnelEnabled: z.boolean().optional(),
+      sshHost: z.string().min(1).optional(),
+      sshPort: z.coerce.number().int().min(1).max(65535).optional(),
+      sshUsername: z.string().min(1).optional(),
+      sshAuthMethod: z.enum(["password", "privateKey"]).optional(),
+      sshPassword: z.string().optional(),
+      sshPrivateKey: z.string().optional(),
+      sshPassphrase: z.string().optional(),
     }).parse(await request.json());
-    const { password, encrypt, trustServerCert, ...data } = input;
+    const { password, encrypt, trustServerCert, sshTunnelEnabled, sshHost, sshPort, sshUsername, sshAuthMethod, sshPassword, sshPrivateKey, sshPassphrase, ...data } = input;
     let credentialsUpdate: { encryptedCredentials?: string } = {};
     if (password || encrypt !== undefined || trustServerCert !== undefined) {
       const existing = await prisma.connection.findUniqueOrThrow({ where: { id }, select: { encryptedCredentials: true } });
@@ -35,9 +43,21 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       if (trustServerCert !== undefined) current.trustServerCert = trustServerCert;
       credentialsUpdate = { encryptedCredentials: encryptSecret(JSON.stringify(current)) };
     }
+    let sshUpdate: Record<string, unknown> = {};
+    if (sshTunnelEnabled === false) {
+      sshUpdate = { sshTunnelEnabled: false, sshHost: null, sshPort: null, sshUsername: null, sshAuthMethod: null, sshEncryptedSecret: null };
+    } else if (sshTunnelEnabled === true || sshHost || sshUsername || sshAuthMethod || sshPassword || sshPrivateKey) {
+      if (!sshHost || !sshUsername || !sshAuthMethod) throw new Error("Tunel SSH exige host, usuario e metodo de autenticacao");
+      const secret = sshAuthMethod === "password" ? { password: sshPassword } : { privateKey: sshPrivateKey, passphrase: sshPassphrase };
+      sshUpdate = {
+        sshTunnelEnabled: true,
+        sshHost, sshPort: sshPort ?? 22, sshUsername, sshAuthMethod,
+        sshEncryptedSecret: encryptSecret(JSON.stringify(secret)),
+      };
+    }
     return ok(await prisma.connection.update({
       where: { id },
-      data: { ...data, ...credentialsUpdate },
+      data: { ...data, ...credentialsUpdate, ...sshUpdate },
       select: visible,
     }));
   } catch (e) {

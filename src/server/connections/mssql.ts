@@ -4,8 +4,9 @@ import { validateReadOnlySql } from "@/server/security/sql-safety";
 import { sqlIdentifier } from "@/server/security/naming";
 import { ApiError } from "@/server/http";
 import type { SourceColumn } from "./postgres";
+import { resolveEffectiveTarget, type SshTunnelConnection } from "./ssh-tunnel";
 
-export type MssqlConnection = {
+export type MssqlConnection = SshTunnelConnection & {
   server: string;
   port: number | null;
   databaseName: string;
@@ -20,12 +21,12 @@ function parseSslMode(sslMode: string): { encrypt: boolean; trustServerCertifica
   return { encrypt, trustServerCertificate: trust };
 }
 
-function config(connection: MssqlConnection): sql.config {
+function config(connection: MssqlConnection, target: { host: string; port: number }): sql.config {
   const { password } = JSON.parse(decryptSecret(connection.encryptedCredentials)) as { password: string };
   const { encrypt, trustServerCertificate } = parseSslMode(connection.sslMode || "encrypt");
   return {
-    server: connection.server,
-    port: connection.port ?? 1433,
+    server: target.host,
+    port: target.port,
     database: connection.databaseName,
     user: connection.username,
     password,
@@ -36,12 +37,17 @@ function config(connection: MssqlConnection): sql.config {
 }
 
 async function withMssql<T>(connection: MssqlConnection, fn: (pool: sql.ConnectionPool) => Promise<T>): Promise<T> {
-  const pool = new sql.ConnectionPool(config(connection));
-  await pool.connect();
+  const tunnel = await resolveEffectiveTarget(connection, 1433);
   try {
-    return await fn(pool);
+    const pool = new sql.ConnectionPool(config(connection, tunnel));
+    await pool.connect();
+    try {
+      return await fn(pool);
+    } finally {
+      await pool.close().catch(() => undefined);
+    }
   } finally {
-    await pool.close().catch(() => undefined);
+    await tunnel.close().catch(() => undefined);
   }
 }
 
@@ -110,24 +116,29 @@ export async function queryColumnsMssql(connection: MssqlConnection, query: stri
 export async function executeMssqlReadOnly(connection: MssqlConnection, query: string, timeout = 30, limit = 10000, offset = 0) {
   const statement = safeStatementMssql(query);
   const clampedTimeout = Math.min(Math.max(timeout, 1), 120) * 1000;
-  const pool = new sql.ConnectionPool({ ...config(connection), requestTimeout: clampedTimeout });
-  await pool.connect();
+  const tunnel = await resolveEffectiveTarget(connection, 1433);
   try {
-    const req = pool.request();
-    const started = Date.now();
-    const clampedLimit = Math.min(Math.max(limit, 1), 10000);
-    const result = await req.query(paginateMssql(statement, Math.max(offset, 0), clampedLimit + 1));
-    const rows = result.recordset.slice(0, clampedLimit) as Record<string, unknown>[];
-    const cols = result.recordset.columns as Record<string, { name: string }> | undefined;
-    return {
-      columns: cols ? Object.values(cols).map((c) => c.name) : rows.length ? Object.keys(rows[0]!) : [],
-      rows,
-      rowCount: rows.length,
-      truncated: result.recordset.length > clampedLimit,
-      executionTimeMs: Date.now() - started,
-    };
+    const pool = new sql.ConnectionPool({ ...config(connection, tunnel), requestTimeout: clampedTimeout });
+    await pool.connect();
+    try {
+      const req = pool.request();
+      const started = Date.now();
+      const clampedLimit = Math.min(Math.max(limit, 1), 10000);
+      const result = await req.query(paginateMssql(statement, Math.max(offset, 0), clampedLimit + 1));
+      const rows = result.recordset.slice(0, clampedLimit) as Record<string, unknown>[];
+      const cols = result.recordset.columns as Record<string, { name: string }> | undefined;
+      return {
+        columns: cols ? Object.values(cols).map((c) => c.name) : rows.length ? Object.keys(rows[0]!) : [],
+        rows,
+        rowCount: rows.length,
+        truncated: result.recordset.length > clampedLimit,
+        executionTimeMs: Date.now() - started,
+      };
+    } finally {
+      await pool.close().catch(() => undefined);
+    }
   } finally {
-    await pool.close().catch(() => undefined);
+    await tunnel.close().catch(() => undefined);
   }
 }
 
@@ -174,7 +185,8 @@ function splitFinalSelect(sql: string): { prefix: string; finalSelect: string } 
 export async function* streamMssqlRows(connection: MssqlConnection, query: string, batchSize = 1000): AsyncGenerator<Record<string, unknown>[]> {
   const statement = safeStatementMssql(query);
   // Use a longer timeout for full-table streaming — the query may run for many minutes
-  const pool = new sql.ConnectionPool({ ...config(connection), requestTimeout: 7_200_000 });
+  const tunnel = await resolveEffectiveTarget(connection, 1433);
+  const pool = new sql.ConnectionPool({ ...config(connection, tunnel), requestTimeout: 7_200_000 });
   await pool.connect();
   try {
     const request = new sql.Request(pool);
@@ -226,6 +238,7 @@ export async function* streamMssqlRows(connection: MssqlConnection, query: strin
     }
   } finally {
     await pool.close().catch(() => undefined);
+    await tunnel.close().catch(() => undefined);
   }
 }
 

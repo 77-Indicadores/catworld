@@ -84,7 +84,7 @@ pip install "catworld-sdk[dataframe]"
 
 ---
 
-### `upload(path, dataset_id, mode="replace", key_column=None, table_id=None, column_types=None, wait=False, poll_interval=2, timeout=None, skip_preflight=False)`
+### `upload(path, dataset_id, mode="replace", key_column=None, table_id=None, column_types=None, wait=False, poll_interval=2, timeout=None, skip_preflight=False, full_snapshot=False)`
 
 Envia um arquivo para um dataset.
 
@@ -99,6 +99,8 @@ result = client.upload(
 )
 print(result["status"], result["rowCount"])
 ```
+
+Com `mode="upsert"`, use `full_snapshot=True` só se o arquivo enviado representa 100% do estado atual da origem a cada envio (não um lote parcial/janela) — isso habilita detecção de exclusão: linhas que existiam antes e não aparecem mais no arquivo são marcadas como excluídas, e passam a aparecer em `changes(...)["removedKeys"]`. Default `False`.
 
 ⚠️ **Por padrão (`wait=False`) este método NÃO informa se a importação deu certo.** Ele retorna assim que o arquivo é enfileirado — preview e import rodam em background, e um erro de schema, por exemplo, só aparece depois, olhando `get_upload(upload_id)` ou o painel. **Recomendamos fortemente `wait=True`** em qualquer script que precise saber o resultado: com isso, o método bloqueia até o import terminar (poll em `GET /api/v1/uploads/{id}`) e levanta `UploadError` com a mensagem de erro real do servidor se falhar (ex: `"Schema incompatível. Esperado: ..."`) — em vez de falhar em silêncio.
 
@@ -253,6 +255,38 @@ Funciona tanto para tabelas materializadas no Catworld quanto para tabelas live;
 ```python
 rows = client.rows("<table-id>", limit=50)
 print(rows)
+```
+
+---
+
+### `changes(table_id, since=None, limit=1000)`
+
+Puxa só o que mudou numa tabela **extract** desde a última vez — em vez de reler a tabela inteira a cada execução. Só funciona em tabelas alimentadas por conexão/upload incremental (upsert com coluna-chave); não funciona em fontes `live`.
+
+Retorna `{"rows": [...], "removedKeys": [...] | None, "nextSince": str}`:
+
+- `rows`: linhas novas ou atualizadas desde `since`.
+- `removedKeys`: chaves excluídas na origem desde `since` — `None` se a fonte nunca teve `keyColumn` configurado (sem como saber o que foi excluído), ou sempre vazio se a fonte usa busca parcial por `deltaColumn` (nesse caso o Catworld não tem como distinguir "não mudou" de "foi excluído" — ver detecção de exclusão só se aplica a fontes com snapshot completo).
+- `nextSince`: guarde esse valor e passe como `since` na próxima chamada. Se nada mudou, `nextSince` volta igual ao `since` enviado — seguro chamar em loop.
+
+Exemplo de polling, guardando o cursor entre execuções (ex: um arquivo local ou uma tabela de controle):
+
+```python
+import json
+from pathlib import Path
+
+cursor_file = Path("cursor.json")
+since = json.loads(cursor_file.read_text())["since"] if cursor_file.exists() else None
+
+result = client.changes("<table-id>", since=since, limit=1000)
+for row in result["rows"]:
+    ...  # processa cada linha nova/atualizada
+
+if result["removedKeys"]:
+    for key in result["removedKeys"]:
+        ...  # remove/marca como excluído localmente
+
+cursor_file.write_text(json.dumps({"since": result["nextSince"]}))
 ```
 
 ---

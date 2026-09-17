@@ -4,7 +4,7 @@
  */
 
 import { Pool, type PoolClient, type PoolConfig } from "pg";
-import type { ColDef, ColInfo, StorageConnection } from "./connection";
+import { CW_SYNCED_AT, CW_DELETED_AT, type ColDef, type ColInfo, type StorageConnection } from "./connection";
 
 // ─── URL parsing ──────────────────────────────────────────────────────────────
 
@@ -258,15 +258,24 @@ export class PgStorageConnection implements StorageConnection {
     staging: string,
     target: string,
     cols: ColDef[],
-    opts?: { targetExists?: boolean; keyColumn?: string | null; mergedName?: string },
+    opts?: { targetExists?: boolean; keyColumn?: string | null; mergedName?: string; fullSnapshot?: boolean },
   ): Promise<void> {
     const qSc = pgQuote(schema);
     const qStg = `${qSc}.${pgQuote(staging)}`;
     const qTgt = `${qSc}.${pgQuote(target)}`;
     const targetExists = opts?.targetExists ?? true;
     const keyColumn = opts?.keyColumn ?? null;
+    const fullSnapshot = opts?.fullSnapshot ?? false;
+    const qSyncedAt = pgQuote(CW_SYNCED_AT);
+    const qDeletedAt = pgQuote(CW_DELETED_AT);
 
     if (!keyColumn) {
+      // Carimba cw_synced_at/cw_deleted_at na staging ANTES do swap — DEFAULT stampa
+      // todas as linhas existentes com o mesmo timestamp (now() avaliado uma vez por
+      // instrução em Postgres), coerente com "todo o lote foi visto agora".
+      await this._pool.query(
+        `ALTER TABLE ${qStg} ADD COLUMN ${qSyncedAt} TIMESTAMP NOT NULL DEFAULT now(), ADD COLUMN ${qDeletedAt} TIMESTAMP NULL`,
+      );
       // ── fullSwap: DROP target + RENAME staging → target (transação breve) ──────
       // MVCC: readers que começaram antes do BEGIN continuam vendo a versão antiga.
       const client = await this._pool.connect();
@@ -295,24 +304,37 @@ export class PgStorageConnection implements StorageConnection {
       .map(c => `${pgQuote(c.name)} ${canonicalToPg(c.sqlType)}${c.nullable ? "" : " NOT NULL"}`)
       .join(", ");
     const colList = cols.map(c => pgQuote(c.name)).join(", ");
+    const colDefsWithMeta = `${colDefs}, ${qSyncedAt} TIMESTAMP NOT NULL, ${qDeletedAt} TIMESTAMP NULL`;
+    const colListWithMeta = `${colList}, ${qSyncedAt}, ${qDeletedAt}`;
 
     await this._pool.query(`DROP TABLE IF EXISTS ${qMgd}`);
 
     try {
-      await this._pool.query(`CREATE TABLE ${qMgd} (${colDefs})`);
+      await this._pool.query(`CREATE TABLE ${qMgd} (${colDefsWithMeta})`);
 
       if (targetExists) {
-        // MVCC: readers veem target antiga enquanto este INSERT roda fora de tx
+        // MVCC: readers veem target antiga enquanto este INSERT roda fora de tx. Se
+        // fullSnapshot=true, ausência na staging = "excluído na origem": carimba na
+        // primeira rodada em que isso ocorre (CASE preserva se já estava excluída —
+        // idempotente). Se fullSnapshot=false (delta parcial), preserva como está —
+        // ausência aqui só significa "não mudou neste lote".
+        const deletedAtExpr = fullSnapshot
+          ? `CASE WHEN t.${qDeletedAt} IS NULL THEN now() ELSE t.${qDeletedAt} END`
+          : `t.${qDeletedAt}`;
+        const syncedAtExpr = fullSnapshot
+          ? `CASE WHEN t.${qDeletedAt} IS NULL THEN now() ELSE t.${qSyncedAt} END`
+          : `t.${qSyncedAt}`;
         await this._pool.query(
-          `INSERT INTO ${qMgd} (${colList})
-           SELECT ${colList} FROM ${qTgt} t
+          `INSERT INTO ${qMgd} (${colListWithMeta})
+           SELECT ${colList}, ${syncedAtExpr}, ${deletedAtExpr} FROM ${qTgt} t
            WHERE NOT EXISTS (SELECT 1 FROM ${qStg} s WHERE s.${key} = t.${key})`,
         );
       }
 
-      // Copia todos os rows de staging (novos / atualizados)
+      // Copia todos os rows de staging (novos / atualizados) — sempre "vivas": carimba
+      // cw_synced_at=agora e cw_deleted_at=NULL (undelete automático).
       await this._pool.query(
-        `INSERT INTO ${qMgd} (${colList}) SELECT ${colList} FROM ${qStg}`,
+        `INSERT INTO ${qMgd} (${colListWithMeta}) SELECT ${colList}, now(), NULL FROM ${qStg}`,
       );
 
       // Transação breve: DROP target + RENAME merged → target (AccessExclusiveLock ~ms)

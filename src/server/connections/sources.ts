@@ -3,7 +3,7 @@ import { Cron } from "croner";
 import { prisma } from "@/server/db";
 import { withAdvisoryLock } from "@/server/db/advisory-lock";
 import { sqlPool, ensureSchema } from "@/server/azure/sql";
-import { getStorageConnection } from "@/server/storage/connection";
+import { getStorageConnection, type StorageConnection } from "@/server/storage/connection";
 import { sqlIdentifier } from "@/server/security/naming";
 import { ApiError } from "@/server/http";
 import { queryColumns, quotedPgTable, streamPostgresRows, tableColumns, type SourceColumn } from "./postgres";
@@ -98,6 +98,7 @@ export async function createDatasetSource(input: {
   sourceSql?: string | null;
   refreshCron?: string | null;
   keyColumn?: string | null;
+  deltaColumn?: string | null;
   sourceGroupId?: string;
 }) {
   const [dataset, connection] = await Promise.all([
@@ -137,6 +138,7 @@ export async function createDatasetSource(input: {
       sourceTable: input.sourceTable ?? null,
       sourceSql: input.sourceSql ?? null,
       keyColumn: input.keyColumn ?? null,
+      deltaColumn: input.sourceKind === "table" ? (input.deltaColumn ?? null) : null,
       refreshCron: input.mode === "live" ? null : (input.refreshCron ?? null),
       lastStatus: input.mode === "live" ? "ready" : "queued",
       nextRefreshAt: input.mode === "extract" ? nextRefreshFromCron(input.refreshCron) : null,
@@ -154,6 +156,8 @@ export async function createDatasetSources(input: {
   sourceSchema: string;
   sourceTables: string[];
   refreshCron?: string | null;
+  keyColumn?: string | null;
+  deltaColumn?: string | null;
   sourceGroupId?: string;
 }) {
   const sourceGroupId = input.sourceGroupId ?? randomUUID();
@@ -167,6 +171,8 @@ export async function createDatasetSources(input: {
       sourceSchema: input.sourceSchema,
       sourceTable: table,
       refreshCron: input.refreshCron,
+      keyColumn: input.keyColumn,
+      deltaColumn: input.deltaColumn,
       sourceGroupId,
     }));
   }
@@ -230,13 +236,21 @@ export async function refreshDatasetSource(datasetSourceId: string) {
       if (v != null) newDeltaValue = v instanceof Date ? v.toISOString() : String(v);
     }
 
-    // Swap atômico (upsert ou replace)
+    // Swap atômico (upsert ou replace). Upsert por keyColumn funciona para qualquer
+    // sourceKind (table ou query) — independe de haver deltaColumn/fetch incremental,
+    // que é exclusivo de sourceKind "table". Para "query", o corte incremental (janela,
+    // filtro de data etc.) fica embutido no próprio SQL cadastrado pelo usuário.
     const hasTarget = await storageConn.tableExists(schema, table);
-    const useKeyMerge = useDelta && !!source.keyColumn && hasTarget;
+    const useKeyMerge = !!source.keyColumn && hasTarget;
+    if (useKeyMerge) await assertKeyColumnSafe(storageConn, schema, stage, source.keyColumn!);
+    // fullSnapshot: staging representa 100% do estado atual da origem (não uma busca
+    // parcial por deltaColumn) — só nesse caso é seguro tratar "ausente da staging" como
+    // excluído na origem (ver Parte D do plano de incremental).
     await storageConn.atomicSwap(schema, stage, table, stageCols, {
       targetExists: hasTarget,
       keyColumn: useKeyMerge ? source.keyColumn : null,
       mergedName: useKeyMerge ? `cw_mgd_${source.id.replaceAll("-", "").slice(0, 20)}` : undefined,
+      fullSnapshot: !useDelta,
     });
 
     const finalRowCount = await storageConn.countRows(schema, table);
@@ -262,6 +276,32 @@ export async function refreshDatasetSource(datasetSourceId: string) {
       data: { lastStatus: "failed", lastError: message, nextRefreshAt: nextRefreshFromCron(source.refreshCron) },
     });
     throw e;
+  }
+}
+
+/** Garante que a keyColumn na staging não tem nulos nem duplicatas antes do merge por upsert */
+async function assertKeyColumnSafe(
+  storageConn: StorageConnection,
+  schema: string,
+  stage: string,
+  keyColumn: string,
+) {
+  const qStage = `${storageConn.q(schema)}.${storageConn.q(stage)}`;
+  const key = storageConn.q(keyColumn);
+
+  const nulls = await storageConn.query<{ n: number | bigint }>(`SELECT COUNT(*) AS n FROM ${qStage} WHERE ${key} IS NULL`);
+  const nullCount = Number(nulls[0]?.n ?? 0);
+  if (nullCount > 0) {
+    throw new ApiError(400, "UPSERT_NULL_KEY", `Coluna-chave "${keyColumn}" tem ${nullCount} valor(es) nulo(s) — upsert exige chave sempre preenchida`);
+  }
+
+  const duplicates = await storageConn.query<{ k: unknown; n: number | bigint }>(
+    `SELECT ${key} AS k, COUNT(*) AS n FROM ${qStage} GROUP BY ${key} HAVING COUNT(*) > 1`,
+  );
+  if (duplicates.length) {
+    const sample = duplicates.slice(0, 20).map(r => `${r.k} (x${Number(r.n)})`).join(", ");
+    const more = duplicates.length > 20 ? " (mostrando as primeiras 20)" : "";
+    throw new ApiError(400, "UPSERT_DUPLICATE_KEY", `Coluna-chave "${keyColumn}" tem valores duplicados na origem: ${sample}${more}`);
   }
 }
 

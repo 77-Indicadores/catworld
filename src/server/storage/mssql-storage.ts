@@ -4,7 +4,7 @@
  */
 
 import sql from "mssql";
-import type { ColDef, ColInfo, StorageConnection } from "./connection";
+import { CW_SYNCED_AT, CW_DELETED_AT, type ColDef, type ColInfo, type StorageConnection } from "./connection";
 
 // ─── URL parsing ──────────────────────────────────────────────────────────────
 
@@ -264,7 +264,7 @@ export class MssqlStorageConnection implements StorageConnection {
     staging: string,
     target: string,
     cols: ColDef[],
-    opts?: { targetExists?: boolean; keyColumn?: string | null; mergedName?: string },
+    opts?: { targetExists?: boolean; keyColumn?: string | null; mergedName?: string; fullSnapshot?: boolean },
   ): Promise<void> {
     const p = await this.rawPool();
     const qSc = mssqlQuote(schema);
@@ -272,12 +272,22 @@ export class MssqlStorageConnection implements StorageConnection {
     const qTgt = `${qSc}.${mssqlQuote(target)}`;
     const targetExists = opts?.targetExists ?? true;
     const keyColumn = opts?.keyColumn ?? null;
+    const fullSnapshot = opts?.fullSnapshot ?? false;
+    const qSyncedAt = mssqlQuote(CW_SYNCED_AT);
+    const qDeletedAt = mssqlQuote(CW_DELETED_AT);
 
     const setReqTimeout = (req: sql.Request, ms: number) => {
       (req as unknown as { overrides: { requestTimeout: number } }).overrides.requestTimeout = ms;
     };
 
     if (!keyColumn) {
+      // Carimba cw_synced_at/cw_deleted_at na staging ANTES do swap — DEFAULT stampa
+      // todas as linhas existentes com o mesmo timestamp (calculado uma vez), coerente
+      // com "todo o lote foi visto agora". Fora da transação breve de rename (não é
+      // hot path de lock).
+      await p.request().query(
+        `ALTER TABLE ${qStg} ADD ${qSyncedAt} DATETIME2 NOT NULL CONSTRAINT DF_${staging.replace(/[^a-zA-Z0-9_]/g, "")}_sa DEFAULT SYSUTCDATETIME(), ${qDeletedAt} DATETIME2 NULL`,
+      );
       // ── fullSwap: DROP target + RENAME staging → target (transação breve) ──────
       const tx = new sql.Transaction(p);
       await tx.begin();
@@ -314,6 +324,8 @@ export class MssqlStorageConnection implements StorageConnection {
       .map(c => `${mssqlQuote(c.name)} ${canonicalToMssql(c.sqlType)}${c.nullable ? " NULL" : " NOT NULL"}`)
       .join(", ");
     const colList = cols.map(c => mssqlQuote(c.name)).join(", ");
+    const colDefsWithMeta = `${colDefs}, ${qSyncedAt} DATETIME2 NOT NULL, ${qDeletedAt} DATETIME2 NULL`;
+    const colListWithMeta = `${colList}, ${qSyncedAt}, ${qDeletedAt}`;
 
     // Remove eventual sobra de tentativa anterior
     await p.request().query(
@@ -321,25 +333,38 @@ export class MssqlStorageConnection implements StorageConnection {
     );
 
     try {
-      await p.request().query(`CREATE TABLE ${qMgd} (${colDefs})`);
+      await p.request().query(`CREATE TABLE ${qMgd} (${colDefsWithMeta})`);
 
       if (targetExists) {
-        // Copia rows de target cujo key NÃO aparece em staging (fora de tx)
+        // Copia rows de target cujo key NÃO aparece em staging (fora de tx). Se
+        // fullSnapshot=true, a ausência na staging significa "excluído na origem": a
+        // linha só é carimbada como excluída na primeira rodada em que isso acontece
+        // (CASE preserva o carimbo se já estava excluída — idempotente). Se
+        // fullSnapshot=false (delta parcial), preserva ambas as colunas como estão —
+        // ausência aqui só significa "não mudou neste lote", não exclusão.
+        const deletedAtExpr = fullSnapshot
+          ? `CASE WHEN t.${qDeletedAt} IS NULL THEN SYSUTCDATETIME() ELSE t.${qDeletedAt} END`
+          : `t.${qDeletedAt}`;
+        const syncedAtExpr = fullSnapshot
+          ? `CASE WHEN t.${qDeletedAt} IS NULL THEN SYSUTCDATETIME() ELSE t.${qSyncedAt} END`
+          : `t.${qSyncedAt}`;
         const copyReq = p.request();
         setReqTimeout(copyReq, 7_200_000);
         await copyReq.query(
-          `INSERT INTO ${qMgd} (${colList})
-           SELECT ${colList} FROM ${qTgt} t
+          `INSERT INTO ${qMgd} (${colListWithMeta})
+           SELECT ${colList}, ${syncedAtExpr}, ${deletedAtExpr} FROM ${qTgt} t
            WHERE NOT EXISTS (SELECT 1 FROM ${qStg} s WHERE s.${key} = t.${key})
            OPTION (MAXDOP 1)`,
         );
       }
 
-      // Copia todos os rows de staging (novos / atualizados)
+      // Copia todos os rows de staging (novos / atualizados) — sempre "vivas": carimba
+      // cw_synced_at=agora e cw_deleted_at=NULL (undelete automático se a chave tinha
+      // sido excluída antes e voltou a aparecer na origem).
       const insReq = p.request();
       setReqTimeout(insReq, 7_200_000);
       await insReq.query(
-        `INSERT INTO ${qMgd} (${colList}) SELECT ${colList} FROM ${qStg} OPTION (MAXDOP 1)`,
+        `INSERT INTO ${qMgd} (${colListWithMeta}) SELECT ${colList}, SYSUTCDATETIME(), NULL FROM ${qStg} OPTION (MAXDOP 1)`,
       );
 
       // Transação breve: DROP target + RENAME merged → target (~ms de lock)

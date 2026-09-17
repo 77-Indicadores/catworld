@@ -37,6 +37,11 @@ export async function POST(r: NextRequest) {
       tableId: z.string().uuid().optional(),
       mode: z.enum(["replace", "append", "upsert"]).default("replace"),
       keyColumn: z.string().optional(),
+      // Só relevante com mode="upsert": indica que o arquivo é 100% do estado atual da
+      // origem (não um lote parcial) — habilita detecção de exclusão (linhas ausentes do
+      // arquivo são marcadas como excluídas). Default false preserva o comportamento
+      // atual (upsert parcial, sem inferir exclusão).
+      fullSnapshot: z.boolean().optional(),
       previewJson: z.string().optional(),
       mappingJson: z.string().optional(),
       rowCount: z.number().int().nonnegative().optional(),
@@ -74,6 +79,7 @@ export async function POST(r: NextRequest) {
         tableId: input.tableId ?? null,
         mode: input.mode,
         keyColumn: input.keyColumn ?? null,
+        fullSnapshot: input.fullSnapshot ?? false,
         previewJson: input.previewJson ?? null,
         mappingJson: input.mappingJson ?? null,
         typeOverridesJson: input.typeOverrides ? JSON.stringify(input.typeOverrides) : null,
