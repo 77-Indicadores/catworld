@@ -284,10 +284,26 @@ export async function refreshDatasetSource(datasetSourceId: string, opts?: { rec
   const storageConn = await getStorageConnection(source.dataset.storageServerId);
   const schema = source.dataset.schemaName;
   const table = source.targetTable.sqlName;
-  const stage = `cw_src_${source.id.replaceAll("-", "").slice(0, 20)}`;
+  const idPrefix = source.id.replaceAll("-", "").slice(0, 20);
+  // Sufixo distinto pro staging/merge de reconciliação — incremental e reconciliação
+  // da MESMA fonte nunca devem tocar a mesma tabela intermediária, mesmo que a trava
+  // abaixo falhe por algum motivo (defesa em profundidade).
+  const stage = reconciliation ? `cw_src_${idPrefix}_rc` : `cw_src_${idPrefix}`;
   let rowCount = 0n;
 
-  await prisma.datasetSource.update({ where: { id: source.id }, data: { lastStatus: "running", lastError: null } });
+  // Trava mútua: incremental e reconciliação da mesma fonte nunca podem rodar ao
+  // mesmo tempo (colidiriam na mesma tabela final via atomicSwap). UPDATE condicional
+  // atômico — se outra rodada já está "running", 0 linhas são afetadas e abortamos
+  // aqui, deixando o job falhar e reagendar pelo retry normal (backoff do worker),
+  // sem segurar transação/lock aberto pela duração inteira do refresh (que pode levar
+  // minutos com uma origem grande).
+  const claimed = await prisma.datasetSource.updateMany({
+    where: { id: source.id, lastStatus: { not: "running" } },
+    data: { lastStatus: "running", lastError: null },
+  });
+  if (claimed.count === 0) {
+    throw new ApiError(409, "SOURCE_REFRESH_IN_PROGRESS", "Já existe uma atualização em andamento para esta fonte (incremental ou reconciliação) — tente novamente em instantes");
+  }
   await storageConn.createSchemaIfNotExists(schema);
 
   // Cria tabela staging com os tipos canônicos das colunas
@@ -331,7 +347,7 @@ export async function refreshDatasetSource(datasetSourceId: string, opts?: { rec
     await storageConn.atomicSwap(schema, stage, table, stageCols, {
       targetExists: hasTarget,
       keyColumn: useKeyMerge ? source.keyColumn : null,
-      mergedName: useKeyMerge ? `cw_mgd_${source.id.replaceAll("-", "").slice(0, 20)}` : undefined,
+      mergedName: useKeyMerge ? (reconciliation ? `cw_mgd_${idPrefix}_rc` : `cw_mgd_${idPrefix}`) : undefined,
       fullSnapshot,
     });
 
