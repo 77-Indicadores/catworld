@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { validateReadOnlySql } from "@/server/security/sql-safety";
 import { prisma } from "@/server/db";
 import { sqlIdentifier } from "@/server/security/naming";
 import { nextRefreshFromCron } from "@/server/connections/sources";
@@ -26,6 +27,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
   if (!body.querySql?.trim()) return NextResponse.json({ error: "querySql obrigatório" }, { status: 400 });
   if (!body.name?.trim())     return NextResponse.json({ error: "name obrigatório" }, { status: 400 });
+
+  const safety = validateReadOnlySql(body.querySql);
+  if (!safety.safe) return NextResponse.json({ error: safety.reason, code: "UNSAFE_SQL" }, { status: 400 });
 
   const dataset = await prisma.dataset.findUnique({ where: { id: datasetId } });
   if (!dataset) return NextResponse.json({ error: "Dataset não encontrado" }, { status: 404 });

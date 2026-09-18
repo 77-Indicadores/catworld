@@ -2,7 +2,8 @@ import type { NextRequest } from "next/server";
 import { resolveActor } from "@/server/auth/actor";
 import { syncActorGrants } from "@/server/auth/sync-grants";
 import { executeReadOnly } from "@/server/azure/sql";
-import { withPg, quotedPgTable, type PgConnection } from "@/server/connections/postgres";
+import { withPg, quotedPgTable } from "@/server/connections/postgres";
+import { executeLiveReadOnly, isMssqlConnection, liveCount, liveQuoteIdent, liveQuotedTable, type LiveConnection } from "@/server/connections/live";
 import { getStorageConnection } from "@/server/storage/connection";
 import type { PgStorageConnection } from "@/server/storage/pg-storage";
 import { ApiError, handleApiError } from "@/server/http";
@@ -124,7 +125,7 @@ function escXml(s: string) {
 }
 
 type Column    = { originalName: string; sqlName: string; sqlType: string; nullable: boolean };
-type LiveSource = { mode: "live"; connection: PgConnection; sourceKind: string; sourceSchema: string | null; sourceTable: string | null; sourceSql: string | null };
+type LiveSource = { mode: "live"; connection: LiveConnection; sourceKind: string; sourceSchema: string | null; sourceTable: string | null; sourceSql: string | null };
 type Table     = { sqlName: string; columns: Column[]; live: LiveSource | null };
 type Dataset   = { id: string; schemaName: string; storageServerId: string | null; tables: Table[] };
 
@@ -162,6 +163,13 @@ async function loadDataset(projectSlug: string, datasetSlug: string): Promise<Da
             username: s.connection.username,
             encryptedCredentials: s.connection.encryptedCredentials,
             sslMode: s.connection.sslMode,
+            provider: s.connection.provider,
+            sshTunnelEnabled: s.connection.sshTunnelEnabled,
+            sshHost: s.connection.sshHost,
+            sshPort: s.connection.sshPort,
+            sshUsername: s.connection.sshUsername,
+            sshAuthMethod: s.connection.sshAuthMethod,
+            sshEncryptedSecret: s.connection.sshEncryptedSecret,
           },
           sourceKind: s.sourceKind,
           sourceSchema: s.sourceSchema,
@@ -225,6 +233,7 @@ async function queryLiveTable(
   needCount: boolean,
   countCacheKey: string,
 ): Promise<{ rows: Record<string, unknown>[]; totalCount: number | null }> {
+  if (isMssqlConnection(live.connection)) return queryLiveMssql(live, cols, top, skip, needCount, countCacheKey);
   const colList = cols.map((c) => {
     const orig  = `"${c.originalName.replaceAll('"', '""')}"`;
     const alias = `"${c.sqlName.replaceAll('"', '""')}"`;
@@ -270,6 +279,34 @@ async function queryLiveTable(
     );
     return { rows: dataResult.rows.map((row) => normalizeRow(row, typeMap)), totalCount: null };
   });
+}
+
+/** Fonte live MSSQL: mesma resposta do caminho Postgres, paginacao pelo executor MSSQL. */
+async function queryLiveMssql(
+  live: LiveSource,
+  cols: Column[],
+  top: number,
+  skip: number,
+  needCount: boolean,
+  countCacheKey: string,
+): Promise<{ rows: Record<string, unknown>[]; totalCount: number | null }> {
+  const q = (n: string) => liveQuoteIdent(live.connection, n);
+  const colList = cols.map((c) => (c.originalName === c.sqlName ? q(c.originalName) : `${q(c.originalName)} AS ${q(c.sqlName)}`)).join(", ");
+  const baseExpr = live.sourceKind === "table"
+    ? liveQuotedTable(live.connection, live.sourceSchema!, live.sourceTable!)
+    : `(${live.sourceSql!.replace(/;\s*$/, "")}) cw_live_src`;
+  const typeMap = new Map(cols.map((c) => [c.sqlName, c.sqlType.toUpperCase().replace(/\(.*\)/, "").trim()]));
+
+  let totalCount: number | null = null;
+  if (needCount) {
+    totalCount = getCachedCount(countCacheKey);
+    if (totalCount === null) {
+      totalCount = await liveCount(live.connection, baseExpr);
+      setCachedCount(countCacheKey, totalCount);
+    }
+  }
+  const data = await executeLiveReadOnly(live.connection, `SELECT ${colList} FROM ${baseExpr}`, 60, top, skip);
+  return { rows: data.rows.map((row) => normalizeRow(row as Record<string, unknown>, typeMap)), totalCount };
 }
 
 // ── Metadata OData ────────────────────────────────────────────────────────────

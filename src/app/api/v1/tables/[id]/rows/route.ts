@@ -3,7 +3,7 @@ import { prisma } from "@/server/db";
 import { resolveActor } from "@/server/auth/actor";
 import { canAccess } from "@/server/auth/permissions";
 import { ensureInternalPrincipal, executeReadOnly, grantSchema } from "@/server/azure/sql";
-import { executePostgresReadOnly } from "@/server/connections/postgres";
+import { executeLiveReadOnly, liveQuotedTable, type LiveConnection } from "@/server/connections/live";
 import { getStorageConnection } from "@/server/storage/connection";
 import { ApiError, handleApiError, ok } from "@/server/http";
 import { quoteIdentifier } from "@/server/security/naming";
@@ -39,9 +39,9 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     if (table.source?.mode === "live") {
       const source = table.source;
       const sql = source.sourceKind === "table"
-        ? `SELECT * FROM "${source.sourceSchema}"."${source.sourceTable}"`
+        ? `SELECT * FROM ${liveQuotedTable(source.connection, source.sourceSchema!, source.sourceTable!)}`
         : source.sourceSql!;
-      const result = await executePostgresReadOnly(source.connection, sql, 30, limit);
+      const result = await executeLiveReadOnly(source.connection as LiveConnection, sql, 30, limit);
       return ok(result.rows, { columns: result.columns, rowCount: result.rowCount, source: { id: source.id, mode: source.mode } });
     }
 

@@ -4,7 +4,7 @@ import { prisma } from "@/server/db";
 import { resolveActor } from "@/server/auth/actor";
 import { canAccess } from "@/server/auth/permissions";
 import { ensureInternalPrincipal, grantSchema } from "@/server/azure/sql";
-import { executePostgresReadOnly } from "@/server/connections/postgres";
+import { executeLiveReadOnly, liveQuotedTable, type LiveConnection } from "@/server/connections/live";
 import { getStorageConnection } from "@/server/storage/connection";
 import type { PgStorageConnection } from "@/server/storage/pg-storage";
 import type { MssqlStorageConnection } from "@/server/storage/mssql-storage";
@@ -163,9 +163,9 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         throw new ApiError(400, "INVALID_SOURCE", "Fonte do tipo tabela sem schema/tabela configurados");
       const querySql =
         source.sourceKind === "table"
-          ? `SELECT * FROM "${source.sourceSchema}"."${source.sourceTable}"`
+          ? `SELECT * FROM ${liveQuotedTable(source.connection, source.sourceSchema!, source.sourceTable!)}`
           : source.sourceSql!;
-      const result = await executePostgresReadOnly(source.connection, querySql, 120, 500_000);
+      const result = await executeLiveReadOnly(source.connection as LiveConnection, querySql, 120, 500_000);
       const rows = result.rows as Record<string, unknown>[];
       const body = enc.encode(
         BOM + [csvLine(result.columns), ...rows.map((r) => csvLine(result.columns.map((c) => r[c])))].join("\r\n"),

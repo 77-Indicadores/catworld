@@ -113,7 +113,9 @@ export async function queryColumnsMssql(connection: MssqlConnection, query: stri
   });
 }
 
-export async function executeMssqlReadOnly(connection: MssqlConnection, query: string, timeout = 30, limit = 10000, offset = 0) {
+import { mssqlKind, normalizeRows, pgKind, type ColumnKind } from "@/server/sql-contract/result";
+
+export async function executeMssqlReadOnly(connection: MssqlConnection, query: string, timeout = 30, limit = 10000, offset = 0, normalize = false) {
   const statement = safeStatementMssql(query);
   const clampedTimeout = Math.min(Math.max(timeout, 1), 120) * 1000;
   const tunnel = await resolveEffectiveTarget(connection, 1433);
@@ -125,8 +127,11 @@ export async function executeMssqlReadOnly(connection: MssqlConnection, query: s
       const started = Date.now();
       const clampedLimit = Math.min(Math.max(limit, 1), 10000);
       const result = await req.query(paginateMssql(statement, Math.max(offset, 0), clampedLimit + 1));
-      const rows = result.recordset.slice(0, clampedLimit) as Record<string, unknown>[];
-      const cols = result.recordset.columns as Record<string, { name: string }> | undefined;
+      const cols = result.recordset.columns as Record<string, { name: string; type?: { declaration?: string } }> | undefined;
+      const sliced = result.recordset.slice(0, clampedLimit) as Record<string, unknown>[];
+      const rows = normalize
+        ? normalizeRows(sliced, Object.fromEntries(Object.entries(cols ?? {}).map(([n, c]) => [n, mssqlKind(c.type?.declaration)])) as Record<string, ColumnKind>, "mssql")
+        : sliced;
       return {
         columns: cols ? Object.values(cols).map((c) => c.name) : rows.length ? Object.keys(rows[0]!) : [],
         rows,

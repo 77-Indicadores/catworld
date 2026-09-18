@@ -7,24 +7,29 @@ import { canAccess } from "@/server/auth/permissions";
 import { ApiError, handleApiError, ok } from "@/server/http";
 import { executePostgresReadOnly, quotedPgTable } from "@/server/connections/postgres";
 import { executeMssqlReadOnly, quotedMssqlTable } from "@/server/connections/mssql";
+import { contractTranslate } from "@/server/sql-contract/apply";
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const actor = await resolveActor(request);
-    const input = z.object({ sql: z.string().min(1).max(50000).optional(), timeout: z.number().int().min(1).max(120).default(30), limit: z.number().int().min(1).max(10000).default(10000), offset: z.number().int().min(0).default(0) }).parse(await request.json());
+    const input = z.object({ sql: z.string().min(1).max(50000).optional(), timeout: z.number().int().min(1).max(120).default(30), limit: z.number().int().min(1).max(10000).default(10000), offset: z.number().int().min(0).default(0), normalize: z.boolean().default(false) }).parse(await request.json());
     const source = await prisma.datasetSource.findUniqueOrThrow({ where: { id: (await params).id }, include: { dataset: true, connection: true, targetTable: true } });
     if (!await canAccess(actor, "READ", source.dataset.projectId, source.datasetId) && actor.role !== "ADMIN") throw new ApiError(403, "FORBIDDEN", "Sem permissao para ler a fonte");
     if (source.mode !== "live") throw new ApiError(400, "NOT_LIVE", "Fonte nao e live");
     const isMssql = source.connection.provider === "mssql";
     const tableRef = isMssql ? quotedMssqlTable(source.sourceSchema!, source.sourceTable!) : quotedPgTable(source.sourceSchema!, source.sourceTable!);
-    const query = input.sql
-      ? qualifySourceReference(input.sql, source, isMssql)
+    // Contrato de SQL: o usuario escreve T-SQL; origem Postgres recebe a traducao.
+    // O SQL nativo da propria fonte (sourceSql / SELECT *) ja esta no dialeto da origem.
+    const translated = input.sql ? await contractTranslate(input.sql, isMssql ? "mssql" : "postgres", isMssql ? "live-mssql" : "live-pg", "passthrough") : null;
+    const query = translated
+      ? qualifySourceReference(translated.sql, source, isMssql)
       : source.sourceKind === "table" ? `SELECT * FROM ${tableRef}` : source.sourceSql!;
+    const limit = translated?.topLimit != null ? Math.min(translated.topLimit, 10000) : input.limit;
     return ok(isMssql
-      ? await executeMssqlReadOnly(source.connection, query, input.timeout, input.limit, input.offset)
-      : await executePostgresReadOnly(source.connection, query, input.timeout, input.limit, input.offset));
+      ? await executeMssqlReadOnly(source.connection, query, input.timeout, limit, input.offset, input.normalize)
+      : await executePostgresReadOnly(source.connection, query, input.timeout, limit, input.offset, input.normalize));
   } catch (e) {
-    if (e instanceof Error && "code" in e) {
+    if (!(e instanceof ApiError) && e instanceof Error && "code" in e) {
       Sentry.captureException(e);
       return handleApiError(new ApiError(400, "QUERY_FAILED", e.message));
     }

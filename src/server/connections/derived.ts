@@ -2,7 +2,19 @@ import { randomUUID } from "crypto";
 import { prisma } from "@/server/db";
 import { withAdvisoryLock } from "@/server/db/advisory-lock";
 import { getStorageConnection } from "@/server/storage/connection";
+import { validateReadOnlySql } from "@/server/security/sql-safety";
+import { contractTranslate } from "@/server/sql-contract/apply";
+import { ApiError } from "@/server/http";
 import { nextRefreshFromCron } from "./sources";
+
+/** Contrato de SQL: a derivada e escrita em T-SQL, validada como read-only e traduzida por backend. */
+export async function prepareDerivedSql(querySql: string, provider: string): Promise<string> {
+  const v = validateReadOnlySql(querySql);
+  if (!v.safe) throw new ApiError(400, "UNSAFE_SQL", v.reason);
+  if (provider === "sqlserver") return v.statement;
+  const { sql, topLimit } = await contractTranslate(v.statement, "postgres", "derived", "passthrough");
+  return topLimit !== null ? `${sql} LIMIT ${topLimit}` : sql;
+}
 
 function stagingName(sqlName: string) {
   const safe = sqlName.slice(0, 28).replace(/[^a-z0-9_]/g, "_");
@@ -62,17 +74,18 @@ export async function refreshDerivedTable(derivedTableId: string) {
   await prisma.derivedTable.update({ where: { id: derivedTableId }, data: { lastStatus: "running" } });
 
   try {
+    const querySql = await prepareDerivedSql(dt.querySql, conn.provider);
     // Cria tabela staging como resultado do querySql (sintaxe depende do provider)
     if (conn.provider === "sqlserver") {
       const qSchema = `[${schema}]`;
       const qStaging = `${qSchema}.[${staging}]`;
       const pool = await (conn as import("@/server/storage/mssql-storage").MssqlStorageConnection).rawPool();
-      await pool.request().query(`SELECT * INTO ${qStaging} FROM (${dt.querySql}) AS _drv`);
+      await pool.request().query(`SELECT * INTO ${qStaging} FROM (${querySql}) AS _drv`);
     } else {
       const { pgQuote } = await import("@/server/storage/pg-storage");
       await conn.createSchemaIfNotExists(schema);
       const qStaging = `${pgQuote(schema)}.${pgQuote(staging)}`;
-      await conn.execute(`CREATE TABLE ${qStaging} AS SELECT * FROM (${dt.querySql}) AS _drv`);
+      await conn.execute(`CREATE TABLE ${qStaging} AS SELECT * FROM (${querySql}) AS _drv`);
     }
 
     const rowCount = Number(await conn.countRows(schema, staging));

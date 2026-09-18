@@ -3,15 +3,16 @@
  * Equivalente ao executeReadOnly de azure/sql.ts mas para PostgreSQL.
  *
  * O SQL de entrada deve estar no dialeto T-SQL (MSSQL) — este módulo
- * chama translateMssqlToPg antes de executar.
+ * passa pelo contrato de SQL (sql-contract/translate) antes de executar.
  */
 
 import { Query, type PoolClient } from "pg";
 import { validateReadOnlySql } from "@/server/security/sql-safety";
 import { ApiError } from "@/server/http";
 import { MAX_RESULT_BYTES, approxRowBytes } from "@/server/query/protection";
-import { translateMssqlToPg } from "./mssql-to-pg";
+import { contractTranslate } from "@/server/sql-contract/apply";
 import type { PgStorageConnection } from "./pg-storage";
+import { mssqlKind, normalizeRows, pgKind, type ColumnKind } from "@/server/sql-contract/result";
 
 const DEFAULT_LIMIT = 10_000;
 
@@ -22,6 +23,7 @@ export async function executeReadOnlyPg(
   limit = DEFAULT_LIMIT,
   schemas: string[] = [],
   offset = 0,
+  normalize = false,
 ): Promise<{
   columns: string[];
   rows: Record<string, unknown>[];
@@ -32,7 +34,7 @@ export async function executeReadOnlyPg(
   const validated = validateReadOnlySql(sql);
   if (!validated.safe) throw new ApiError(400, "UNSAFE_SQL", validated.reason);
 
-  const { sql: translated, topLimit } = translateMssqlToPg(validated.statement);
+  const { sql: translated, topLimit } = await contractTranslate(validated.statement, "postgres", "storage-pg", "regex");
 
   // Qualifica tabelas sem schema usando information_schema
   let statement = translated;
@@ -46,12 +48,12 @@ export async function executeReadOnlyPg(
 
   if (topLimit !== null) {
     // TOP N já foi extraído — adiciona LIMIT ao final
-    paged = `${statement} LIMIT ${topLimit}`;
+    paged = `${statement} LIMIT ${topLimit}`; // TOP N do usuario: nunca "truncado"
     if (offset > 0) paged += ` OFFSET ${offset}`;
   } else if (offset > 0) {
-    paged = `SELECT * FROM (${statement}) AS _cw_q LIMIT ${effectiveLimit} OFFSET ${offset}`;
+    paged = `SELECT * FROM (${statement}) AS _cw_q LIMIT ${effectiveLimit + 1} OFFSET ${offset}`;
   } else {
-    paged = `SELECT * FROM (${statement}) AS _cw_q LIMIT ${effectiveLimit}`;
+    paged = `SELECT * FROM (${statement}) AS _cw_q LIMIT ${effectiveLimit + 1}`;
   }
 
   const timeoutMs = Math.min(Math.max(timeout, 1), 120) * 1000;
@@ -90,6 +92,7 @@ export async function executeReadOnlyPg(
       `Resultado excede ${Math.round(MAX_RESULT_BYTES / (1024 * 1024))}MB (colunas muito largas). Selecione menos colunas, filtre mais linhas, ou use "stream": true.`,
     );
 
+    let kinds: Record<string, ColumnKind> = {};
     const columns = await new Promise<string[]>((resolve, reject) => {
       const query = new Query(paged);
       client!.query(query);
@@ -109,16 +112,20 @@ export async function executeReadOnlyPg(
       // própria query cancelada voltando) e vira o 413 correto, em vez de
       // vazar o erro genérico de cancelamento do driver.
       query.on("error", (err: Error) => reject(tooLarge ? tooLargeError() : err));
-      query.on("end", (result) => tooLarge ? reject(tooLargeError()) : resolve(result.fields.map((f) => f.name)));
+      query.on("end", (result) => {
+        if (tooLarge) return reject(tooLargeError());
+        kinds = Object.fromEntries(result.fields.map((f) => [f.name, pgKind(f.dataTypeID)]));
+        resolve(result.fields.map((f) => f.name));
+      });
     });
 
-    const limitedRows = rows.slice(0, effectiveLimit);
+    const limitedRows = normalize ? normalizeRows(rows.slice(0, effectiveLimit), kinds, "pg") : rows.slice(0, effectiveLimit);
 
     return {
       columns,
       rows: limitedRows,
       rowCount: limitedRows.length,
-      truncated: rows.length > effectiveLimit,
+      truncated: topLimit === null && rows.length > effectiveLimit,
       executionTimeMs: Date.now() - started,
     };
   } finally {
@@ -136,11 +143,13 @@ export async function executeReadOnlyPgStream(
   const validated = validateReadOnlySql(sql);
   if (!validated.safe) throw new ApiError(400, "UNSAFE_SQL", validated.reason);
 
-  const { sql: translated } = translateMssqlToPg(validated.statement);
+  const { sql: translated, topLimit } = await contractTranslate(validated.statement, "postgres", "storage-pg-stream", "regex");
   let statement = translated;
   if (schemas.length > 0) {
     statement = await qualifyTablesForPg(conn, statement, schemas);
   }
+  // TOP N do usuario vale tambem no stream (antes era descartado e devolvia tudo)
+  if (topLimit !== null) statement = `${statement} LIMIT ${topLimit}`;
 
   const timeoutMs = Math.min(Math.max(timeout, 1), 300) * 1000;
   const encoder = new TextEncoder();

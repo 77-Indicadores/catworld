@@ -6,6 +6,7 @@ import logging
 import re
 import time as _time
 import unicodedata as _unicodedata
+import warnings
 import zlib as _zlib
 import datetime as _datetime
 from pathlib import Path
@@ -422,7 +423,16 @@ class CatworldClient:
                 "Query mistura tabelas live com outras origens. Materialize a fonte como extract ou consulte uma fonte live por vez.",
                 code="MIXED_QUERY_ENGINES",
             )
-        return next(iter(live_source_ids))
+        if len(live_source_ids) > 1:
+            # Nao bloqueia (compatibilidade), mas o servidor so reescreve as referencias da
+            # fonte escolhida: as tabelas das outras fontes live ficam sem resolver.
+            warnings.warn(
+                "Query referencia tabelas de mais de uma fonte live; apenas uma sera resolvida. "
+                "Consulte uma fonte live por vez (live_query) ou materialize como extract.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+        return sorted(live_source_ids)[0]
 
     def upload(
         self,

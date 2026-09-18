@@ -126,13 +126,18 @@ export async function queryColumns(connection: PgConnection, query: string): Pro
   });
 }
 
-export async function executePostgresReadOnly(connection: PgConnection, query: string, timeout = 30, limit = 10000, offset = 0) {
+import { mssqlKind, normalizeRows, pgKind, type ColumnKind } from "@/server/sql-contract/result";
+
+export async function executePostgresReadOnly(connection: PgConnection, query: string, timeout = 30, limit = 10000, offset = 0, normalize = false) {
   const statement = safeStatement(query);
   return withPg(connection, async (client) => {
     await client.query(`SET statement_timeout TO ${Math.min(Math.max(timeout, 1), 120) * 1000}`);
     const started = Date.now();
     const result = await pgQuery(client, `SELECT * FROM (${statement}) cw_live_result LIMIT ${Math.min(Math.max(limit, 1), 10000) + 1} OFFSET ${Math.max(offset, 0)}`);
-    const rows = result.rows.slice(0, limit) as Record<string, unknown>[];
+    const sliced = result.rows.slice(0, limit) as Record<string, unknown>[];
+    const rows = normalize
+      ? normalizeRows(sliced, Object.fromEntries(result.fields.map((f) => [f.name, pgKind(f.dataTypeID)])) as Record<string, ColumnKind>, "pg")
+      : sliced;
     return {
       columns: result.fields.map((f) => f.name),
       rows,

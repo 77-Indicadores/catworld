@@ -3,7 +3,7 @@ import ExcelJS from "exceljs";
 import { z } from "zod";
 import { resolveActor } from "@/server/auth/actor";
 import { syncActorGrants } from "@/server/auth/sync-grants";
-import { executeReadOnly } from "@/server/azure/sql";
+import { runStorageQuery } from "@/server/sql-contract/run";
 import { ApiError, handleApiError } from "@/server/http";
 import { prisma } from "@/server/db";
 
@@ -18,22 +18,25 @@ export async function POST(r: NextRequest) {
     }).parse(await r.json());
 
     let schemas: string[] = [];
+    let storageServerId: string | null = null;
     let syncScope: { datasetIds?: string[]; projectIds?: string[] } | undefined;
     if (input.datasetId) {
       const dataset = await prisma.dataset.findUnique({ where: { id: input.datasetId, active: true } });
       if (!dataset) throw new ApiError(404, "NOT_FOUND", "Dataset nao encontrado");
       schemas = [dataset.schemaName];
+      storageServerId = dataset.storageServerId;
       syncScope = { datasetIds: [dataset.id] };
     } else if (input.projectId) {
       const datasets = await prisma.dataset.findMany({ where: { projectId: input.projectId, active: true } });
       if (!datasets.length) throw new ApiError(404, "NOT_FOUND", "Nenhum dataset encontrado para este projeto");
       schemas = datasets.map((d) => d.schemaName);
+      storageServerId = datasets[0]?.storageServerId ?? null;
       syncScope = { projectIds: [input.projectId] };
     }
 
     await syncActorGrants(actor, syncScope);
 
-    const result = await executeReadOnly(actor.principal, input.sql, 120, 10000, schemas);
+    const result = await runStorageQuery({ principal: actor.principal, sql: input.sql, timeout: 120, limit: 10000, schemas, storageServerId });
 
     if (input.format === "csv") {
       const lines = [result.columns.map(csv).join(","), ...result.rows.map(row => result.columns.map(c => csv(row[c])).join(","))];

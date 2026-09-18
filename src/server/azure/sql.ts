@@ -1,4 +1,5 @@
 import * as Sentry from "@sentry/nextjs";
+import { mssqlKind, normalizeRows, pgKind, type ColumnKind } from "@/server/sql-contract/result";
 import sql from "mssql";
 import { getStoragePool } from "@/server/storage/pool";
 import { quoteIdentifier } from "@/server/security/naming";
@@ -108,7 +109,7 @@ async function qualifyStatementMssql(statement: string, schemas: string[], pool:
   return qualified;
 }
 
-export async function executeReadOnly(principal: string, query: string, timeout = 30, limit = 10_000, schemas: string[] = [], offset = 0, maxTimeoutSeconds = 120, storageServerId?: string | null) {
+export async function executeReadOnly(principal: string, query: string, timeout = 30, limit = 10_000, schemas: string[] = [], offset = 0, maxTimeoutSeconds = 120, storageServerId?: string | null, normalize = false) {
   const validated = validateReadOnlySql(query);
   if (!validated.safe) throw new ApiError(400, "UNSAFE_SQL", validated.reason);
 
@@ -150,6 +151,7 @@ export async function executeReadOnly(principal: string, query: string, timeout 
       request.stream = true;
 
       let columns: string[] = [];
+      let kinds: Record<string, ColumnKind> = {};
       const rows: Record<string, unknown>[] = [];
       let approxBytes = 0;
       let tooLarge = false;
@@ -158,6 +160,7 @@ export async function executeReadOnly(principal: string, query: string, timeout 
 
       request.on("recordset", (cols: Record<string, unknown>) => {
         columns = Object.keys(cols);
+        kinds = Object.fromEntries(Object.entries(cols as Record<string, { type?: { declaration?: string } }>).map(([n, c]) => [n, mssqlKind(c.type?.declaration)]));
       });
 
       request.on("row", (row: Record<string, unknown>) => {
@@ -189,7 +192,7 @@ export async function executeReadOnly(principal: string, query: string, timeout 
           const truncated = rows.length > limit;
           resolve({
             columns: columns.length ? columns : Object.keys(rows[0] ?? {}),
-            rows: rows.slice(0, limit),
+            rows: normalize ? normalizeRows(rows.slice(0, limit), kinds, "mssql") : rows.slice(0, limit),
             rowCount: Math.min(rows.length, limit),
             truncated,
             executionTimeMs: Date.now() - started,

@@ -85,8 +85,12 @@ export function queryCacheKey(
   projectId: string | undefined,
   limit: number,
   offset: number,
+  // Resultado depende de quem pergunta (grants no MSSQL) e de onde o dado mora
+  principal: string,
+  storageServerId: string | null,
+  normalize = false,
 ): string {
-  const raw = JSON.stringify({ sql: sql.trim(), datasetId, projectId, limit, offset });
+  const raw = JSON.stringify({ sql: sql.trim(), datasetId, projectId, limit, offset, principal, storageServerId, normalize });
   return createHash("sha256").update(raw).digest("hex").slice(0, 32);
 }
 

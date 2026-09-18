@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { validateReadOnlySql } from "@/server/security/sql-safety";
 import { prisma } from "@/server/db";
 import { nextRefreshFromCron } from "@/server/connections/sources";
 
@@ -23,6 +24,11 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 
   const dt = await prisma.derivedTable.findUnique({ where: { id } });
   if (!dt) return NextResponse.json({ error: "Não encontrado" }, { status: 404 });
+
+  if (body.querySql) {
+    const safety = validateReadOnlySql(body.querySql);
+    if (!safety.safe) return NextResponse.json({ error: safety.reason, code: "UNSAFE_SQL" }, { status: 400 });
+  }
 
   const refreshCron = "refreshCron" in body ? body.refreshCron : dt.refreshCron;
   const nextRefreshAt = nextRefreshFromCron(refreshCron);

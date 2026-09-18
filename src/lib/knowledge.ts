@@ -143,7 +143,7 @@ export const articles: Article[] = [
       {
         kind: "code",
         label: "curl",
-        value: 'curl https://app.catworld.com/api/v1/queries \\\n  -H "Authorization: Bearer cw_live_xxx" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"sql": "SELECT * FROM vendas LIMIT 10", "datasetId": "..."}\'',
+        value: 'curl https://app.catworld.com/api/v1/queries \\\n  -H "Authorization: Bearer cw_live_xxx" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"sql": "SELECT TOP 10 * FROM vendas", "datasetId": "..."}\'',
       },
       { kind: "heading", text: "Boas práticas" },
       {

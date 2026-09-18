@@ -311,7 +311,7 @@ Executa uma consulta diretamente na fonte live Postgres. Normalmente prefira `qu
 Se `sql` for omitido, o servidor usa a consulta/tabela configurada na fonte.
 
 ```python
-result = client.live_query("<source-id>", "SELECT * FROM clientes LIMIT 100")
+result = client.live_query("<source-id>", "SELECT TOP 100 * FROM clientes")
 print(result.dataframe.head())
 ```
 

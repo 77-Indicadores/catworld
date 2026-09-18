@@ -8,6 +8,7 @@ import { ApiError, handleApiError, ok } from "@/server/http";
 import { audit } from "@/server/audit";
 import { prisma } from "@/server/db";
 import { getStorageConnection } from "@/server/storage/connection";
+import { runStorageQuery, type QueryResult } from "@/server/sql-contract/run";
 import {
   acquireQuerySlot,
   releaseQuerySlot,
@@ -32,6 +33,8 @@ export async function POST(request: NextRequest) {
       datasetId: z.string().uuid().optional(),
       projectId: z.string().uuid().optional(),
       stream: z.boolean().default(false),
+      // Contrato de resultado (datas ISO, bigint/decimal string...). Opt-in: o padrao segue o formato anterior.
+      normalize: z.boolean().default(false),
     }).parse(await request.json());
 
     let schemas: string[] = [];
@@ -84,7 +87,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Cache: verifica antes de executar
-    const cacheKey = queryCacheKey(input.sql, input.datasetId, input.projectId, input.limit, input.offset);
+    const cacheKey = queryCacheKey(input.sql, input.datasetId, input.projectId, input.limit, input.offset, actor.principal, storageServerId, input.normalize);
     const cached = getCachedResult(cacheKey);
     if (cached) {
       const res = ok(cached);
@@ -96,35 +99,14 @@ export async function POST(request: NextRequest) {
     // Semáforo: limita concorrência global
     acquireQuerySlot();
 
-    let result: Awaited<ReturnType<typeof executeReadOnly>>;
+    let result: QueryResult;
 
     try {
-      // Roteia pelo provider do storage do dataset
-      const conn = await getStorageConnection(storageServerId);
-
-      if (conn.provider === "postgres") {
-        const { executeReadOnlyPg } = await import("@/server/storage/pg-query");
-        const { PgStorageConnection } = await import("@/server/storage/pg-storage");
-        result = await executeReadOnlyPg(
-          conn as InstanceType<typeof PgStorageConnection>,
-          input.sql,
-          input.timeout,
-          input.limit,
-          schemas,
-          input.offset,
-        );
-      } else {
-        result = await executeReadOnly(
-          actor.principal,
-          input.sql,
-          input.timeout,
-          input.limit,
-          schemas,
-          input.offset,
-          120,
-          storageServerId,
-        );
-      }
+      // Roteia pelo provider do storage do dataset (contrato de SQL unico)
+      result = await runStorageQuery({
+        principal: actor.principal, sql: input.sql, timeout: input.timeout,
+        limit: input.limit, offset: input.offset, schemas, storageServerId, normalize: input.normalize,
+      });
     } finally {
       releaseQuerySlot();
     }
