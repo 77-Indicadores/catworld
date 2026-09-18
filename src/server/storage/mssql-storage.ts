@@ -285,8 +285,13 @@ export class MssqlStorageConnection implements StorageConnection {
       // todas as linhas existentes com o mesmo timestamp (calculado uma vez), coerente
       // com "todo o lote foi visto agora". Fora da transação breve de rename (não é
       // hot path de lock).
+      // Guarda condicional: staging pode já ter essas colunas numa tentativa anterior —
+      // o importer reaproveita a staging (não recria do zero) quando um job de upload é
+      // reprocessado após falha parcial (ver comentário de idempotência em importer.ts).
+      // MSSQL não tem "ADD COLUMN IF NOT EXISTS" — checa via COL_LENGTH.
       await p.request().query(
-        `ALTER TABLE ${qStg} ADD ${qSyncedAt} DATETIME2 NOT NULL CONSTRAINT DF_${staging.replace(/[^a-zA-Z0-9_]/g, "")}_sa DEFAULT SYSUTCDATETIME(), ${qDeletedAt} DATETIME2 NULL`,
+        `IF COL_LENGTH('${esc(schema)}.${esc(staging)}', '${esc(CW_SYNCED_AT)}') IS NULL
+         ALTER TABLE ${qStg} ADD ${qSyncedAt} DATETIME2 NOT NULL CONSTRAINT DF_${staging.replace(/[^a-zA-Z0-9_]/g, "")}_sa DEFAULT SYSUTCDATETIME(), ${qDeletedAt} DATETIME2 NULL`,
       );
       // ── fullSwap: DROP target + RENAME staging → target (transação breve) ──────
       const tx = new sql.Transaction(p);

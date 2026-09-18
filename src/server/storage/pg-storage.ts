@@ -273,8 +273,11 @@ export class PgStorageConnection implements StorageConnection {
       // Carimba cw_synced_at/cw_deleted_at na staging ANTES do swap — DEFAULT stampa
       // todas as linhas existentes com o mesmo timestamp (now() avaliado uma vez por
       // instrução em Postgres), coerente com "todo o lote foi visto agora".
+      // IF NOT EXISTS: staging pode já ter essas colunas numa tentativa anterior — o
+      // importer reaproveita a staging (não recria do zero) quando um job de upload é
+      // reprocessado após falha parcial (ver comentário de idempotência em importer.ts).
       await this._pool.query(
-        `ALTER TABLE ${qStg} ADD COLUMN ${qSyncedAt} TIMESTAMP NOT NULL DEFAULT now(), ADD COLUMN ${qDeletedAt} TIMESTAMP NULL`,
+        `ALTER TABLE ${qStg} ADD COLUMN IF NOT EXISTS ${qSyncedAt} TIMESTAMP NOT NULL DEFAULT now(), ADD COLUMN IF NOT EXISTS ${qDeletedAt} TIMESTAMP NULL`,
       );
       // ── fullSwap: DROP target + RENAME staging → target (transação breve) ──────
       // MVCC: readers que começaram antes do BEGIN continuam vendo a versão antiga.
