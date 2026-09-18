@@ -331,12 +331,17 @@ model Job {
   /// essa e a ultima leitura de memoria antes do processo travar/crashar.
   heartbeatRssMb Int?   @map("heartbeat_rss_mb")
   weight      Int       @default(0) @db.SmallInt
+  /// Só setado em SOURCE_REFRESH (ver queueSourceRefresh em sources.ts) — usado pelo
+  /// claim() do worker pra gatear quantos syncs rodam ao mesmo tempo por storage
+  /// (maxSyncsPerStorage). NULL em qualquer outro tipo de job (nunca gateado por isso).
+  storageServerId String? @map("storage_server_id") @db.VarChar(64)
   lastError   String?   @map("last_error") @db.Text
   createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamp(3)
   updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamp(3)
   upload      Upload?   @relation(fields: [uploadId], references: [id])
 
   @@index([status, availableAt])
+  @@index([status, storageServerId])
   @@map("cw_jobs")
 }
 

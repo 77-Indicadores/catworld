@@ -34,25 +34,34 @@ let stopping = false;
 process.on("SIGTERM", () => { stopping = true; });
 process.on("SIGINT", () => { stopping = true; });
 
-async function claim(lockedBy: string, maxHeavy: number, allowedTypes: string[] | null): Promise<Claimed | null> {
+async function claim(lockedBy: string, maxHeavy: number, maxSyncsPerStorage: number, allowedTypes: string[] | null): Promise<Claimed | null> {
   const typeFilter = allowedTypes && allowedTypes.length > 0
-    ? `AND type IN (${allowedTypes.map(t => `'${t.replace(/'/g, "''")}'`).join(",")})`
+    ? `AND j.type IN (${allowedTypes.map(t => `'${t.replace(/'/g, "''")}'`).join(",")})`
     : "";
+  // storage_server_id só é setado em jobs SOURCE_REFRESH (ver queueSourceRefresh em
+  // sources.ts) — NULL pra qualquer outro tipo de job, que por isso nunca é gateado
+  // por esse teto (a condição vira um no-op quando j.storage_server_id IS NULL).
+  // Igual ao teto de weight/max_heavy_jobs, isso é enforçado aqui no claim() — o job
+  // sempre entra na fila (QUEUED) na hora de criar, o teto só decide quando ele pode
+  // começar a rodar. Antes disso era enforçado (errado) na hora de enfileirar, o que
+  // podia "perder a vaga" indefinidamente sem nunca sequer entrar na fila.
   const rows = await prisma.$queryRawUnsafe<Claimed[]>(
     `UPDATE cw_jobs
      SET status='RUNNING',locked_at=NOW(),heartbeat_at=NOW(),locked_by=$1,attempts=attempts+1
      WHERE id=(
-       SELECT id FROM cw_jobs
-       WHERE status='QUEUED' AND available_at<=NOW()
+       SELECT j.id FROM cw_jobs j
+       WHERE j.status='QUEUED' AND j.available_at<=NOW()
          ${typeFilter}
-         AND (weight<2 OR (SELECT COUNT(*) FROM cw_jobs WHERE status='RUNNING' AND weight=2)<$2)
-       ORDER BY weight ASC,available_at ASC
+         AND (j.weight<2 OR (SELECT COUNT(*) FROM cw_jobs WHERE status='RUNNING' AND weight=2)<$2)
+         AND (j.storage_server_id IS NULL OR (SELECT COUNT(*) FROM cw_jobs r WHERE r.status='RUNNING' AND r.storage_server_id=j.storage_server_id)<$3)
+       ORDER BY j.weight ASC,j.available_at ASC
        LIMIT 1
        FOR UPDATE SKIP LOCKED
      )
      RETURNING id,type,upload_id,payload_json,attempts,max_attempts,weight`,
     lockedBy,
     maxHeavy,
+    maxSyncsPerStorage,
   );
   return rows[0] ?? null;
 }
@@ -551,8 +560,8 @@ async function loop(concurrencyId: number) {
     let job: Claimed | null;
     try {
       const { getWorkerConfig } = await import("@/server/worker/config");
-      const { maxHeavyJobs } = await getWorkerConfig();
-      job = await claim(workerLabel, maxHeavyJobs, allowedTypes);
+      const { maxHeavyJobs, maxSyncsPerStorage } = await getWorkerConfig();
+      job = await claim(workerLabel, maxHeavyJobs, maxSyncsPerStorage, allowedTypes);
     } catch (e) {
       console.warn("[worker] claim falhou (transiente): %s", e instanceof Error ? e.message : e);
       await new Promise(r => setTimeout(r, env().CATWORLD_JOB_POLL_MS));

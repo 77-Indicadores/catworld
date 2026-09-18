@@ -51,7 +51,7 @@ export async function queueSourceRefresh(datasetSourceId: string, opts?: { recon
       }),
       prisma.datasetSource.findUniqueOrThrow({
         where: { id: datasetSourceId },
-        select: { sourceKind: true, deltaColumn: true, lastDeltaValue: true, keyColumn: true },
+        select: { sourceKind: true, deltaColumn: true, lastDeltaValue: true, keyColumn: true, dataset: { select: { storageServerId: true } } },
       }),
     ]);
     // Compara campos parseados, não a string exata — um job de reconciliação em fila
@@ -70,41 +70,26 @@ export async function queueSourceRefresh(datasetSourceId: string, opts?: { recon
       return existing;
     }
     const weight = isBoundedSourceRun(source, reconciliation) ? 0 : 2;
+    // Bucket "__default__" pro storage padrão (storageServerId null no dataset) —
+    // nunca grava NULL aqui: NULL no Job.storageServerId é reservado pra "job não é
+    // do tipo SOURCE_REFRESH" (ver claim() em worker/index.ts), não "storage padrão".
+    const storageBucket = source.dataset.storageServerId ?? "__default__";
     const [job] = await prisma.$transaction([
-      prisma.job.create({ data: { type: "SOURCE_REFRESH", payloadJson: JSON.stringify({ datasetSourceId, reconciliation }), maxAttempts: 3, weight } }),
+      prisma.job.create({ data: { type: "SOURCE_REFRESH", payloadJson: JSON.stringify({ datasetSourceId, reconciliation }), maxAttempts: 3, weight, storageServerId: storageBucket } }),
       prisma.datasetSource.update({ where: { id: datasetSourceId }, data: { lastStatus: "queued", lastError: null } }),
     ]);
     return job;
   });
 }
 
+/**
+ * Enfileira toda fonte com refreshCron vencido. O teto de quantos syncs rodam ao
+ * mesmo tempo por storage (maxSyncsPerStorage) NÃO é checado aqui — o job sempre
+ * entra na fila; quem decide se/quando ele começa a rodar é o claim() do worker
+ * (mesmo padrão de weight/maxHeavyJobs). Checar isso aqui, na hora de enfileirar,
+ * fazia uma fonte "perder a vaga" repetidamente sem nunca chegar a existir como job.
+ */
 export async function enqueueDueSourceRefreshes() {
-  const { getWorkerConfig } = await import("@/server/worker/config");
-  const { maxSyncsPerStorage } = await getWorkerConfig();
-
-  // Conta SOURCE_REFRESH RUNNING por storageServerId (via dataset)
-  const runningJobs = await prisma.job.findMany({
-    where: { type: "SOURCE_REFRESH", status: "RUNNING" },
-    select: { payloadJson: true },
-  });
-
-  // Mapeia sourceId → storageServerId para os jobs em execução
-  const runningSources = runningJobs.map(j => {
-    try { return (JSON.parse(j.payloadJson ?? "") as { datasetSourceId?: string }).datasetSourceId ?? null; } catch { return null; }
-  }).filter((id): id is string => id != null);
-
-  const runningSyncsPerStorage = new Map<string, number>();
-  if (runningSources.length) {
-    const sourceDatasets = await prisma.datasetSource.findMany({
-      where: { id: { in: runningSources } },
-      select: { dataset: { select: { storageServerId: true } } },
-    });
-    for (const s of sourceDatasets) {
-      const sid = s.dataset.storageServerId ?? "__default__";
-      runningSyncsPerStorage.set(sid, (runningSyncsPerStorage.get(sid) ?? 0) + 1);
-    }
-  }
-
   const due = await prisma.datasetSource.findMany({
     where: {
       active: true,
@@ -112,46 +97,16 @@ export async function enqueueDueSourceRefreshes() {
       refreshCron: { not: null },
       nextRefreshAt: { lte: new Date() },
     },
-    select: { id: true, dataset: { select: { storageServerId: true } } },
+    select: { id: true },
     orderBy: { nextRefreshAt: "asc" },
     take: 50,
   });
-
-  for (const source of due) {
-    const sid = source.dataset.storageServerId ?? "__default__";
-    const running = runningSyncsPerStorage.get(sid) ?? 0;
-    if (running >= maxSyncsPerStorage) continue;
-    runningSyncsPerStorage.set(sid, running + 1);
-    await queueSourceRefresh(source.id);
-  }
+  for (const source of due) await queueSourceRefresh(source.id);
 }
 
 /** Espelha enqueueDueSourceRefreshes, mas para o cron secundário de reconciliação
  * (full snapshot periódico — ver refreshDatasetSource com opts.reconciliation). */
 export async function enqueueDueReconciliations() {
-  const { getWorkerConfig } = await import("@/server/worker/config");
-  const { maxSyncsPerStorage } = await getWorkerConfig();
-
-  const runningJobs = await prisma.job.findMany({
-    where: { type: "SOURCE_REFRESH", status: "RUNNING" },
-    select: { payloadJson: true },
-  });
-  const runningSources = runningJobs.map(j => {
-    try { return (JSON.parse(j.payloadJson ?? "") as { datasetSourceId?: string }).datasetSourceId ?? null; } catch { return null; }
-  }).filter((id): id is string => id != null);
-
-  const runningSyncsPerStorage = new Map<string, number>();
-  if (runningSources.length) {
-    const sourceDatasets = await prisma.datasetSource.findMany({
-      where: { id: { in: runningSources } },
-      select: { dataset: { select: { storageServerId: true } } },
-    });
-    for (const s of sourceDatasets) {
-      const sid = s.dataset.storageServerId ?? "__default__";
-      runningSyncsPerStorage.set(sid, (runningSyncsPerStorage.get(sid) ?? 0) + 1);
-    }
-  }
-
   const due = await prisma.datasetSource.findMany({
     where: {
       active: true,
@@ -159,18 +114,11 @@ export async function enqueueDueReconciliations() {
       reconciliationCron: { not: null },
       nextReconciliationAt: { lte: new Date() },
     },
-    select: { id: true, dataset: { select: { storageServerId: true } } },
+    select: { id: true },
     orderBy: { nextReconciliationAt: "asc" },
     take: 50,
   });
-
-  for (const source of due) {
-    const sid = source.dataset.storageServerId ?? "__default__";
-    const running = runningSyncsPerStorage.get(sid) ?? 0;
-    if (running >= maxSyncsPerStorage) continue;
-    runningSyncsPerStorage.set(sid, running + 1);
-    await queueSourceRefresh(source.id, { reconciliation: true });
-  }
+  for (const source of due) await queueSourceRefresh(source.id, { reconciliation: true });
 }
 
 export async function createDatasetSource(input: {
