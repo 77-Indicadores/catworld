@@ -60,13 +60,16 @@ export async function contractTranslate(
   if (mode === "shadow") {
     try {
       const next = translateTsql(input, "postgres");
-      if (next.sql !== old.sql || next.topLimit !== old.topLimit) log("shadow-diff", path, input);
+      if (canon(next.sql) !== canon(old.sql) || next.topLimit !== old.topLimit) log("shadow-diff", path, input);
     } catch (e) {
       log("shadow-reject", path, input, e instanceof Error ? e.message : String(e));
     }
   }
   return old;
 }
+
+/** Forma canonica so para comparar: o gerador acrescenta ASC e reformata espacos/caixa sem mudar o sentido. */
+const canon = (sql: string) => sql.replace(/\s+ASC\b/gi, "").replace(/\s+/g, "").toLowerCase();
 
 /** Log sem dados: literais viram '?', SQL truncado, hash para agrupar iguais. */
 function log(kind: string, path: string, sql: string, message?: string) {

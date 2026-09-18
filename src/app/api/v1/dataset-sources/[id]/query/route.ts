@@ -25,9 +25,11 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       ? qualifySourceReference(translated.sql, source, isMssql)
       : source.sourceKind === "table" ? `SELECT * FROM ${tableRef}` : source.sourceSql!;
     const limit = translated?.topLimit != null ? Math.min(translated.topLimit, 10000) : input.limit;
-    return ok(isMssql
+    const result = isMssql
       ? await executeMssqlReadOnly(source.connection, query, input.timeout, limit, input.offset, input.normalize)
-      : await executePostgresReadOnly(source.connection, query, input.timeout, limit, input.offset, input.normalize));
+      : await executePostgresReadOnly(source.connection, query, input.timeout, limit, input.offset, input.normalize);
+    // TOP n pedido pelo usuario nao e truncamento (o corte e intencional)
+    return ok(translated?.topLimit != null ? { ...result, truncated: false } : result);
   } catch (e) {
     if (!(e instanceof ApiError) && e instanceof Error && "code" in e) {
       Sentry.captureException(e);
