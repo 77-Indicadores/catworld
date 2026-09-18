@@ -48,7 +48,8 @@ export function translateTsql(input: string, target: SqlTarget): ContractTransla
 // ---------------------------------------------------------------------------
 
 function toPostgres(input: string): ContractTranslation {
-  const { text, quoted } = protectBracketIdentifiers(stripNolock(input));
+  const { text: protectedText, quoted } = protectBracketIdentifiers(stripNolock(input));
+  const text = rewriteTryCast(protectedText);
   rejectKnownUnsupported(text);
 
   let ast: Node;
@@ -90,7 +91,7 @@ function rejectKnownUnsupported(sql: string): void {
   if (mapOutsideLiterals(sql, (s) => (s.includes("::") ? "::" : "")).includes("::")) {
     throw new SqlContractError("O cast '::' e sintaxe Postgres; use CAST(x AS tipo) ou CONVERT(tipo, x).", { construct: "::" });
   }
-  const bad = mapOutsideLiterals(sql, (s) => s).match(/\b(TRY_CAST|TRY_CONVERT|TRY_PARSE|PIVOT|UNPIVOT|OPENQUERY|OPENROWSET|FOR\s+XML|FOR\s+JSON|CROSS\s+APPLY|OUTER\s+APPLY)\b/i);
+  const bad = mapOutsideLiterals(sql, (s) => s).match(/\b(TRY_PARSE|PIVOT|UNPIVOT|OPENQUERY|OPENROWSET|FOR\s+XML|FOR\s+JSON)\b/i);
   if (bad) {
     throw new SqlContractError(
       `${bad[1]!.toUpperCase()} nao faz parte do subconjunto T-SQL garantido pelo Catworld para este backend.`,
@@ -181,6 +182,12 @@ function transform(n: Node): Node {
     n.operator = "||";
   }
 
+  if (typeof n.join === "string" && /APPLY$/i.test(n.join)) {
+    if (/^OUTER/i.test(n.join)) { n.join = "LEFT JOIN LATERAL"; n.on = raw("TRUE"); }
+    else n.join = "CROSS JOIN LATERAL";
+    return n;
+  }
+
   if (n.type === "cast" && Array.isArray(n.target)) {
     for (const t of n.target) {
       const params = t.length != null && t.length !== "max" ? [String(t.length), ...(t.scale != null ? [String(t.scale)] : [])] : [];
@@ -207,12 +214,15 @@ const DATE_UNIT: Record<string, string> = {
   month: "month", mm: "month", m: "month", day: "day", dd: "day", d: "day",
   hour: "hour", hh: "hour", minute: "minute", mi: "minute", n: "minute",
   second: "second", ss: "second", s: "second",
+  week: "week", wk: "week", ww: "week",
+  weekday: "weekday", dw: "weekday", w: "weekday",
+  dayofyear: "dayofyear", dy: "dayofyear", y: "dayofyear",
 };
 
 function unitOf(a: Node, fn: string): string {
   const key = String(a?.column ?? a?.value ?? "").toLowerCase();
   const u = DATE_UNIT[key];
-  if (!u) throw new SqlContractError(`${fn}: unidade '${key}' fora do subconjunto garantido (year, quarter, month, day, hour, minute, second).`);
+  if (!u) throw new SqlContractError(`${fn}: unidade '${key}' fora do subconjunto garantido (year, quarter, month, week, weekday, dayofyear, day, hour, minute, second).`);
   return u;
 }
 
@@ -230,36 +240,154 @@ function transformFunction(n: Node): Node {
       return raw(`EXTRACT(${f} FROM ${ts(a[0])})::INT`);
     case "DATEPART": {
       const u = unitOf(a[0], "DATEPART");
-      return raw(`EXTRACT(${u} FROM ${ts(a[1])})::INT`);
+      const x = ts(a[1]);
+      // Semana e dia da semana no padrao do SQL Server (DATEFIRST 7: domingo = 1)
+      if (u === "weekday") return raw(`(EXTRACT(DOW FROM ${x}) + 1)::INT`);
+      if (u === "dayofyear") return raw(`EXTRACT(DOY FROM ${x})::INT`);
+      if (u === "week") return raw(`(FLOOR((EXTRACT(DOY FROM ${x}) - 1 + EXTRACT(DOW FROM date_trunc('year', CAST(${x} AS TIMESTAMP)))) / 7) + 1)::INT`);
+      return raw(`EXTRACT(${u} FROM ${x})::INT`);
     }
     case "DATEADD": {
       const u = unitOf(a[0], "DATEADD");
-      return raw(`(${ts(a[2])} + (${emit(a[1])}) * INTERVAL '1 ${u}')`);
+      const iu = u === "weekday" || u === "dayofyear" ? "day" : u;
+      return raw(`(${ts(a[2])} + (${emit(a[1])}) * INTERVAL '1 ${iu}')`);
     }
     case "DATEDIFF": {
-      const u = unitOf(a[0], "DATEDIFF");
+      let u = unitOf(a[0], "DATEDIFF");
+      if (u === "weekday" || u === "dayofyear") u = "day"; // no DATEDIFF equivalem a dia
       const s = ts(a[1]);
       const e = ts(a[2]);
       // T-SQL conta FRONTEIRAS cruzadas (nao intervalos completos)
       if (u === "day") return raw(`(CAST(${e} AS DATE) - CAST(${s} AS DATE))`);
+      // Semanas comecam no domingo; 1900-01-07 foi um domingo
+      if (u === "week") return raw(`(((CAST(${e} AS DATE) - DATE '1900-01-07') / 7) - ((CAST(${s} AS DATE) - DATE '1900-01-07') / 7))::BIGINT`);
       if (u === "year") return raw(`(EXTRACT(YEAR FROM ${e}) - EXTRACT(YEAR FROM ${s}))::BIGINT`);
       if (u === "quarter") return raw(`((EXTRACT(YEAR FROM ${e}) - EXTRACT(YEAR FROM ${s})) * 4 + EXTRACT(QUARTER FROM ${e}) - EXTRACT(QUARTER FROM ${s}))::BIGINT`);
       if (u === "month") return raw(`((EXTRACT(YEAR FROM ${e}) - EXTRACT(YEAR FROM ${s})) * 12 + EXTRACT(MONTH FROM ${e}) - EXTRACT(MONTH FROM ${s}))::BIGINT`);
       const div = u === "hour" ? 3600 : u === "minute" ? 60 : 1;
       return raw(`((EXTRACT(EPOCH FROM date_trunc('${u}', CAST(${e} AS TIMESTAMP))) - EXTRACT(EPOCH FROM date_trunc('${u}', CAST(${s} AS TIMESTAMP)))) / ${div})::BIGINT`);
     }
-    case "CHARINDEX":
-      if (a.length !== 2) throw new SqlContractError("CHARINDEX com posicao inicial (3 argumentos) nao faz parte do subconjunto garantido.");
-      return raw(`POSITION(${emit(a[0])} IN ${emit(a[1])})`);
+    case "CHARINDEX": {
+      if (a.length !== 2 && a.length !== 3) throw new SqlContractError("CHARINDEX exige 2 ou 3 argumentos.");
+      if (a.length === 2) return raw(`POSITION(${emit(a[0])} IN ${emit(a[1])})`);
+      const needle = emit(a[0]);
+      const hay = emit(a[1]);
+      const start = emit(a[2]);
+      return raw(`(CASE WHEN POSITION(${needle} IN SUBSTRING(${hay} FROM ${start})) = 0 THEN 0 ELSE POSITION(${needle} IN SUBSTRING(${hay} FROM ${start})) + ${start} - 1 END)`);
+    }
+    case "CW_TRYCAST": return tryCast(a);
     case "CONVERT": return transformConvert(a);
     case "STR": return raw(`(${emit(a[0])})::TEXT`);
     default: return n;
   }
 }
 
+/**
+ * TRY_CAST/TRY_CONVERT: o parser nao os aceita; reescrevemos para CW_TRYCAST(expr, 'tipo') antes do parse.
+ * So tipos numericos sao emulaveis com seguranca (CASE + regex); os demais dao erro explicito.
+ */
+function rewriteTryCast(sql: string): string {
+  let out = sql;
+  for (let guard = 0; guard < 50; guard++) {
+    const m = /\bTRY_(CAST|CONVERT)\s*\(/i.exec(out);
+    if (!m) return out;
+    const open = m.index + m[0].length;
+    const close = matchingParen(out, open - 1);
+    if (close < 0) throw new SqlContractError("TRY_CAST/TRY_CONVERT com parenteses desbalanceados.");
+    const inner = out.slice(open, close);
+    let expr: string;
+    let type: string;
+    if (m[1]!.toUpperCase() === "CAST") {
+      const at = lastTopLevelAs(inner);
+      if (at < 0) throw new SqlContractError("TRY_CAST exige (expressao AS tipo).");
+      expr = inner.slice(0, at).trim();
+      type = inner.slice(at + 2).trim();
+    } else {
+      const parts = splitTopLevel(inner);
+      if (parts.length !== 2) throw new SqlContractError("TRY_CONVERT com estilo fora do subconjunto garantido.");
+      type = parts[0]!.trim();
+      expr = parts[1]!.trim();
+    }
+    out = `${out.slice(0, m.index)}CW_TRYCAST(${expr}, '${type.replace(/'/g, "''")}')${out.slice(close + 1)}`;
+  }
+  throw new SqlContractError("TRY_CAST/TRY_CONVERT aninhados demais.");
+}
+
+function skipString(s: string, i: number): number {
+  // i aponta para a aspa de abertura; devolve o indice da aspa de fechamento
+  i++;
+  while (i < s.length) {
+    if (s[i] === "'" && s[i + 1] === "'") { i += 2; continue; }
+    if (s[i] === "'") return i;
+    i++;
+  }
+  return i;
+}
+
+function matchingParen(sql: string, openIdx: number): number {
+  let depth = 0;
+  for (let i = openIdx; i < sql.length; i++) {
+    const c = sql[i];
+    if (c === "'") { i = skipString(sql, i); continue; }
+    if (c === "(") depth++;
+    else if (c === ")" && --depth === 0) return i;
+  }
+  return -1;
+}
+
+function lastTopLevelAs(s: string): number {
+  let depth = 0;
+  let last = -1;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === "'") { i = skipString(s, i); continue; }
+    if (c === "(") depth++;
+    else if (c === ")") depth--;
+    else if (depth === 0 && /^\sAS\s/i.test(s.slice(i, i + 4))) last = i + 1;
+  }
+  return last;
+}
+
+function splitTopLevel(s: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let cur = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === "'") { i = skipString(s, i); continue; }
+    if (c === "(") depth++;
+    else if (c === ")") depth--;
+    else if (c === "," && depth === 0) { parts.push(s.slice(cur, i)); cur = i + 1; }
+  }
+  parts.push(s.slice(cur));
+  return parts;
+}
+
+const INT_RE = String.raw`^\s*[-+]?[0-9]+\s*$`;
+const NUM_RE = String.raw`^\s*[-+]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?\s*$`;
+
+function tryCast(a: Node[]): Node {
+  const typeText = String(a[1]?.value ?? "");
+  const m = /^\s*([A-Za-z_]+)\s*(?:\(([^)]*)\))?\s*$/.exec(typeText);
+  if (!m) throw new SqlContractError(`TRY_CAST: tipo '${typeText}' invalido.`);
+  const name = m[1]!.toUpperCase();
+  const isInt = ["INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT"].includes(name);
+  const isNum = ["DECIMAL", "NUMERIC", "FLOAT", "REAL", "MONEY", "SMALLMONEY"].includes(name);
+  if (!isInt && !isNum) {
+    throw new SqlContractError(`TRY_CAST/TRY_CONVERT para ${name} fora do subconjunto garantido (so tipos numericos).`);
+  }
+  const pgType = mssqlTypeToPg(name, m[2] ? m[2].split(",").map((x) => x.trim()) : []);
+  const x = emit(a[0]);
+  // O CAST fica POR FORA do CASE: com literal, o Postgres dobra CAST('abc' AS INT) no planejamento e erra.
+  return raw(`CAST((CASE WHEN CAST(${x} AS TEXT) ~ '${isInt ? INT_RE : NUM_RE}' THEN CAST(${x} AS TEXT) END) AS ${pgType})`);
+}
+
 const CONVERT_STYLE: Record<number, string> = {
   23: "YYYY-MM-DD", 120: "YYYY-MM-DD HH24:MI:SS", 121: "YYYY-MM-DD HH24:MI:SS.MS",
   112: "YYYYMMDD", 103: "DD/MM/YYYY", 101: "MM/DD/YYYY", 108: "HH24:MI:SS",
+  102: "YYYY.MM.DD", 104: "DD.MM.YYYY", 105: "DD-MM-YYYY", 110: "MM-DD-YYYY", 111: "YYYY/MM/DD",
+  8: "HH24:MI:SS", 24: "HH24:MI:SS", 20: "YYYY-MM-DD HH24:MI:SS", 21: "YYYY-MM-DD HH24:MI:SS.MS",
+  126: 'YYYY-MM-DD"T"HH24:MI:SS.MS', 127: 'YYYY-MM-DD"T"HH24:MI:SS.MS',
 };
 
 function transformConvert(a: Node[]): Node {
@@ -272,7 +400,7 @@ function transformConvert(a: Node[]): Node {
     const style = Number(a[2].value);
     const fmt = CONVERT_STYLE[style];
     if (!fmt || pgType !== "TEXT") {
-      throw new SqlContractError(`CONVERT com estilo ${a[2].value} fora do subconjunto garantido (estilos 23, 101, 103, 108, 112, 120, 121 para texto).`);
+      throw new SqlContractError(`CONVERT com estilo ${a[2].value} fora do subconjunto garantido (estilos 8, 20, 21, 23, 24, 101, 102, 103, 104, 105, 108, 110, 111, 112, 120, 121, 126, 127 para texto).`);
     }
     return raw(`to_char(${emit(a[1])}, '${fmt}')`);
   }

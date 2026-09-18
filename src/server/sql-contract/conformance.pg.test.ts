@@ -88,4 +88,44 @@ d("conformidade T-SQL -> Postgres (executando)", () => {
     const r = await run("SELECT a.nome, SUM(a.[Valor Total]) AS s FROM cwt.vendas a JOIN cwt.vendas b ON a.[Id]=b.[Id] GROUP BY a.nome HAVING SUM(a.[Valor Total]) > 6 ORDER BY a.nome");
     expect(col(r, "nome")).toEqual(["ana", "bia"]);
   });
+
+  it("TRY_CAST numerico devolve NULL em vez de erro", async () => {
+    const r = await run("SELECT TRY_CAST('12' AS INT) AS a, TRY_CAST('abc' AS INT) AS b, TRY_CAST('12.5' AS DECIMAL(10,2)) AS c, TRY_CONVERT(INT, 'x9') AS d FROM cwt.vendas WHERE [Id]=1");
+    expect(r[0]!.a).toBe(12);
+    expect(r[0]!.b).toBeNull();
+    expect(Number(r[0]!.c)).toBe(12.5);
+    expect(r[0]!.d).toBeNull();
+  });
+
+  it("CHARINDEX com posicao inicial", async () => {
+    const r = await run("SELECT CHARINDEX('n', 'banana', 3) AS a, CHARINDEX('a', 'banana', 3) AS b, CHARINDEX('z', 'banana', 3) AS c FROM cwt.vendas WHERE [Id]=1");
+    expect(Number(r[0]!.a)).toBe(3);
+    expect(Number(r[0]!.b)).toBe(4);
+    expect(Number(r[0]!.c)).toBe(0);
+  });
+
+  it("semana e dia da semana no padrao SQL Server (domingo = 1)", async () => {
+    // 2026-02-01 e domingo; 2026-01-31 e sabado
+    const r = await run("SELECT DATEDIFF(week, '2026-01-31', '2026-02-01') AS w1, DATEDIFF(week, '2026-02-01', '2026-02-07') AS w0, DATEPART(weekday, '2026-02-01') AS wd, DATEPART(dayofyear, '2026-02-01') AS doy, DATEPART(week, '2026-01-01') AS wk FROM cwt.vendas WHERE [Id]=1");
+    expect(Number(r[0]!.w1)).toBe(1);
+    expect(Number(r[0]!.w0)).toBe(0);
+    expect(r[0]!.wd).toBe(1);
+    expect(r[0]!.doy).toBe(32);
+    expect(r[0]!.wk).toBe(1);
+  });
+
+  it("CROSS APPLY e OUTER APPLY", async () => {
+    const c = await run("SELECT a.nome, x.v FROM cwt.vendas a CROSS APPLY (SELECT TOP 1 b.[Valor Total] AS v FROM cwt.vendas b WHERE b.[Id]=a.[Id]) x ORDER BY a.[Id]");
+    expect(c.length).toBe(3);
+    const o = await run("SELECT a.nome, x.v FROM cwt.vendas a OUTER APPLY (SELECT TOP 1 b.nome AS v FROM cwt.vendas b WHERE b.[Id]=a.[Id]+10) x ORDER BY a.[Id]");
+    expect(o.length).toBe(3);
+    expect(col(o, "v")).toEqual([null, null, null]);
+  });
+
+  it("estilos de CONVERT adicionais", async () => {
+    const r = await run("SELECT CONVERT(VARCHAR(10), dia, 104) AS a, CONVERT(VARCHAR(10), dia, 111) AS b, CONVERT(VARCHAR(19), dt, 20) AS c FROM cwt.vendas WHERE [Id]=3");
+    expect(r[0]!.a).toBe("15.03.2026");
+    expect(r[0]!.b).toBe("2026/03/15");
+    expect(r[0]!.c).toBe("2026-03-15 10:30:45");
+  });
 });

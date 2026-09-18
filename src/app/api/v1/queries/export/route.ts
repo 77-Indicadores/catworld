@@ -13,6 +13,8 @@ export async function POST(r: NextRequest) {
     const input = z.object({
       sql: z.string().min(1).max(50000),
       format: z.enum(["csv", "xlsx"]),
+      // "iso" (opt-in): datas em ISO-8601 no CSV. Padrao inalterado.
+      dateFormat: z.enum(["iso"]).optional(),
       datasetId: z.string().uuid().optional(),
       projectId: z.string().uuid().optional(),
     }).parse(await r.json());
@@ -36,10 +38,10 @@ export async function POST(r: NextRequest) {
 
     await syncActorGrants(actor, syncScope);
 
-    const result = await runStorageQuery({ principal: actor.principal, sql: input.sql, timeout: 120, limit: 10000, schemas, storageServerId });
+    const result = await runStorageQuery({ principal: actor.principal, sql: input.sql, timeout: 120, limit: 10000, schemas, storageServerId, normalize: input.dateFormat === "iso" });
 
     if (input.format === "csv") {
-      const lines = [result.columns.map(csv).join(","), ...result.rows.map(row => result.columns.map(c => csv(row[c])).join(","))];
+      const lines = [result.columns.map((c) => csv(c)).join(","), ...result.rows.map(row => result.columns.map(c => csv(row[c], input.dateFormat === "iso")).join(","))];
       return new Response(`\uFEFF${lines.join("\r\n")}`, { headers: { "content-type": "text/csv; charset=utf-8", "content-disposition": "attachment; filename=query.csv" } });
     }
 
@@ -55,4 +57,4 @@ export async function POST(r: NextRequest) {
   }
 }
 
-const csv = (value: unknown) => `"${String(value ?? "").replaceAll('"', '""')}"`;
+const csv = (value: unknown, iso = false) => `"${String(iso && value instanceof Date ? value.toISOString() : value ?? "").replaceAll('"', '""')}"`;

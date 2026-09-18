@@ -5,7 +5,9 @@
 > `shadow-diff` / `shadow-reject`, sem literais) o que o motor novo rejeitaria ou traduziria diferente;
 > `strict` = motor novo, com `UNSUPPORTED_CONSTRUCT`. Enquanto estiver em `shadow`, nada muda para quem ja usa.
 > Ligue `strict` so depois de revisar os logs. O formato de resultado normalizado e opt-in por requisicao
-> (`"normalize": true` em `/queries` e `/dataset-sources/:id/query`); o SDK ainda nao expoe o parametro.
+> (`"normalize": true` em `/queries` e `/dataset-sources/:id/query`, tambem no stream; o SDK expoe `normalize=True`).
+> O CSV de export aceita `dateFormat=iso` (query string em `/tables/:id/export`, campo `dateFormat` em `/queries/export`).
+> O modo pode ser trocado em Configuracoes > Contrato de SQL.
 
 **Voce escreve T-SQL. Sempre.** Em qualquer caminho — consulta no storage, live, derivada, SDK —
 a linguagem e a mesma. O Catworld a traduz para o backend de destino.
@@ -37,18 +39,21 @@ Somente leitura: uma instrucao, iniciando em `SELECT` ou `WITH`.
 | `DATEADD(u,n,d)` | `d + n * INTERVAL '1 u'` |
 | `DATEDIFF(u,a,b)` | conta **fronteiras** cruzadas (igual ao T-SQL) |
 | `DATEPART(u,d)`, `YEAR/MONTH/DAY(d)` | `EXTRACT(...)` |
-| `CHARINDEX(a,b)` | `POSITION(a IN b)` |
+| `CHARINDEX(a,b[,inicio])` | `POSITION(a IN b)` (com `inicio`, equivalente por `SUBSTRING`) |
+| `TRY_CAST/TRY_CONVERT(tipo)` numerico | `NULL` quando o texto nao e numero (tipos INT/BIGINT/DECIMAL/FLOAT...) |
+| `CROSS APPLY` / `OUTER APPLY` | `CROSS JOIN LATERAL` / `LEFT JOIN LATERAL ... ON TRUE` |
 | `CAST/CONVERT(tipo,...)` | tipos T-SQL mapeados (`NVARCHAR`->`TEXT`, `BIT`->`BOOLEAN`, `DATETIME2`->`TIMESTAMP`, ...) |
-| `CONVERT(VARCHAR, d, estilo)` | `to_char` para os estilos 23, 101, 103, 108, 112, 120, 121 |
+| `CONVERT(VARCHAR, d, estilo)` | `to_char` para os estilos 8, 20, 21, 23, 24, 101, 102, 103, 104, 105, 108, 110, 111, 112, 120, 121, 126, 127 |
 | `'a' + 'b'` | `'a' \|\| 'b'` (so quando um lado e literal/texto conhecido; prefira `CONCAT`) |
 
-Unidades de data suportadas: `year, quarter, month, day, hour, minute, second` (e abreviacoes).
+Unidades de data suportadas: `year, quarter, month, week, weekday, dayofyear, day, hour, minute, second` (e abreviacoes).
+Semana e dia da semana seguem o padrao do SQL Server (domingo = 1; `DATEDIFF(week)` conta domingos cruzados).
 
 ## Fora do contrato (erro `UNSUPPORTED_CONSTRUCT`)
 
-`TRY_CAST`, `TRY_CONVERT`, `PIVOT/UNPIVOT`, `CROSS/OUTER APPLY`, `FOR XML/JSON`, `OPENQUERY/OPENROWSET`,
-`TOP n PERCENT`, `DATEDIFF/DATEPART` com `week`/`weekday`, `CHARINDEX` com posicao inicial,
-`CONVERT` com estilo fora da lista. O erro vem do Catworld, com a construcao citada — nunca um erro cru do banco.
+`PIVOT/UNPIVOT`, `FOR XML/JSON`, `OPENQUERY/OPENROWSET`, `TRY_PARSE`, `TRY_CAST/TRY_CONVERT` para tipos nao numericos
+(datas, bit), `TOP n PERCENT`, `DATEDIFF` em `millisecond`, `CONVERT` com estilo fora da lista, e o cast `::` (sintaxe Postgres;
+use `CAST`/`CONVERT`). O erro vem do Catworld, com a construcao citada — nunca um erro cru do banco.
 
 ## Diferencas conhecidas por backend
 
@@ -56,6 +61,8 @@ Unidades de data suportadas: `year, quarter, month, day, hour, minute, second` (
   dobrado para minusculas (o storage PG cria colunas com caixa exata). Prefira colchetes quando a coluna tem maiuscula.
 - **Collation:** comparacao de texto e case-insensitive no SQL Server e case-sensitive no Postgres.
 - **Aliases:** `AS Nome` sem colchetes sai em minusculas no Postgres.
+- **TRY_CAST:** estouro de faixa (ex: numero maior que INT) gera erro no Postgres; no SQL Server devolve `NULL`.
+- **DATEDIFF(week):** para datas anteriores a 1900-01-07 o resultado nao e garantido.
 
 ## Formato do resultado
 

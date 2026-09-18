@@ -9,6 +9,7 @@ import {
   Trash2,
   UsersRound,
   Gauge,
+  Code2,
 } from "lucide-react";
 import { PageHeader } from "@/components/ui/primitives";
 
@@ -79,6 +80,12 @@ const groups: SettingGroup[] = [
         icon: Gauge,
         label: "Performance do Worker",
         description: "Controle paralelismo e intensidade dos imports e syncs de fonte.",
+      },
+      {
+        href: "/settings/sql-contract",
+        icon: Code2,
+        label: "Contrato de SQL",
+        description: "Modo de validação e tradução do SQL (T-SQL único por backend).",
       },
       {
         href: "/audit",

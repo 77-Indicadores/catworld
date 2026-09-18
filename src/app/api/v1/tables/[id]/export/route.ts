@@ -16,10 +16,10 @@ const SEP = ";";
 
 // ── CSV helpers ───────────────────────────────────────────────────────────────
 
-function csvLine(values: unknown[]): string {
+function csvLine(values: unknown[], isoDates = false): string {
   return values
     .map((v) => {
-      const cell = fmtCell(v);
+      const cell = fmtCell(v, isoDates);
       if (cell === null) return "";
       const s = String(cell);
       return s.includes(SEP) || s.includes('"') || s.includes("\n")
@@ -35,6 +35,7 @@ async function streamStorageCsv(
   schema: string,
   table: string,
   columns: string[],
+  isoDates = false,
 ): Promise<ReadableStream<Uint8Array>> {
   const enc = new TextEncoder();
 
@@ -56,7 +57,7 @@ async function streamStorageCsv(
             );
             if (result.rows.length === 0) break;
             const chunk = (result.rows as Record<string, unknown>[])
-              .map((row) => csvLine(columns.map((c) => row[c])))
+              .map((row) => csvLine(columns.map((c) => row[c]), isoDates))
               .join("\r\n") + "\r\n";
             ctrl.enqueue(enc.encode(chunk));
             if (result.rows.length < PAGE) break;
@@ -88,7 +89,7 @@ async function streamStorageCsv(
 
       function flush() {
         if (batch.length === 0) return;
-        ctrl.enqueue(enc.encode(batch.map((vals) => csvLine(vals)).join("\r\n") + "\r\n"));
+        ctrl.enqueue(enc.encode(batch.map((vals) => csvLine(vals, isoDates)).join("\r\n") + "\r\n"));
         batch = [];
       }
 
@@ -125,6 +126,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const actor = await resolveActor(request);
     const { id } = await params;
     const what = request.nextUrl.searchParams.get("what") ?? "data"; // data | columns
+    // dateFormat=iso (opt-in): datas em ISO-8601 no CSV. Padrao inalterado.
+    const isoDates = request.nextUrl.searchParams.get("dateFormat") === "iso";
 
     const table = await prisma.datasetTable.findUniqueOrThrow({
       where: { id },
@@ -165,10 +168,10 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         source.sourceKind === "table"
           ? `SELECT * FROM ${liveQuotedTable(source.connection, source.sourceSchema!, source.sourceTable!)}`
           : source.sourceSql!;
-      const result = await executeLiveReadOnly(source.connection as LiveConnection, querySql, 120, 500_000);
+      const result = await executeLiveReadOnly(source.connection as LiveConnection, querySql, 120, 500_000, 0, isoDates);
       const rows = result.rows as Record<string, unknown>[];
       const body = enc.encode(
-        BOM + [csvLine(result.columns), ...rows.map((r) => csvLine(result.columns.map((c) => r[c])))].join("\r\n"),
+        BOM + [csvLine(result.columns), ...rows.map((r) => csvLine(result.columns.map((c) => r[c]), isoDates))].join("\r\n"),
       );
       return new Response(body, { headers: csvHeaders });
     }
@@ -191,6 +194,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       table.dataset.schemaName,
       table.sqlName,
       csvColumns,
+      isoDates,
     );
 
     return new Response(csvStream, { headers: csvHeaders });

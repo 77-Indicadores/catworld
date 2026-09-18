@@ -59,14 +59,25 @@ describe("translateTsql -> postgres", () => {
 
   it("construcoes fora do subconjunto viram UNSUPPORTED_CONSTRUCT", () => {
     for (const q of [
-      "SELECT TRY_CAST(a AS INT) FROM t",
-      "SELECT a FROM t CROSS APPLY f(a) x",
-      "SELECT DATEDIFF(week, a, b) FROM t",
+      "SELECT TRY_CAST(a AS DATE) FROM t",
+      "SELECT TRY_CONVERT(BIT, a) FROM t",
+      "SELECT * FROM t PIVOT (SUM(v) FOR c IN ([a],[b])) p",
+      "SELECT DATEDIFF(millisecond, a, b) FROM t",
       "SELECT CONVERT(VARCHAR, d, 7) FROM t",
-      "SELECT CHARINDEX('a', b, 3) FROM t",
       "SELECT TOP 5 PERCENT a FROM t",
+      "SELECT a::text FROM t",
     ]) {
       expect(() => pg(q), q).toThrow(SqlContractError);
     }
+  });
+
+  it("subconjunto ampliado: TRY_CAST numerico, CHARINDEX com inicio, semana, APPLY", () => {
+    expect(pg("SELECT TRY_CAST(a AS INT) FROM t").sql).toMatch(/CAST\(\(CASE WHEN CAST\(a AS TEXT\) ~/);
+    expect(pg("SELECT TRY_CONVERT(DECIMAL(10,2), a) FROM t").sql).toContain("DECIMAL(10,2)");
+    expect(pg("SELECT CHARINDEX('a', b, 3) FROM t").sql).toContain("SUBSTRING(b FROM 3)");
+    expect(pg("SELECT DATEDIFF(week, a, b) FROM t").sql).toContain("1900-01-07");
+    expect(pg("SELECT DATEPART(weekday, d) FROM t").sql).toContain("EXTRACT(DOW FROM d)");
+    expect(pg("SELECT a FROM t CROSS APPLY (SELECT TOP 1 b FROM u WHERE u.id = t.id) x").sql).toMatch(/CROSS JOIN LATERAL .*LIMIT 1/);
+    expect(pg("SELECT a FROM t OUTER APPLY (SELECT TOP 1 b FROM u WHERE u.id = t.id) x").sql).toMatch(/LEFT JOIN LATERAL .* ON TRUE/);
   });
 });
