@@ -289,9 +289,13 @@ export class MssqlStorageConnection implements StorageConnection {
       // o importer reaproveita a staging (não recria do zero) quando um job de upload é
       // reprocessado após falha parcial (ver comentário de idempotência em importer.ts).
       // MSSQL não tem "ADD COLUMN IF NOT EXISTS" — checa via COL_LENGTH.
+      // NÃO nomear a constraint DEFAULT: o nome da staging é fixo por fonte e a
+      // constraint sobrevive ao rename staging→target, então um nome fixo colidia na
+      // carga seguinte ("Could not create constraint or index"). Sem nome, o SQL
+      // Server gera um único.
       await p.request().query(
         `IF COL_LENGTH('${esc(schema)}.${esc(staging)}', '${esc(CW_SYNCED_AT)}') IS NULL
-         ALTER TABLE ${qStg} ADD ${qSyncedAt} DATETIME2 NOT NULL CONSTRAINT DF_${staging.replace(/[^a-zA-Z0-9_]/g, "")}_sa DEFAULT SYSUTCDATETIME(), ${qDeletedAt} DATETIME2 NULL`,
+         ALTER TABLE ${qStg} ADD ${qSyncedAt} DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(), ${qDeletedAt} DATETIME2 NULL`,
       );
       // ── fullSwap: DROP target + RENAME staging → target (transação breve) ──────
       const tx = new sql.Transaction(p);
