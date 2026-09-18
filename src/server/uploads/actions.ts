@@ -21,6 +21,13 @@ export const confirmUploadSchema = z.object({
   deltaToDelete: z.array(z.string().regex(/^[0-9a-f]{32}$/, "Hash inválido")).optional(),
 });
 
+// Princípio único de peso de job em todo o Catworld (mesmo conceito aplicado a
+// SOURCE_REFRESH/DERIVED_REFRESH — ver isBoundedSourceRun em
+// src/server/connections/sources.ts): bounded = volume de dados conhecido/limitado
+// por construção, nunca gateado por max_heavy_jobs; unbounded = pode ser qualquer
+// tamanho, gateado (weight 2). Pra upload, o tamanho do arquivo já é conhecido
+// antes de rodar, então os limiares abaixo são a aplicação direta desse princípio
+// — calibrados por incidentes reais de produção (não são números arbitrários).
 const SMALL_CSV_THRESHOLD = 1_048_576;       // 1 MB — TDS path, no Azure SQL INSERT SELECT
 const LARGE_FILE_THRESHOLD = 15 * 1_048_576; // 15 MB — parse em memoria (DuckDB) fica pesado
                                               // independente do modo; um replace de 200MB+ nao

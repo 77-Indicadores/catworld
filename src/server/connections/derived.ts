@@ -27,6 +27,11 @@ export async function queueDerivedRefresh(derivedTableId: string) {
     }
     const [job] = await prisma.$transaction([
       prisma.job.create({
+        // weight 2 (unbounded) sempre: diferente de SOURCE_REFRESH, tabela derivada
+        // não tem noção de janela/delta — é sempre um SELECT/CREATE TABLE AS completo
+        // a partir do querySql, então nunca há um caminho "bounded" disponível pra
+        // ela (ver isBoundedSourceRun em sources.ts para o mesmo princípio aplicado
+        // a fontes, onde ele às vezes resulta em bounded).
         data: { type: "DERIVED_REFRESH", payloadJson: JSON.stringify({ derivedTableId }), maxAttempts: 2, weight: 2 },
       }),
       prisma.derivedTable.update({ where: { id: derivedTableId }, data: { lastStatus: "queued", lastError: null } }),

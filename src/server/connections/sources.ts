@@ -18,15 +18,42 @@ export function nextRefreshFromCron(cronExpr: string | null | undefined, from = 
   }
 }
 
+/**
+ * Princípio único de peso de job (ver também actions.ts para uploads, derived.ts
+ * para tabelas derivadas): bounded = volume de dados conhecido/limitado por
+ * construção (nunca gateado por max_heavy_jobs); unbounded = pode ser qualquer
+ * tamanho, inclusive a tabela inteira (gateado, weight 2).
+ *
+ * Uma rodada de fonte é bounded quando é janelada por construção — tabela com
+ * deltaColumn já tendo capturado um baseline (lastDeltaValue), ou consulta fora de
+ * reconciliação (a janela fica embutida no SQL do usuário, por convenção). É
+ * unbounded em reconciliação (sempre, por definição) ou tabela sem delta
+ * configurado (lê tudo, toda vez, inclusive a primeira carga de qualquer fonte).
+ */
+function isBoundedSourceRun(
+  source: { sourceKind: string; deltaColumn: string | null; lastDeltaValue: string | null; keyColumn: string | null },
+  reconciliation: boolean,
+): boolean {
+  if (reconciliation) return false;
+  if (source.sourceKind === "table") return !!(source.deltaColumn && source.lastDeltaValue && source.keyColumn);
+  return true;
+}
+
 export async function queueSourceRefresh(datasetSourceId: string, opts?: { reconciliation?: boolean }) {
   const reconciliation = !!opts?.reconciliation;
   // Use Postgres advisory lock to prevent race condition where two workers both see "no existing job"
   // and both insert, creating duplicate SOURCE_REFRESH jobs for the same source.
   return withAdvisoryLock(datasetSourceId, async () => {
-    const candidates = await prisma.job.findMany({
-      where: { type: "SOURCE_REFRESH", status: { in: ["QUEUED", "RUNNING"] } },
-      select: { id: true, status: true, payloadJson: true },
-    });
+    const [candidates, source] = await Promise.all([
+      prisma.job.findMany({
+        where: { type: "SOURCE_REFRESH", status: { in: ["QUEUED", "RUNNING"] } },
+        select: { id: true, status: true, payloadJson: true },
+      }),
+      prisma.datasetSource.findUniqueOrThrow({
+        where: { id: datasetSourceId },
+        select: { sourceKind: true, deltaColumn: true, lastDeltaValue: true, keyColumn: true },
+      }),
+    ]);
     // Compara campos parseados, não a string exata — um job de reconciliação em fila
     // nao deve ser confundido com (nem deduplicado contra) um refresh normal do mesmo
     // source, e vice-versa.
@@ -42,8 +69,9 @@ export async function queueSourceRefresh(datasetSourceId: string, opts?: { recon
       }
       return existing;
     }
+    const weight = isBoundedSourceRun(source, reconciliation) ? 0 : 2;
     const [job] = await prisma.$transaction([
-      prisma.job.create({ data: { type: "SOURCE_REFRESH", payloadJson: JSON.stringify({ datasetSourceId, reconciliation }), maxAttempts: 3, weight: 2 } }),
+      prisma.job.create({ data: { type: "SOURCE_REFRESH", payloadJson: JSON.stringify({ datasetSourceId, reconciliation }), maxAttempts: 3, weight } }),
       prisma.datasetSource.update({ where: { id: datasetSourceId }, data: { lastStatus: "queued", lastError: null } }),
     ]);
     return job;
@@ -337,13 +365,10 @@ export async function refreshDatasetSource(datasetSourceId: string, opts?: { rec
     const useKeyMerge = !!source.keyColumn && hasTarget;
     if (useKeyMerge) await assertKeyColumnSafe(storageConn, schema, stage, source.keyColumn!);
     // fullSnapshot: só é seguro tratar "ausente da staging" como excluído na origem
-    // quando a staging representa 100% do estado atual — ou seja, em reconciliação
-    // (sempre) ou em sourceKind "table" sem deltaColumn (fetch sempre completo, nunca
-    // parcial). Fontes por consulta fora da reconciliação são, por padrão, tratadas
-    // como parciais (o filtro de janela fica embutido no SQL do usuário e o Catworld
-    // não tem como saber se ele cobre 100% da origem) — nunca marcam exclusão por conta
-    // própria, só quando reconciliation=true.
-    const fullSnapshot = reconciliation || (source.sourceKind === "table" && !useDelta);
+    // quando a staging representa 100% do estado atual — mesma condição de
+    // "unbounded" usada pra decidir o peso do job em queueSourceRefresh
+    // (isBoundedSourceRun), fonte única de verdade pra não divergir.
+    const fullSnapshot = !isBoundedSourceRun(source, reconciliation);
     await storageConn.atomicSwap(schema, stage, table, stageCols, {
       targetExists: hasTarget,
       keyColumn: useKeyMerge ? source.keyColumn : null,
