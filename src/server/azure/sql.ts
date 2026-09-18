@@ -220,6 +220,7 @@ export async function executeReadOnlyStream(
   timeout = 60,
   schemas: string[] = [],
   storageServerId?: string | null,
+  normalize = false,
 ): Promise<ReadableStream<Uint8Array>> {
   const validated = validateReadOnlySql(query);
   if (!validated.safe) throw new ApiError(400, "UNSAFE_SQL", validated.reason);
@@ -274,12 +275,17 @@ export async function executeReadOnlyStream(
         }
       };
 
+      let streamKinds: Record<string, ColumnKind> = {};
       request.on("recordset", (columns: Record<string, unknown>) => {
+        if (normalize) {
+          streamKinds = Object.fromEntries(Object.entries(columns as Record<string, { type?: { declaration?: string } }>).map(([n, c]) => [n, mssqlKind(c.type?.declaration)]));
+        }
         safeEnqueue(encoder.encode(JSON.stringify({ __columns__: Object.keys(columns) }) + "\n"));
       });
 
       request.on("row", (row: Record<string, unknown>) => {
         rowCount++;
+        if (normalize) normalizeRows([row], streamKinds, "mssql");
         safeEnqueue(encoder.encode(JSON.stringify(row) + "\n"));
       });
 

@@ -180,6 +180,7 @@ class CatworldClient:
         sql: str | None = None,
         timeout: int = 30,
         limit: int | None = None,
+        normalize: bool = False,
     ) -> QueryResult:
         """Executa uma query em uma fonte live (Postgres direto).
 
@@ -193,13 +194,15 @@ class CatworldClient:
         if limit is None:
             all_rows: list[dict[str, Any]] = []
             columns: list[str] = []
-            for page in self._iter_live_query(source_id, sql=sql, timeout=timeout):
+            for page in self._iter_live_query(source_id, sql=sql, timeout=timeout, normalize=normalize):
                 if not columns and page.columns:
                     columns = page.columns
                 all_rows.extend(page.rows)
             return QueryResult({"rows": all_rows, "columns": columns, "rowCount": len(all_rows)})
 
         payload: dict[str, Any] = {"timeout": timeout, "limit": limit}
+        if normalize:
+            payload["normalize"] = True
         if sql is not None:
             payload["sql"] = sql
         return QueryResult(self._request("POST", f"/api/v1/dataset-sources/{source_id}/query", json=payload, timeout=None))
@@ -209,22 +212,26 @@ class CatworldClient:
         source_id: str,
         sql: str | None = None,
         timeout: int = 30,
+        normalize: bool = False,
     ) -> Iterator[QueryResult]:
         """Itera sobre os resultados de uma fonte live página a página (10.000 linhas por página).
 
         Útil para processar grandes volumes sem carregar tudo na memória.
         """
-        yield from self._iter_live_query(source_id, sql=sql, timeout=timeout)
+        yield from self._iter_live_query(source_id, sql=sql, timeout=timeout, normalize=normalize)
 
     def _iter_live_query(
         self,
         source_id: str,
         sql: str | None = None,
         timeout: int = 30,
+        normalize: bool = False,
     ) -> Iterator[QueryResult]:
         offset = 0
         while True:
             payload: dict[str, Any] = {"timeout": timeout, "limit": _PAGE_SIZE, "offset": offset}
+            if normalize:
+                payload["normalize"] = True
             if sql is not None:
                 payload["sql"] = sql
             page = QueryResult(self._request("POST", f"/api/v1/dataset-sources/{source_id}/query", json=payload, timeout=None))
@@ -240,6 +247,7 @@ class CatworldClient:
         limit: int | None = None,
         dataset_id: str | None = None,
         project_id: str | None = None,
+        normalize: bool = False,
     ) -> QueryResult:
         """Executa uma query SQL no dataset.
 
@@ -250,24 +258,27 @@ class CatworldClient:
                    via streaming (1 request, sem paginação).
             dataset_id: Restringe ao schema do dataset informado.
             project_id: Restringe aos schemas do projeto informado.
+            normalize: ``True`` pede o formato de resultado normalizado do contrato de SQL
+                   (datas ``YYYY-MM-DD``/ISO-8601, bigint e decimal como string).
+                   Padrão ``False``: formato inalterado.
         """
         if limit is None:
             live_source_id = self._resolve_live_source_for_query(sql, dataset_id, project_id)
             if live_source_id:
                 all_rows: list[dict[str, Any]] = []
                 columns: list[str] = []
-                for page in self._iter_live_query(live_source_id, sql=sql, timeout=timeout):
+                for page in self._iter_live_query(live_source_id, sql=sql, timeout=timeout, normalize=normalize):
                     if not columns and page.columns:
                         columns = page.columns
                     all_rows.extend(page.rows)
                 return QueryResult({"rows": all_rows, "columns": columns, "rowCount": len(all_rows)})
-            return self._query_all_stream(sql, timeout=timeout, dataset_id=dataset_id, project_id=project_id)
+            return self._query_all_stream(sql, timeout=timeout, dataset_id=dataset_id, project_id=project_id, normalize=normalize)
 
         live_source_id = self._resolve_live_source_for_query(sql, dataset_id, project_id)
         if live_source_id:
-            return self.live_query(live_source_id, sql=sql, timeout=timeout, limit=limit)
+            return self.live_query(live_source_id, sql=sql, timeout=timeout, limit=limit, normalize=normalize)
 
-        return self._query_page(sql, timeout=timeout, limit=limit, offset=0, dataset_id=dataset_id, project_id=project_id)
+        return self._query_page(sql, timeout=timeout, limit=limit, offset=0, dataset_id=dataset_id, project_id=project_id, normalize=normalize)
 
     def _query_all_stream(
         self,
@@ -275,9 +286,12 @@ class CatworldClient:
         timeout: int = 60,
         dataset_id: str | None = None,
         project_id: str | None = None,
+        normalize: bool = False,
     ) -> QueryResult:
         """Busca todos os dados via NDJSON streaming (1 request, sem paginação)."""
         payload: dict[str, Any] = {"sql": sql, "stream": True}  # timeout fixo em 300s no servidor (modo stream)
+        if normalize:
+            payload["normalize"] = True
         if dataset_id:
             payload["datasetId"] = dataset_id
         if project_id:
@@ -333,12 +347,13 @@ class CatworldClient:
         timeout: int = 30,
         dataset_id: str | None = None,
         project_id: str | None = None,
+        normalize: bool = False,
     ) -> Iterator[QueryResult]:
         """Itera sobre os resultados de uma query página a página (10.000 linhas por página).
 
         Útil para processar grandes volumes sem carregar tudo na memória.
         """
-        yield from self._iter_query(sql, timeout=timeout, dataset_id=dataset_id, project_id=project_id)
+        yield from self._iter_query(sql, timeout=timeout, dataset_id=dataset_id, project_id=project_id, normalize=normalize)
 
     def _iter_query(
         self,
@@ -346,17 +361,18 @@ class CatworldClient:
         timeout: int = 30,
         dataset_id: str | None = None,
         project_id: str | None = None,
+        normalize: bool = False,
     ) -> Iterator[QueryResult]:
         live_source_id = self._resolve_live_source_for_query(sql, dataset_id, project_id)
         if live_source_id:
-            yield from self._iter_live_query(live_source_id, sql=sql, timeout=timeout)
+            yield from self._iter_live_query(live_source_id, sql=sql, timeout=timeout, normalize=normalize)
             return
 
         context = f"dataset={dataset_id}" if dataset_id else f"project={project_id}" if project_id else "sem contexto"
         offset = 0
         while True:
             logger.info("Executando query [%s, timeout=%ss, offset=%s]", context, timeout, offset)
-            page = self._query_page(sql, timeout=timeout, limit=_PAGE_SIZE, offset=offset, dataset_id=dataset_id, project_id=project_id)
+            page = self._query_page(sql, timeout=timeout, limit=_PAGE_SIZE, offset=offset, dataset_id=dataset_id, project_id=project_id, normalize=normalize)
             logger.info("Página: %s linha(s) em %sms", page.get("rowCount", "?"), page.get("executionTimeMs", "?"))
             yield page
             if len(page.rows) < _PAGE_SIZE:
@@ -371,8 +387,11 @@ class CatworldClient:
         offset: int,
         dataset_id: str | None,
         project_id: str | None,
+        normalize: bool = False,
     ) -> QueryResult:
         payload: dict[str, Any] = {"sql": sql, "timeout": timeout, "limit": limit, "offset": offset}
+        if normalize:
+            payload["normalize"] = True
         if dataset_id:
             payload["datasetId"] = dataset_id
         if project_id:

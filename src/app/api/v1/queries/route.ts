@@ -74,9 +74,9 @@ export async function POST(request: NextRequest) {
         if (conn.provider === "postgres") {
           const { executeReadOnlyPgStream } = await import("@/server/storage/pg-query");
           const { PgStorageConnection } = await import("@/server/storage/pg-storage");
-          ndjsonStream = await executeReadOnlyPgStream(conn as InstanceType<typeof PgStorageConnection>, input.sql, streamTimeout, schemas);
+          ndjsonStream = await executeReadOnlyPgStream(conn as InstanceType<typeof PgStorageConnection>, input.sql, streamTimeout, schemas, input.normalize);
         } else {
-          ndjsonStream = await executeReadOnlyStream(actor.principal, input.sql, streamTimeout, schemas, storageServerId);
+          ndjsonStream = await executeReadOnlyStream(actor.principal, input.sql, streamTimeout, schemas, storageServerId, input.normalize);
         }
         return new Response(ndjsonStream, {
           headers: { "Content-Type": "application/x-ndjson", "X-Cache": "MISS" },

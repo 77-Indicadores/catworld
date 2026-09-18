@@ -441,3 +441,20 @@ def test_upload_sends_type_overrides_in_create_body():
     finally:
         client.close()
         upload_file.unlink(missing_ok=True)
+
+
+def test_query_payload_only_carries_normalize_when_requested():
+    """Compatibilidade: sem normalize o corpo enviado e identico ao de antes do contrato de SQL."""
+    bodies = []
+
+    def handler(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"data": {"rows": [], "columns": [], "rowCount": 0}})
+
+    with client_with_handler(handler) as client:
+        client.query("SELECT 1", limit=10)
+        client.query("SELECT 1", limit=10, normalize=True)
+
+    assert "normalize" not in bodies[0]
+    assert bodies[1]["normalize"] is True
+    assert bodies[0] == {"sql": "SELECT 1", "timeout": 60, "limit": 10, "offset": 0}

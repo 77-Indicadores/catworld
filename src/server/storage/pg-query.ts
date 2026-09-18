@@ -139,6 +139,7 @@ export async function executeReadOnlyPgStream(
   sql: string,
   timeout = 60,
   schemas: string[] = [],
+  normalize = false,
 ): Promise<ReadableStream<Uint8Array>> {
   const validated = validateReadOnlySql(sql);
   if (!validated.safe) throw new ApiError(400, "UNSAFE_SQL", validated.reason);
@@ -194,10 +195,14 @@ export async function executeReadOnlyPgStream(
         }
         const result = await client.query(statement);
         const columns = result.fields.map((f) => f.name);
+        const streamKinds: Record<string, ColumnKind> = normalize
+          ? Object.fromEntries(result.fields.map((f) => [f.name, pgKind(f.dataTypeID)]))
+          : {};
         safeEnqueue(encoder.encode(JSON.stringify({ __columns__: columns }) + "\n"));
         let rowCount = 0;
         for (const row of result.rows as Record<string, unknown>[]) {
           if (closed) break; // cliente desconectou — não vale a pena continuar serializando
+          if (normalize) normalizeRows([row], streamKinds, "pg");
           safeEnqueue(encoder.encode(JSON.stringify(row) + "\n"));
           rowCount++;
         }
