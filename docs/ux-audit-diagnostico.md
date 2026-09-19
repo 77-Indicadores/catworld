@@ -319,65 +319,80 @@ documento" (ver seção 9 para as decisões tomadas de forma autônoma).
 - [x] Cancelar/reprocessar jobs SOURCE_REFRESH direto em `/uploads`.
 - [x] `.table-stack` (responsivo) nas 3 tabelas que faltavam (audit,
   retention, sql-contract).
-- [ ] `<DataTable>` genérico e `<FormDialog>` completo — **não feitos**.
-  Risco: 13 tabelas com colunas/comportamentos bem diferentes; forçar uma
-  abstração genérica sem poder testar visualmente (sem navegador neste
-  ambiente) era mais provável de piorar do que ajudar. `useDialog()` já
-  cobre a parte de baixo risco (abrir/fechar) sem essa aposta.
+- [x] `<DataTable>` genérico (`src/components/ui/data-table.tsx`), aplica
+  `.table-stack` por padrão. Migradas `tokens`, `database-users`, `users`
+  como prova; as tabelas com necessidades muito específicas (audit
+  paginada, result-grid de query, preview de schema em dialogs) continuam
+  como estão — abstrair essas também não traria ganho real.
+- [x] `<FormDialog>` (`src/components/ui/form-dialog.tsx`) unifica
+  trigger+dialog+form+erro+Cancelar/Salvar. Migrados
+  `CreateCatalogDialog`, `CreateUserDialog`, `EditUserDialog`,
+  `EditCatalogDialog` (com `DangerZone` em `afterForm`). Os dialogs com
+  campos muito condicionais (connections, storage-servers, o wizard do
+  SourceDialog, workers) continuam com form próprio — forçá-los nessa
+  abstração pioraria mais do que ajudaria.
+- [x] Migrados os 24 usos de `fetch()` cru para `apiRequest`, em 6 lotes,
+  cada um validado com `tsc`+`eslint`+`next build`+toda a suíte de testes
+  antes do próximo. Duas exceções deliberadas ficaram em `fetch` cru (não
+  são endpoints JSON da nossa API): o PUT direto pro blob storage (SAS
+  URL) em `upload-flow.tsx`, e o download de export em `query-panel.tsx`
+  (sucesso = corpo binário, `apiRequest` sempre espera JSON).
 - [ ] Paginação/busca nas 5 telas sem isso (users, tokens, database-users,
-  connections, storage-servers) — **não feito**. Reavaliar: são listas
+  connections, storage-servers) — **não feito**. São listas
   administrativas, tipicamente pequenas; implementar paginação server-side
-  span 5 padrões de query diferentes é esforço alto para um risco de escala
+  com 5 padrões de query diferentes é esforço alto para um risco de escala
   ainda hipotético. Melhor priorizado se/quando esses números crescerem.
-- [ ] Migrar os 24 usos de `fetch()` cru para `apiRequest` — **não feito**.
-  Vários desses arquivos (`upload-flow.tsx`, `query-panel.tsx`,
-  `source-dialog.tsx`, `table-panel.tsx`, `project-workspace.tsx`) são os
-  fluxos mais sensíveis do produto (upload, consulta SQL, sincronização) e
-  eu não tenho como testar contra um banco real neste ambiente — mudar o
-  tratamento de erro em massa sem validar ao vivo era risco alto demais.
 
 **P2 — padronização**
 - [x] `<DangerZone>` compartilhado (também resolve parte de "unificar
-  confirmação").
+  confirmação"), agora também usado via `<FormDialog afterForm>`.
 - [x] Unifica lógica de "copiar valor" em `useCopyToClipboard()` (mantendo
   o visual de cada um — ver seção 6 do plano original).
 - [x] Clareza no padrão de salvar de `/settings/sql-contract` (rótulo
   "aplicado imediatamente" em vez de forçar os dois campos ao mesmo
   padrão — ver nota abaixo).
+- [x] Unificar padrão de "editar" com `<FormDialog>` — feito para os 4
+  dialogs de CRUD simples (ver P1). Os dialogs de campos condicionais
+  continuam com form próprio, por decisão consciente.
 - [ ] Unificar posição do botão de ação primária em `PageHeader.actions`
   sempre — feito em storage-servers; **não mudado** em
   `/settings/worker` (WorkersSection tem ação própria no Panel). Decisão:
   a página tem múltiplas seções independentes, cada uma com sua ação —
   forçar tudo para o `PageHeader` do topo seria pior, não melhor, nesse
   caso específico. Mantido como está.
-- [ ] Unificar padrão de "editar" com um `<FormDialog>` genérico para todo
-  CRUD — **não feito** (ver nota do `<FormDialog>` acima). `useDialog()`
-  já reduz parte da duplicação sem essa aposta maior.
 - [ ] Extrair hook único de refresh de fonte / polling de job — **não
-  feito**. Adiado pelo mesmo motivo de risco/teste do item de fetch.
+  feito**. `useApiAction`/`apiRequest` já uniformizaram o tratamento de
+  erro dessas chamadas (feito na migração de fetch); a extração de um
+  hook de polling específico fica como refinamento futuro, menor prioridade
+  agora que o problema de erro silencioso já foi resolvido.
 
 **P3 — refinamentos**
 - [x] `/projects/page.tsx` reformatado (P0, feito junto com EmptyState).
 - [x] `powerbi-dialog.tsx`: removido estado morto (decisão 4) e migrado
   para `<dialog>` nativo.
 - [x] Removido modo "standalone" morto de `TablePanel`.
-- [ ] Decompor `project-workspace.tsx` em arquivos por feature — **não
-  feito**. É o componente mais tocado nesta rodada (breadcrumb + URL sync);
-  decompor um arquivo de 500+ linhas sem poder testar visualmente no
-  navegador era risco desproporcional ao ganho.
-- [ ] Atalho "criar fonte com padrões" no SourceDialog — **não feito**,
-  mesmo motivo (fluxo crítico, sem forma de validar ao vivo).
-- [ ] Editor SQL com syntax highlight (CodeMirror/Monaco) — **não feito**.
-  Adicionar uma dependência nova e reescrever o editor da tela mais usada
-  do produto sem poder abrir num navegador é a mudança de maior risco de
-  todo o plano; fica como recomendação para uma rodada com ambiente de
-  teste disponível.
+- [x] Decompor `project-workspace.tsx` em arquivos por feature —
+  `MetadataPanel`, `ProjectMigrateStorageDialog` e `CopyId` extraídos;
+  arquivo caiu de ~560 para 323 linhas.
+- [x] Editor SQL com syntax highlight — CodeMirror 6
+  (`@uiw/react-codemirror` + `@codemirror/lang-sql`) no `QueryPanel`,
+  com highlight de sintaxe, números de linha e o atalho Ctrl+Enter
+  preservado via keymap dedicado.
+- [ ] Atalho "criar fonte com padrões" no SourceDialog — **não feito**.
+  É um fluxo crítico (cria fontes de dados reais) e a mudança é de UX de
+  fluxo, não mecânica — prefiro que alguém valide a proposta antes de
+  reduzir passos de um wizard que já funciona.
 
-**Resumo:** todo o P0 foi implementado. Do P1/P2/P3, priorizei o que dava
-para validar com segurança (`tsc`, `eslint`, `next build`, `vitest`, sem
-depender de banco de dados ao vivo ou de abrir a aplicação num navegador
-— este ambiente não tem nenhum dos dois). Os itens não implementados são,
-sem exceção, os que exigiam maior confiança visual/comportamental em tempo
-de execução; ficam documentados aqui como próxima rodada, idealmente com
-acesso a um ambiente onde dá para rodar `npm run dev` contra um banco real
-e olhar a tela.
+**Resumo:** P0 completo. De P1/P2/P3, implementados todos os itens
+estruturais (DataTable, FormDialog, migração completa de fetch, decomposição
+do workspace, editor SQL com highlight) — cada mudança validada com `tsc`,
+`eslint`, `next build` e toda a suíte de testes (553 testes) antes de
+cada commit, incluindo ajuste de um teste que dependia da implementação
+anterior (textarea → CodeMirror). Ficam de fora, por decisão consciente e
+não por limitação de ambiente: paginação/busca nas listagens (esforço alto
+para um risco de escala ainda hipotético), a unificação de posição do botão
+primário em `/settings/worker` (o padrão atual já é o correto para aquele
+caso), o hook de polling dedicado (menor prioridade após a migração de
+fetch) e o atalho de "criar com padrões" no SourceDialog (mudança de fluxo,
+não mecânica — prefiro validação humana antes de simplificar um wizard que
+já funciona).
