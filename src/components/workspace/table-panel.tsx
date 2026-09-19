@@ -5,9 +5,7 @@ import { StatusBadge } from "@/components/ui/primitives";
 import { UploadFlow } from "./upload-flow";
 import { fmtCellStr } from "@/lib/fmt-cell";
 import { apiErrorText } from "@/lib/api-client";
-
-type Source = { id: string; mode: string; sourceKind: string; sourceSchema: string | null; sourceTable: string | null; refreshCron: string | null; lastStatus: string | null; lastError: string | null; lastRefreshedAt: string | null; nextRefreshAt: string | null; connection: { name: string } };
-type Table = { id: string; name: string; sqlName: string; rowCount: string; lastDataAt: string | null; source: Source | null; columns: { id: string; sqlName: string; originalName: string; sqlType: string; nullable: boolean }[] };
+import type { WorkspaceSource as Source, WorkspaceTable as Table } from "@/lib/workspace/types";
 
 function sourceStatus(status: string | null): "healthy" | "warning" | "error" | "inactive" {
   if (status === "completed" || status === "ready") return "healthy";

@@ -9,14 +9,8 @@ import { TablePanel } from "./table-panel";
 import { QueryPanel } from "./query-panel";
 import { DatasetPanel } from "./dataset-panel";
 import { apiErrorText } from "@/lib/api-client";
+import type { StorageServerOption, WorkspaceColumn as Column, WorkspaceDataset as Dataset, WorkspaceDerived as DerivedTable, WorkspaceProject as Project, WorkspaceSource as TableSource, WorkspaceTable as Table } from "@/lib/workspace/types";
 
-type Column = { id: string; sqlName: string; originalName: string; sqlType: string; nullable: boolean };
-type TableSource = { id: string; name: string; mode: string; sourceKind: string; sourceGroupId: string | null; sourceSchema: string | null; sourceTable: string | null; sourceSql: string | null; refreshCron: string | null; keyColumn: string | null; deltaColumn: string | null; reconciliationCron: string | null; sourceSqlReconciliation: string | null; active: boolean; lastStatus: string | null; lastRowCount: string | null; lastError: string | null; lastRefreshedAt: string | null; nextRefreshAt: string | null; connection: { id: string; name: string } };
-type Table = { id: string; name: string; sqlName: string; rowCount: string; lastDataAt: string | null; source: TableSource | null; columns: Column[] };
-type DerivedTable = { id: string; name: string; sqlName: string; querySql: string; refreshCron: string | null; active: boolean; lastStatus: string | null; lastRowCount: string | null; lastError: string | null; lastRefreshedAt: string | null; nextRefreshAt: string | null; targetTable: { id: string; rowCount: string; lastDataAt: string | null } | null };
-type Dataset = { id: string; slug: string; name: string; description: string | null; active: boolean; schemaName: string; storageServerId: string | null; storageServer: { id: string; name: string } | null; tables: Table[]; derivedTables: DerivedTable[] };
-type Project = { id: string; slug: string; name: string; description: string | null; active: boolean; datasets: Dataset[] };
-type StorageServerOption = { id: string; name: string; isDefault: boolean };
 
 type Tab =
   | { id: string; kind: "dataset"; datasetId: string; label: string }

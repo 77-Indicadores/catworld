@@ -12,22 +12,7 @@ import { PowerBIDialog } from "./powerbi-dialog";
 import { useApiAction, useFeedback } from "@/components/ui/feedback";
 import { apiErrorText } from "@/lib/api-client";
 import { CronPreview } from "./cron-field";
-
-type Source = {
-  id: string; name: string; mode: string; sourceKind: string;
-  sourceGroupId: string | null;
-  sourceSchema: string | null; sourceTable: string | null; sourceSql: string | null;
-  refreshCron: string | null;
-  keyColumn: string | null; deltaColumn: string | null; active: boolean;
-  reconciliationCron: string | null; sourceSqlReconciliation: string | null;
-  lastStatus: string | null; lastRowCount: string | null; lastError: string | null;
-  lastRefreshedAt: string | null; nextRefreshAt: string | null;
-  connection: { id: string; name: string };
-};
-type Table = { id: string; name: string; lastDataAt: string | null; source: Source | null };
-type DerivedTable = { id: string; name: string; sqlName: string; querySql: string; refreshCron: string | null; active: boolean; lastStatus: string | null; lastRowCount: string | null; lastError: string | null; lastRefreshedAt: string | null; nextRefreshAt: string | null; targetTable: { id: string; rowCount: string; lastDataAt: string | null } | null };
-type StorageServerOption = { id: string; name: string; isDefault: boolean };
-type Dataset = { id: string; slug: string; name: string; description: string | null; active: boolean; schemaName: string; storageServerId: string | null; storageServer: { id: string; name: string } | null; tables: Table[]; derivedTables: DerivedTable[] };
+import type { StorageServerOption, WorkspaceDataset as Dataset, WorkspaceDerived as DerivedTable, WorkspaceSource as Source, WorkspaceTable as Table } from "@/lib/workspace/types";
 
 // A group is either:
 //   - Multiple table sources that share a sourceGroupId (batch import)
