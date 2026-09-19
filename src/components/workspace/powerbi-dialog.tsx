@@ -1,19 +1,16 @@
 "use client";
 import { useState } from "react";
 import { Check, Copy, ExternalLink, BarChart2, X, Monitor, Cloud } from "lucide-react";
+import { useCopyToClipboard } from "@/lib/use-copy";
+import { useDialog, ModalBackdrop } from "@/components/ui/modal";
 
 function CopyField({ label, value, mono = true }: { label: string; value: string; mono?: boolean }) {
-  const [copied, setCopied] = useState(false);
-  async function copy() {
-    await navigator.clipboard.writeText(value);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  }
+  const { copied, copy } = useCopyToClipboard();
   return (
     <div>
       <p className="mb-1 text-xs font-medium text-base-content/65">{label}</p>
       <button
-        onClick={copy}
+        onClick={() => copy(value)}
         className={`flex w-full items-center justify-between gap-3 rounded-lg border border-base-300 bg-base-200 px-3 py-2 text-left hover:bg-base-300 ${mono ? "font-mono text-xs" : "text-xs"}`}
       >
         <span className="truncate">{value}</span>
@@ -26,26 +23,20 @@ function CopyField({ label, value, mono = true }: { label: string; value: string
 type Tab = "desktop" | "service";
 
 export function PowerBIDialog({ projectSlug, datasetSlug, datasetName, publicOrigin }: { projectSlug: string; datasetSlug: string; datasetName: string; publicOrigin: string }) {
-  const [open, setOpen] = useState(false);
+  const { ref, open, close } = useDialog();
   const [tab, setTab] = useState<Tab>("desktop");
-  const [token, setToken] = useState("");
 
   const baseUrl = `${publicOrigin}/api/odata/${projectSlug}/${datasetSlug}`;
-  const serviceUrl = token ? `${baseUrl}?api_key=${token}` : `${baseUrl}?api_key=SEU_TOKEN_AQUI`;
 
   return (
     <>
-      <button onClick={() => setOpen(true)} className="btn btn-outline btn-sm gap-2">
+      <button onClick={open} className="btn btn-outline btn-sm gap-2">
         <BarChart2 size={14} />
         Conectar ao Power BI
       </button>
 
-      {open && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setOpen(false)}>
-          <div
-            className="relative w-full max-w-lg rounded-box border border-base-300 bg-base-100 shadow-xl"
-            onClick={(e) => e.stopPropagation()}
-          >
+      <dialog ref={ref} className="modal">
+        <div className="modal-box max-w-lg p-0">
             {/* Header */}
             <div className="flex items-center gap-3 border-b border-base-300 p-5">
               <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary">
@@ -55,7 +46,7 @@ export function PowerBIDialog({ projectSlug, datasetSlug, datasetName, publicOri
                 <h2 className="font-semibold">Conectar ao Power BI</h2>
                 <p className="truncate text-sm text-base-content/65">{datasetName}</p>
               </div>
-              <button onClick={() => setOpen(false)} className="btn btn-ghost btn-sm btn-square ml-auto shrink-0">
+              <button onClick={close} className="btn btn-ghost btn-sm btn-square ml-auto shrink-0">
                 <X size={16} />
               </button>
             </div>
@@ -137,11 +128,11 @@ export function PowerBIDialog({ projectSlug, datasetSlug, datasetName, publicOri
                 <ExternalLink size={12} />
                 Docs Microsoft
               </a>
-              <button onClick={() => setOpen(false)} className="btn btn-primary btn-sm">Fechar</button>
+              <button onClick={close} className="btn btn-primary btn-sm">Fechar</button>
             </div>
-          </div>
         </div>
-      )}
+        <ModalBackdrop onClose={close} />
+      </dialog>
     </>
   );
 }

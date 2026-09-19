@@ -17,6 +17,7 @@ import { HistoryBlock } from "./table-detail/history-block";
 import { FreshnessDot } from "./freshness-dot";
 import { tableFreshness } from "@/lib/workspace/present";
 import { worstFreshness } from "@/lib/present";
+import { useCopyToClipboard } from "@/lib/use-copy";
 
 
 type Tab =
@@ -25,13 +26,10 @@ type Tab =
   | { id: string; kind: "query"; label: string };
 
 function CopyId({ label, id, className }: { label: string; id: string; className?: string }) {
-  const [copied, setCopied] = useState(false);
-  function copy() {
-    navigator.clipboard.writeText(id).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); });
-  }
+  const { copied, copy } = useCopyToClipboard();
   return (
     <button
-      onClick={copy}
+      onClick={() => copy(id)}
       title={`Copiar ${label} ID`}
       className={"group flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left text-[10px] text-base-content/65 transition-colors hover:bg-base-200 hover:text-base-content/65 " + (className ?? "")}
     >
