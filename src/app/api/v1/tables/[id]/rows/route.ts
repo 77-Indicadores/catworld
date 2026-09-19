@@ -7,6 +7,7 @@ import { executeLiveReadOnly, liveQuotedTable, type LiveConnection } from "@/ser
 import { getStorageConnection } from "@/server/storage/connection";
 import { ApiError, handleApiError, ok } from "@/server/http";
 import { quoteIdentifier } from "@/server/security/naming";
+import { decodeCursor, pgRemovedSql, pgRowsPageSql, REMOVED_CAP, settleFirstPage, shapeRowsPage, TIE_CAP, type Cursor, type PageRow } from "@/server/tables/since";
 
 /** Formata Date como literal SQL seguro (ISO, sem interpolação de input livre). */
 function sqlDateLiteral(d: Date): string {
@@ -23,8 +24,16 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     if (!(await canAccess(actor, "READ", table.dataset.projectId, table.dataset.id)) && actor.role !== "ADMIN")
       throw new ApiError(403, "FORBIDDEN", "Sem acesso ao dataset");
 
-    const limit = Math.min(Number(request.nextUrl.searchParams.get("limit") ?? 100), 1000);
+    // limit: inteiro >= 0 (padrao 100, maximo 1000). Antes "abc" ou "-5" davam 500.
+    const limitRaw = request.nextUrl.searchParams.get("limit");
+    let limit = 100;
+    if (limitRaw !== null && limitRaw.trim() !== "") {
+      const n = Number(limitRaw);
+      if (!Number.isInteger(n) || n < 0) throw new ApiError(400, "VALIDATION_ERROR", "\"limit\" precisa ser um inteiro >= 0");
+      limit = Math.min(n, 1000);
+    }
     const sinceRaw = request.nextUrl.searchParams.get("since");
+    const cursorRaw = request.nextUrl.searchParams.get("cursor");
 
     if (sinceRaw && table.source?.mode === "live") {
       throw new ApiError(400, "SINCE_NOT_SUPPORTED", "\"since\" só é suportado em fontes extract (fontes live não têm cópia local para comparar).");
@@ -33,6 +42,13 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     if (sinceRaw) {
       since = new Date(sinceRaw);
       if (isNaN(since.getTime())) throw new ApiError(400, "INVALID_SINCE", "\"since\" precisa ser uma data ISO válida");
+    }
+    // cursor (aditivo): continua a pagina seguinte de um `since` com mais linhas que o limit — ver server/tables/since.ts
+    let cursor: Cursor | null = null;
+    if (cursorRaw) {
+      if (!since) throw new ApiError(400, "INVALID_CURSOR", "\"cursor\" exige \"since\"");
+      cursor = decodeCursor(cursorRaw);
+      if (!cursor) throw new ApiError(400, "INVALID_CURSOR", "\"cursor\" invalido");
     }
 
     // Live source (PostgreSQL connection via DatasetSource)
@@ -69,6 +85,60 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       const qSyncedAt = conn.q("cw_synced_at");
       const qDeletedAt = conn.q("cw_deleted_at");
 
+      if (conn.provider === "postgres") {
+        // Paginacao sem perda: ordem (cw_synced_at, chave) + cursor; nextSince conservador. (Ver since.ts.)
+        const qKey = keyColumn ? conn.q(keyColumn) : null;
+        const keySqlType = table.columns.find((c) => c.sqlName === keyColumn)?.sqlType ?? "NVARCHAR(MAX)";
+        if (cursor && !qKey) throw new ApiError(400, "INVALID_CURSOR", "\"cursor\" exige tabela com chave (upsert)");
+        let pageSql: string;
+        try {
+          pageSql = pgRowsPageSql({ qTarget, colList, qSynced: qSyncedAt, qDeleted: qDeletedAt, qKey, keySqlType, sinceLit, cursor, limit });
+        } catch {
+          throw new ApiError(400, "INVALID_CURSOR", "\"cursor\" invalido");
+        }
+        const raw = await conn.query<PageRow>(pageSql);
+        const shaped = cursor
+          ? shapeRowsPage(raw, limit, since)
+          : await settleFirstPage(raw, limit, since, () =>
+              conn.query<PageRow>(pgRowsPageSql({ qTarget, colList, qSynced: qSyncedAt, qDeleted: qDeletedAt, qKey, keySqlType, sinceLit, cursor: null, limit: TIE_CAP })));
+        const rows = shaped.page.map((r) => {
+          const { __cw_synced_at, __cw_synced_txt, __cw_key, ...rest } = r;
+          void __cw_synced_at; void __cw_synced_txt; void __cw_key;
+          return rest;
+        });
+
+        // Exclusoes: so na 1a pagina (nas do cursor ja foram entregues). Sem o teto de `limit` de antes.
+        let removedKeys: unknown[] | null = null;
+        let maxDeletedAt: Date | null = null;
+        let removedTruncated = false;
+        if (qKey) {
+          removedKeys = [];
+          if (!cursor) {
+            const removed = await conn.query<{ k: unknown; d: unknown }>(pgRemovedSql({ qTarget, qDeleted: qDeletedAt, qKey, sinceLit }));
+            removedTruncated = removed.length > REMOVED_CAP;
+            for (const r of removed.slice(0, REMOVED_CAP)) {
+              removedKeys.push(r.k);
+              const d = r.d instanceof Date ? r.d : new Date(String(r.d));
+              if (!maxDeletedAt || d > maxDeletedAt) maxDeletedAt = d;
+            }
+          }
+        }
+        let nextSince = shaped.nextSince;
+        if (!shaped.hasMore && !removedTruncated && maxDeletedAt && maxDeletedAt > nextSince) nextSince = maxDeletedAt;
+
+        return ok(rows, {
+          columns: colNames,
+          rowCount: rows.length,
+          removedKeys,
+          nextSince: nextSince.toISOString(),
+          hasMore: shaped.hasMore,
+          ...(shaped.nextCursor ? { nextCursor: shaped.nextCursor } : {}),
+          ...(removedTruncated ? { removedTruncated: true } : {}),
+          ...(shaped.tieGroupTruncated ? { tieGroupTruncated: true } : {}),
+        });
+      }
+
+      // SQL Server: comportamento anterior (nao verificado por falta de instancia; ainda sujeito ao limite de empates).
       // Inclui cw_synced_at na própria query (pra achar o "carimbo" desta página sem
       // outra ida ao banco), removido da linha antes de devolver ao consumidor. No
       // MSSQL, o LIMIT já é aplicado pelo próprio executeReadOnly (via runReadOnly) a

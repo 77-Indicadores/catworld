@@ -144,27 +144,53 @@ class CatworldClient:
     def rows(self, table_id: str, limit: int = 100):
         return self._request("GET", f"/api/v1/tables/{table_id}/rows", params={"limit": limit})
 
-    def changes(self, table_id: str, since: str | _datetime.datetime | None = None, limit: int = 1000) -> dict:
-        """Puxa só o que mudou numa tabela extract desde `since` (ISO string ou datetime).
+    def changes(self, table_id: str, since: str | _datetime.datetime | None = None, limit: int = 1000, follow: bool = True) -> dict:
+        """Puxa so o que mudou numa tabela extract desde `since` (ISO string ou datetime).
 
         Retorna {"rows": [...], "removedKeys": [...] | None, "nextSince": str}.
-        `removedKeys` é None se a fonte nunca teve upsert habilitado (sem keyColumn,
-        sem como saber o que foi excluído). Guarde `nextSince` e passe como `since` na
-        próxima chamada para continuar de onde parou — se nada mudou, `nextSince` volta
-        igual ao `since` recebido, então é seguro chamar em loop (polling).
+        `removedKeys` e None se a fonte nunca teve upsert habilitado (sem keyColumn,
+        sem como saber o que foi excluido). Guarde `nextSince` e passe como `since` na
+        proxima chamada para continuar de onde parou — se nada mudou, `nextSince` volta
+        igual ao `since` recebido, entao e seguro chamar em loop (polling).
 
         `since=None` na primeira chamada busca a tabela inteira como baseline (ainda
         sujeita a `limit`); use o `nextSince` retornado para as chamadas seguintes.
+
+        `follow=True` (padrao): se o servidor indicar que ha mais paginas (`hasMore`), segue
+        o cursor ate esgotar e devolve TODAS as mudancas (o resultado pode passar de `limit`).
+        Sem isso, lotes de sync maiores que `limit` perdiam linhas em silencio.
         """
         params: dict[str, Any] = {"limit": limit}
         if since is not None:
             params["since"] = since.isoformat() if isinstance(since, _datetime.datetime) else since
         body = self._request_full("GET", f"/api/v1/tables/{table_id}/rows", params=params)
         meta = body.get("meta") or {}
+        rows: list[Any] = list(body.get("data") or [])
+        removed = meta.get("removedKeys")
+        next_since = meta.get("nextSince")
+
+        pages = 0
+        while follow and meta.get("hasMore") and "since" in params and pages < 100_000:
+            pages += 1
+            page_params: dict[str, Any] = {"limit": limit}
+            if meta.get("nextCursor"):
+                page_params["since"] = params["since"]
+                page_params["cursor"] = meta["nextCursor"]
+            elif meta.get("nextSince") and meta["nextSince"] != page_params.get("since", params["since"]):
+                page_params["since"] = meta["nextSince"]
+            else:
+                break  # sem cursor e sem progresso possivel: nao entra em laco
+            body = self._request_full("GET", f"/api/v1/tables/{table_id}/rows", params=page_params)
+            meta = body.get("meta") or {}
+            rows.extend(body.get("data") or [])
+            if meta.get("removedKeys"):
+                removed = (removed or []) + list(meta["removedKeys"])
+            next_since = meta.get("nextSince") or next_since
+            params["since"] = page_params["since"] if "cursor" not in page_params else params["since"]
         return {
-            "rows": body.get("data") or [],
-            "removedKeys": meta.get("removedKeys"),
-            "nextSince": meta.get("nextSince"),
+            "rows": rows,
+            "removedKeys": removed,
+            "nextSince": next_since,
         }
 
     def source_info(self, source_id: str):

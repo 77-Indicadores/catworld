@@ -4,6 +4,8 @@ import { syncActorGrants } from "@/server/auth/sync-grants";
 import { executeReadOnly } from "@/server/azure/sql";
 import { withPg, quotedPgTable } from "@/server/connections/postgres";
 import { executeLiveReadOnly, isMssqlConnection, liveCount, liveQuoteIdent, liveQuotedTable, type LiveConnection } from "@/server/connections/live";
+import { assertDatasetAccess } from "@/server/auth/permissions";
+import { planODataQuery, type ODataQueryPlan } from "@/server/odata/query-options";
 import { getStorageConnection } from "@/server/storage/connection";
 import type { PgStorageConnection } from "@/server/storage/pg-storage";
 import { ApiError, handleApiError } from "@/server/http";
@@ -21,7 +23,7 @@ import { getPageCache, setPageCache } from "@/server/cache/odata-page-cache";
 // git blame / incidente de heap exhaustion no serviço web).
 
 const DATASET_CACHE_TTL = 60_000;
-const TOKEN_CACHE_TTL   = 60_000;
+const TOKEN_CACHE_TTL   = 15_000; // revogar token vale em ate 15s
 const COUNT_CACHE_TTL   = 300_000; // 5 min — count não muda entre páginas de um mesmo refresh
 const DEFAULT_TOP       = 5_000;   // Power BI pagina em blocos — 5k reduz de ~52 req para ~11
 
@@ -127,7 +129,7 @@ function escXml(s: string) {
 type Column    = { originalName: string; sqlName: string; sqlType: string; nullable: boolean };
 type LiveSource = { mode: "live"; connection: LiveConnection; sourceKind: string; sourceSchema: string | null; sourceTable: string | null; sourceSql: string | null };
 type Table     = { sqlName: string; columns: Column[]; live: LiveSource | null };
-type Dataset   = { id: string; schemaName: string; storageServerId: string | null; tables: Table[] };
+type Dataset   = { id: string; projectId: string; schemaName: string; storageServerId: string | null; tables: Table[] };
 
 async function loadDataset(projectSlug: string, datasetSlug: string): Promise<Dataset> {
   const cacheKey = `${projectSlug}/${datasetSlug}`;
@@ -180,7 +182,7 @@ async function loadDataset(projectSlug: string, datasetSlug: string): Promise<Da
     return { sqlName: t.sqlName, columns: t.columns, live };
   });
 
-  const result: Dataset = { id: dataset.id, schemaName: dataset.schemaName, storageServerId: dataset.storageServerId, tables };
+  const result: Dataset = { id: dataset.id, projectId: dataset.projectId, schemaName: dataset.schemaName, storageServerId: dataset.storageServerId, tables };
   datasetCache.set(cacheKey, result);
   return result;
 }
@@ -232,8 +234,11 @@ async function queryLiveTable(
   skip: number,
   needCount: boolean,
   countCacheKey: string,
+  plan: ODataQueryPlan,
 ): Promise<{ rows: Record<string, unknown>[]; totalCount: number | null }> {
   if (isMssqlConnection(live.connection)) return queryLiveMssql(live, cols, top, skip, needCount, countCacheKey);
+  const whereSql = plan.where ? ` WHERE ${plan.where}` : "";
+  const orderSql = plan.orderBy ? ` ORDER BY ${plan.orderBy}` : "";
   const colList = cols.map((c) => {
     const orig  = `"${c.originalName.replaceAll('"', '""')}"`;
     const alias = `"${c.sqlName.replaceAll('"', '""')}"`;
@@ -251,7 +256,7 @@ async function queryLiveTable(
     if (cachedCount !== null) {
       return withPg(live.connection, async (client) => {
         const dataResult = await client.query<Record<string, unknown>>(
-          `SELECT ${colList} FROM ${baseExpr} LIMIT ${top} OFFSET ${skip}`,
+          `SELECT ${colList} FROM ${baseExpr}${whereSql}${orderSql} LIMIT ${top} OFFSET ${skip}`,
         );
         return { rows: dataResult.rows.map((row) => normalizeRow(row, typeMap)), totalCount: cachedCount };
       });
@@ -259,10 +264,10 @@ async function queryLiveTable(
     // COUNT e dados em paralelo — duas conexões simultâneas
     const [countResult, dataResult] = await Promise.all([
       withPg(live.connection, (client) =>
-        client.query<{ cnt: string }>(`SELECT COUNT(*) AS cnt FROM ${baseExpr}`),
+        client.query<{ cnt: string }>(`SELECT COUNT(*) AS cnt FROM ${baseExpr}${whereSql}`),
       ),
       withPg(live.connection, (client) =>
-        client.query<Record<string, unknown>>(`SELECT ${colList} FROM ${baseExpr} LIMIT ${top} OFFSET ${skip}`),
+        client.query<Record<string, unknown>>(`SELECT ${colList} FROM ${baseExpr}${whereSql}${orderSql} LIMIT ${top} OFFSET ${skip}`),
       ),
     ]);
     const totalCount = Number(countResult.rows[0]?.cnt ?? 0);
@@ -275,7 +280,7 @@ async function queryLiveTable(
 
   return withPg(live.connection, async (client) => {
     const dataResult = await client.query<Record<string, unknown>>(
-      `SELECT ${colList} FROM ${baseExpr} LIMIT ${top} OFFSET ${skip}`,
+      `SELECT ${colList} FROM ${baseExpr}${whereSql}${orderSql} LIMIT ${top} OFFSET ${skip}`,
     );
     return { rows: dataResult.rows.map((row) => normalizeRow(row, typeMap)), totalCount: null };
   });
@@ -365,6 +370,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 
     const [projectSlug, datasetSlug, ...rest] = resolvedPath;
     const dataset = await loadDataset(projectSlug!, datasetSlug!);
+    // Antes nao havia checagem: um token com grant so no dataset A lia o dataset B (e listava suas tabelas) pela URL.
+    await assertDatasetAccess(actor, "READ", { id: dataset.id, projectId: dataset.projectId });
 
     const origin = publicOrigin();
     const baseUrl = `${origin}/api/odata/${projectSlug}/${datasetSlug}`;
@@ -399,12 +406,21 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     if (cols.length === 0) throw new ApiError(400, "BAD_REQUEST", "Nenhuma coluna válida selecionada");
 
     const needCount = countParam === "true";
-    const countCacheKey = `${projectSlug}/${datasetSlug}/${table.sqlName}`;
+    // $filter/$orderby (subconjunto): aplicados no Postgres; o que nao for entendido segue ignorado (como sempre foi) COM aviso.
+    const filterParam = url.searchParams.get("$filter");
+    const orderbyParam = url.searchParams.get("$orderby");
+    const provider = table.live
+      ? (isMssqlConnection(table.live.connection) ? "mssql" : "postgres")
+      : (await getStorageConnection(dataset.storageServerId)).provider;
+    const liveOrig = new Map(table.columns.map((c) => [c.sqlName, c.originalName]));
+    const refCol = (c: { sqlName: string }) => `"${(table.live ? (liveOrig.get(c.sqlName) ?? c.sqlName) : c.sqlName).replaceAll('"', '""')}"`;
+    const plan = planODataQuery(url.searchParams, table.columns, refCol, provider === "postgres");
+    const countCacheKey = `${projectSlug}/${datasetSlug}/${table.sqlName}/${plan.where ?? ""}`;
     const response: Record<string, unknown> = { "@odata.context": `${baseUrl}/$metadata#${table.sqlName}` };
 
     if (table.live) {
       const { rows, totalCount } = await withODataSemaphore(() =>
-        queryLiveTable(table.live!, cols, top, skip, needCount, countCacheKey),
+        queryLiveTable(table.live!, cols, top, skip, needCount, countCacheKey, plan),
       );
       response["value"] = rows.map((r, i) => ({ ...r, _row_number: String(skip + i + 1) }));
       if (needCount) response["@odata.count"] = String(totalCount ?? 0);
@@ -414,13 +430,15 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         next.searchParams.set("$skip", String(skip + top));
         if (selectParam) next.searchParams.set("$select", selectParam);
         if (needCount) next.searchParams.set("$count", "true");
+        if (filterParam) next.searchParams.set("$filter", filterParam);
+        if (orderbyParam) next.searchParams.set("$orderby", orderbyParam);
         response["@odata.nextLink"] = appendApiKey(next, apiKey);
       }
     } else {
       await syncActorGrants(actor, { datasetIds: [dataset.id] });
 
       // Cache de página: evita hits ao banco para queries idênticas repetitivas (Power BI, SDK)
-      const pageCacheKey = `${projectSlug}/${datasetSlug}/${table.sqlName}/${top}/${skip}/${selectParam ?? ""}/${needCount}`;
+      const pageCacheKey = `${projectSlug}/${datasetSlug}/${table.sqlName}/${top}/${skip}/${selectParam ?? ""}/${needCount}/${filterParam ?? ""}/${orderbyParam ?? ""}`;
       const cachedPage = getPageCache(pageCacheKey);
       if (cachedPage) {
         Object.assign(response, cachedPage);
@@ -434,6 +452,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
             next.searchParams.set("$skip", String(skip + top));
             if (selectParam) next.searchParams.set("$select", selectParam);
             if (needCount) next.searchParams.set("$count", "true");
+        if (filterParam) next.searchParams.set("$filter", filterParam);
+        if (orderbyParam) next.searchParams.set("$orderby", orderbyParam);
             response["@odata.nextLink"] = appendApiKey(next, apiKey);
           }
         };
@@ -453,8 +473,10 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
           const pgConn = conn as PgStorageConnection;
           const colList = cols.map((c) => q(c.sqlName)).join(", ");
           const fromExpr = `${q(dataset.schemaName)}.${q(table.sqlName)}`;
-          const dataSql = `SELECT ${colList} FROM ${fromExpr} OFFSET ${skip} LIMIT ${top}`;
-          const countSql = `SELECT COUNT(*) AS cnt FROM ${fromExpr}`;
+          const whereSql = plan.where ? ` WHERE ${plan.where}` : "";
+          const orderSql = plan.orderBy ? ` ORDER BY ${plan.orderBy}` : "";
+          const dataSql = `SELECT ${colList} FROM ${fromExpr}${whereSql}${orderSql} OFFSET ${skip} LIMIT ${top}`;
+          const countSql = `SELECT COUNT(*) AS cnt FROM ${fromExpr}${whereSql}`;
 
           const cachedCount = getCachedCount(countCacheKey);
           const [dataRows, countResult] = await withODataSemaphore(() => Promise.all([
@@ -501,7 +523,10 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       }
     }
 
-    return Response.json(response, { headers: ODATA_HEADERS });
+    // Opcao de consulta nao suportada continua ignorada (nada quebra), mas agora o cliente e avisado.
+    const headers: Record<string, string> = { ...ODATA_HEADERS };
+    if (plan.warnings.length) headers["Warning"] = plan.warnings.map((w) => `299 catworld "${w.replace(/"/g, "'")}"`).join(", ");
+    return Response.json(response, { headers });
   } catch (e) {
     if (process.env.NODE_ENV !== "production" && !(e instanceof ApiError)) {
       const msg = e instanceof Error ? e.message : String(e);
