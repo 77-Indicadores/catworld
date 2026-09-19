@@ -82,13 +82,16 @@ export async function DELETE(r: NextRequest, { params }: { params: Promise<{ id:
 
     const server = await prisma.storageServer.findUnique({
       where: { id },
-      select: { isDefault: true, _count: { select: { datasets: true } } },
+      select: { name: true, isDefault: true, _count: { select: { datasets: true } } },
     });
     if (!server) throw new ApiError(404, "NOT_FOUND", "StorageServer não encontrado");
     if (server.isDefault) throw new ApiError(400, "IS_DEFAULT", "Não é possível remover o StorageServer padrão");
     if (server._count.datasets > 0) {
       throw new ApiError(400, "HAS_DATASETS", `${server._count.datasets} dataset(s) estão usando este servidor`);
     }
+
+    const { confirmName } = z.object({ confirmName: z.string() }).parse(await r.json().catch(() => ({})));
+    if (confirmName !== server.name) throw new ApiError(400, "CONFIRMATION_MISMATCH", "Nome de confirmação não confere");
 
     await prisma.storageServer.delete({ where: { id } });
     return ok({ deleted: true });

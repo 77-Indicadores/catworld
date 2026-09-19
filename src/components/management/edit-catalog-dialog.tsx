@@ -1,19 +1,19 @@
 "use client";
 import { useRef, useState } from "react";
-import { Pencil, TriangleAlert } from "lucide-react";
+import { Pencil } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { apiErrorText } from "@/lib/api-client";
+import { DangerZone } from "@/components/ui/danger-zone";
 
 type Props = { kind: "project" | "dataset"; id: string; name: string; description: string | null; active: boolean };
 
 export function EditCatalogDialog({ kind, id, name, description, active }: Props) {
   const ref = useRef<HTMLDialogElement>(null), router = useRouter();
   const [error, setError] = useState("");
-  const [confirmName, setConfirmName] = useState("");
   const [deleting, setDeleting] = useState(false);
   const apiBase = kind === "project" ? "projects" : "datasets";
 
-  function close() { ref.current?.close(); setConfirmName(""); setError(""); }
+  function close() { ref.current?.close(); setError(""); }
 
   async function submit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -36,7 +36,7 @@ export function EditCatalogDialog({ kind, id, name, description, active }: Props
     const response = await fetch(`/api/v1/${apiBase}/${id}`, {
       method: "DELETE",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ confirmName }),
+      body: JSON.stringify({ confirmName: name }),
     });
     setDeleting(false);
     if (!response.ok) { const body = await response.json(); setError(apiErrorText(body, "Falha ao excluir")); return; }
@@ -61,15 +61,14 @@ export function EditCatalogDialog({ kind, id, name, description, active }: Props
               <button className="btn btn-primary btn-sm">Salvar</button>
             </div>
           </form>
-          <div className="mt-6 rounded-xl border border-error/30 bg-error/5 p-4">
-            <p className="flex items-center gap-2 text-sm font-semibold text-error"><TriangleAlert size={15} />Zona de perigo</p>
-            <p className="mt-1 text-xs text-base-content/65">
-              {kind === "project" ? "Apaga o projeto, todos os seus datasets, os schemas e tabelas no Azure SQL e os dados associados. Isso não pode ser desfeito." : "Apaga o dataset, suas tabelas, o schema no Azure SQL e os dados associados. Isso não pode ser desfeito."}
-            </p>
-            <p className="mt-3 text-xs">Digite <span className="font-mono font-semibold">{name}</span> para confirmar:</p>
-            <input value={confirmName} onChange={(e) => setConfirmName(e.target.value)} className="input input-sm mt-2 w-full" placeholder={name} />
-            <button onClick={destroy} disabled={confirmName !== name || deleting} className="btn btn-error btn-sm mt-3 w-full">{deleting ? "Excluindo..." : "Excluir definitivamente"}</button>
-          </div>
+          <DangerZone
+            description={kind === "project" ? "Apaga o projeto, todos os seus datasets, os schemas e tabelas no Azure SQL e os dados associados. Isso não pode ser desfeito." : "Apaga o dataset, suas tabelas, o schema no Azure SQL e os dados associados. Isso não pode ser desfeito."}
+            confirmValue={name}
+            confirmLabel="Excluir definitivamente"
+            busyLabel="Excluindo..."
+            busy={deleting}
+            onConfirm={destroy}
+          />
           {error && <div className="alert alert-error alert-soft mt-4">{error}</div>}
         </div>
         <form method="dialog" className="modal-backdrop"><button onClick={close}>fechar</button></form>

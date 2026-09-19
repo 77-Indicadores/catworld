@@ -6,6 +6,8 @@ import { presentLongDate } from "@/lib/present";
 import { StatusBadge } from "@/components/ui/primitives";
 import { presentTableFreshness, type RefreshInput } from "@/lib/present";
 import { freshnessHeadline, summarizeFreshness, type FreshnessItem } from "@/lib/workspace/summary";
+import { resolveActor } from "@/server/auth/actor";
+import { visibleProjectIds } from "@/server/auth/permissions";
 
 /** Campos de frescor de uma fonte/derivada (Prisma) no formato do apresentador. */
 function toRefreshInput(x: { mode?: string | null; active?: boolean | null; lastStatus: string | null; lastError: string | null; refreshCron: string | null; nextRefreshAt: Date | null; lastRefreshedAt: Date | null }): RefreshInput {
@@ -22,10 +24,15 @@ type JobStatsRow = {
 type AvgRow = { avg_sec: number | null };
 
 export default async function DashboardPage() {
+  const actor = await resolveActor();
+  const ids = await visibleProjectIds(actor);
+  const projectScope = ids ? { id: { in: ids } } : {};
+  const datasetScope = ids ? { projectId: { in: ids } } : {};
+
   const [projectCount, datasetCount, avgRows, jobStatsRows, projectsData] =
     await Promise.all([
-      prisma.project.count({ where: { active: true } }),
-      prisma.dataset.count({ where: { active: true } }),
+      prisma.project.count({ where: { active: true, ...projectScope } }),
+      prisma.dataset.count({ where: { active: true, ...datasetScope } }),
       prisma.$queryRaw<AvgRow[]>`
         SELECT AVG(EXTRACT(EPOCH FROM (updated_at - locked_at))::int) avg_sec
         FROM cw_jobs
@@ -44,7 +51,7 @@ export default async function DashboardPage() {
           AND (status IN ('RUNNING','QUEUED') OR created_at >= NOW() - INTERVAL '1 day')
       `,
       prisma.project.findMany({
-        where: { active: true },
+        where: { active: true, ...projectScope },
         orderBy: { name: "asc" },
         include: {
           datasets: {

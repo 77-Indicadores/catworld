@@ -1,8 +1,8 @@
 "use client";
-import { useEffect, useState, useCallback } from "react";
-import { CheckCircle2, Trash2, RefreshCw, Clock, AlertCircle } from "lucide-react";
+import { useEffect, useRef, useState, useCallback } from "react";
+import { CheckCircle2, Trash2, RefreshCw, AlertCircle } from "lucide-react";
 import { PageHeader, Panel } from "@/components/ui/primitives";
-import { useFeedback } from "@/components/ui/feedback";
+import { DangerZone } from "@/components/ui/danger-zone";
 import { apiErrorText, apiRequest, errorMessage } from "@/lib/api-client";
 import { Time } from "@/components/ui/time";
 import { fmtDuration } from "@/lib/fmt";
@@ -120,8 +120,10 @@ function RunRow({ run }: { run: CleanupRun }) {
   );
 }
 
+const PURGE_PHRASE = "PURGAR AGORA";
+
 export default function RetentionPage() {
-  const { confirm: askConfirm } = useFeedback();
+  const purgeRef = useRef<HTMLDialogElement>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [history, setHistory] = useState<CleanupRun[]>([]);
   const [saved, setSaved] = useState(false);
@@ -171,12 +173,6 @@ export default function RetentionPage() {
   }
 
   async function purge() {
-    if (!await askConfirm({
-      title: "Limpar agora",
-      message: "Apaga já os jobs, eventos de auditoria, uploads e versões de dados mais antigos que os períodos salvos nesta tela. Eventos de auditoria apagados não podem ser recuperados.",
-      confirmLabel: "Limpar agora",
-      danger: true,
-    })) return;
     setPurging(true); setPurgeOk(false); setError("");
     const r = await fetch("/api/v1/settings/retention/purge", { method: "POST" });
     setPurging(false);
@@ -184,6 +180,7 @@ export default function RetentionPage() {
       const b = await r.json().catch(() => ({}));
       setError(apiErrorText(b, "Falha ao enfileirar purga"));
     } else {
+      purgeRef.current?.close();
       setPurgeOk(true);
       setTimeout(loadHistory, 1500);
     }
@@ -264,7 +261,7 @@ export default function RetentionPage() {
           <button
             type="button"
             disabled={purging}
-            onClick={purge}
+            onClick={() => purgeRef.current?.showModal()}
             className="btn btn-outline btn-error btn-sm"
           >
             <Trash2 size={14} className={purging ? "animate-pulse" : ""} />
@@ -314,13 +311,35 @@ export default function RetentionPage() {
           <h2 className="font-semibold text-sm text-base-content/70 uppercase tracking-wide">Como funciona</h2>
           <ul className="text-sm text-base-content/65 space-y-1 list-disc list-inside">
             <li>O worker executa a limpeza automaticamente a cada 24 horas via job <code className="font-mono text-xs">METADATA_CLEANUP</code>.</li>
-            <li>Use "Purgar agora" para forçar a limpeza imediatamente (enfileira um job).</li>
+            <li>Use &quot;Purgar agora&quot; para forçar a limpeza imediatamente (enfileira um job).</li>
             <li>Dados de datasets (tabelas SQL Server) nunca são afetados — apenas metadados internos.</li>
             <li>A janela de retenção conta a partir de <code className="font-mono text-xs">created_at</code> de cada registro.</li>
             <li>Os detalhes de cada execução ficam no histórico: <code className="font-mono text-xs">j=jobs · a=audit · u=uploads · v=versões</code>.</li>
           </ul>
         </div>
       </Panel>
+
+      <dialog ref={purgeRef} className="modal">
+        <div className="modal-box max-w-md">
+          <h3 className="text-lg font-bold">Purgar agora</h3>
+          <p className="mt-2 text-sm text-base-content/65">
+            Apaga já os jobs, eventos de auditoria, uploads e versões de dados mais antigos que os
+            períodos salvos nesta tela. Eventos de auditoria apagados não podem ser recuperados.
+          </p>
+          <DangerZone
+            description="Esta ação é imediata e não pode ser desfeita — mesmo dados que ainda seriam úteis para auditoria/conformidade serão removidos se estiverem fora da janela configurada."
+            confirmValue={PURGE_PHRASE}
+            confirmLabel="Purgar agora"
+            busyLabel="Enfileirando..."
+            busy={purging}
+            onConfirm={purge}
+          />
+          <div className="modal-action">
+            <button type="button" className="btn btn-sm btn-ghost" onClick={() => purgeRef.current?.close()}>Cancelar</button>
+          </div>
+        </div>
+        <form method="dialog" className="modal-backdrop"><button aria-label="Fechar" onClick={() => purgeRef.current?.close()}>fechar</button></form>
+      </dialog>
     </div>
   );
 }

@@ -6,6 +6,8 @@ import { QueueLane, type QueueItem } from "@/components/uploads/queue-lane";
 import { FailedActions } from "@/components/uploads/failed-actions";
 import { fmtBytes } from "@/lib/fmt";
 import { formatInt } from "@/lib/present";
+import { resolveActor } from "@/server/auth/actor";
+import { visibleProjectIds } from "@/server/auth/permissions";
 
 export const dynamic = "force-dynamic";
 
@@ -28,6 +30,10 @@ function fmtRows(n: bigint | null) {
 }
 
 export default async function UploadsPage() {
+  const actor = await resolveActor();
+  const ids = await visibleProjectIds(actor);
+  const visible = (projectId: string | null | undefined) => ids === null || !projectId || ids.includes(projectId);
+
   const [previewJobs, importJobs, sourceJobs, completedCounts, cancelableCount] = await Promise.all([
     prisma.job.findMany({
       where: { type: "PREVIEW_UPLOAD", status: { in: [...ACTIVE] } },
@@ -36,7 +42,7 @@ export default async function UploadsPage() {
         upload: {
           select: {
             id: true, originalFilename: true, sizeBytes: true, mode: true, progress: true,
-            dataset: { select: { name: true, project: { select: { name: true } } } },
+            dataset: { select: { name: true, project: { select: { id: true, name: true } } } },
           },
         },
       },
@@ -48,7 +54,7 @@ export default async function UploadsPage() {
         upload: {
           select: {
             id: true, originalFilename: true, sizeBytes: true, mode: true, progress: true,
-            dataset: { select: { name: true, project: { select: { name: true } } } },
+            dataset: { select: { name: true, project: { select: { id: true, name: true } } } },
           },
         },
       },
@@ -72,15 +78,23 @@ export default async function UploadsPage() {
     }),
   ]);
 
+  const visiblePreviewJobs = previewJobs.filter(j => visible(j.upload?.dataset?.project.id));
+  const visibleImportJobs = importJobs.filter(j => visible(j.upload?.dataset?.project.id));
+
   // Enrich sync jobs with source data
   const sourceIds = [...new Set(sourceJobs.map(j => extractSourceId(j.payloadJson)).filter((x): x is string => !!x))];
   const sources = sourceIds.length
     ? await prisma.datasetSource.findMany({
         where: { id: { in: sourceIds } },
-        select: { id: true, name: true, lastRowCount: true, dataset: { select: { name: true, project: { select: { name: true, slug: true } } } } },
+        select: { id: true, name: true, lastRowCount: true, dataset: { select: { name: true, project: { select: { id: true, name: true, slug: true } } } } },
       })
     : [];
   const sourceMap = new Map(sources.map(s => [s.id, s]));
+  const visibleSourceJobs = sourceJobs.filter(j => {
+    const srcId = extractSourceId(j.payloadJson);
+    const src = srcId ? sourceMap.get(srcId) : null;
+    return visible(src?.dataset.project.id);
+  });
 
   const completedMap = Object.fromEntries(completedCounts.map(r => [r.type, r._count]));
 
@@ -111,7 +125,7 @@ export default async function UploadsPage() {
   }
 
   // Transform sync jobs → QueueItem
-  const syncItems: QueueItem[] = sourceJobs.map(job => {
+  const syncItems: QueueItem[] = visibleSourceJobs.map(job => {
     const srcId = extractSourceId(job.payloadJson);
     const src   = srcId ? sourceMap.get(srcId) ?? null : null;
     const dest  = src ? `${src.dataset.project.name} → ${src.dataset.name}` : null;
@@ -135,8 +149,8 @@ export default async function UploadsPage() {
     };
   });
 
-  const previewItems = previewJobs.map(uploadToItem);
-  const importItems  = importJobs.map(uploadToItem);
+  const previewItems = visiblePreviewJobs.map(uploadToItem);
+  const importItems  = visibleImportJobs.map(uploadToItem);
 
   const failedCount = [...previewItems, ...importItems, ...syncItems].filter(i => i.status === "FAILED").length;
 
