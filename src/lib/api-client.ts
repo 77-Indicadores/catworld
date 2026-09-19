@@ -22,6 +22,11 @@ export const ERROR_HINTS: Record<string, string> = {
   UNSAFE_SQL: "Só consultas de leitura (SELECT) são permitidas.",
   NOT_FOUND: "Não encontrado. Pode ter sido removido.",
   DATASET_NOT_FOUND: "Dataset não encontrado. Pode ter sido removido.",
+  SUPERVISOR_NOT_RUNNING: "Nenhum supervisor de workers está ativo, então o comando não seria executado. Suba o serviço de workers.",
+  COMMAND_IN_PROGRESS: "Já há um comando em andamento para este worker. Espere terminar.",
+  COMMAND_NOT_CANCELLABLE: "O comando já foi aceito pelo supervisor e não pode mais ser cancelado.",
+  PROFILE_NOT_FOUND: "Perfil de worker não encontrado. Pode ter sido removido.",
+  PROFILE_RUNNING: "O worker deste perfil está em execução. Desabilite o perfil, espere ele parar e então remova.",
   NETWORK: "Sem conexão com o servidor. Verifique sua rede e tente de novo.",
   INTERNAL_ERROR: "Erro interno do servidor.",
 };

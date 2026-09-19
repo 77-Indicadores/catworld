@@ -22,7 +22,7 @@ const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 /** POSTs que so leem/testam (nao mudam estado): nao contam como escrita. */
 const READ_ONLY_POST = /\/(queries(\/export)?|query|test)$|^\/api\/v1\/(queries|connections\/test)/;
 const DATA_READ = /^\/api\/odata\/|^\/api\/v1\/tables\/[^/]+\/rows$|^\/api\/v1\/queries(\/export)?$|^\/api\/v1\/dataset-sources\/[^/]+\/query$/;
-const ADMIN_READ = /^\/api\/v1\/(tokens|users|database-users|connections|storage-servers|audit-events|settings)(\/|$)/;
+const ADMIN_READ = /^\/api\/v1\/(tokens|users|database-users|connections|storage-servers|audit-events|settings|workers|worker-profiles|system)(\/|$)/;
 const THROTTLE_MS = 60_000;
 
 export function clientIp(request: { headers: Headers }): string | null {
