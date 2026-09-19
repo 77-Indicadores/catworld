@@ -35,6 +35,14 @@ export function auditRequestBegin(): Store {
 }
 
 export function auditRequestStart(store: Store, request: NextRequest, actor: { type: "user" | "token"; id: string }): void {
+  try {
+    startEvent(store, request, actor);
+  } catch {
+    // auditoria nunca derruba a requisicao
+  }
+}
+
+function startEvent(store: Store, request: NextRequest, actor: { type: "user" | "token"; id: string }): void {
   const { pathname } = request.nextUrl;
   if (!isAuditedWrite(request.method, pathname)) return;
   store.eventId = prisma.auditEvent
@@ -73,6 +81,14 @@ const authFailSeen = new Map<string, number>();
 const AUTH_FAIL_WINDOW_MS = 10_000;
 
 export function auditAuthFailure(request: NextRequest, code: string): void {
+  try {
+    authFailure(request, code);
+  } catch {
+    // auditoria nunca derruba a requisicao
+  }
+}
+
+function authFailure(request: NextRequest, code: string): void {
   const ip = clientIp(request) ?? "unknown";
   const now = Date.now();
   if (now - (authFailSeen.get(ip) ?? 0) < AUTH_FAIL_WINDOW_MS) return; // no maximo 1 evento por IP a cada 10s
