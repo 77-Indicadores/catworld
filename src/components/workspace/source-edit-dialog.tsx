@@ -1,9 +1,9 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { Cron } from "croner";
 import { Pencil, Play } from "lucide-react";
 import { apiErrorText } from "@/lib/api-client";
+import { CronPreview } from "./cron-field";
 
 type Column = { originalName: string; sqlName: string; sqlType: string };
 type Source = {
@@ -19,23 +19,6 @@ type Source = {
   sourceSql?: string | null;
   connection: { id: string; name: string };
 };
-
-function CronPreview({ cron }: { cron: string }) {
-  try {
-    const c = new Cron(cron.trim(), { timezone: "UTC" });
-    const n1 = c.nextRun();
-    const n2 = n1 ? c.nextRun(n1) : null;
-    const fmt = (d: Date) =>
-      d.toLocaleString("pt-BR", { timeZone: "UTC", dateStyle: "short", timeStyle: "short" }) + " UTC";
-    return (
-      <span className="label-text-alt mt-1 text-base-content/55">
-        Próximo: {n1 ? fmt(n1) : "—"}{n2 ? ` · depois: ${fmt(n2)}` : ""}
-      </span>
-    );
-  } catch {
-    return <span className="label-text-alt mt-1 text-warning">Expressão cron inválida</span>;
-  }
-}
 
 export function SourceEditDialog({ source, onComplete }: { source: Source; onComplete: () => void }) {
   const ref = useRef<HTMLDialogElement>(null);
@@ -174,7 +157,7 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
                 onChange={(e) => setRefreshCron(e.target.value)}
                 disabled={mode === "live"}
               />
-              {mode !== "live" && refreshCron.trim() && <CronPreview cron={refreshCron} />}
+              {mode !== "live" && refreshCron.trim() && <CronPreview cron={refreshCron} onPick={setRefreshCron} />}
               {mode !== "live" && !refreshCron.trim() && (
                 <span className="label-text-alt mt-1 text-base-content/55">Vazio = sem agendamento automático</span>
               )}
@@ -211,7 +194,7 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
                     value={reconciliationCron}
                     onChange={(e) => setReconciliationCron(e.target.value)}
                   />
-                  {reconciliationCron.trim() && <CronPreview cron={reconciliationCron} />}
+                  {reconciliationCron.trim() && <CronPreview cron={reconciliationCron} onPick={setReconciliationCron} />}
                 </label>
                 {source.sourceKind === "query" ? (
                   <label className="form-control w-full">

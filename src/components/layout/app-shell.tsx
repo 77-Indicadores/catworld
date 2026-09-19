@@ -10,14 +10,8 @@ import {
 } from "lucide-react";
 
 type StorageStatus = { name: string; status: string | null; latencyMs: number | null } | null;
+import { ROLE_LABEL } from "@/lib/labels";
 export type ShellUser = { name: string; email: string; role: string } | null;
-
-const ROLE_LABEL: Record<string, string> = {
-  ADMIN: "Administrador",
-  DATA_MANAGER: "Gestor de dados",
-  ANALYST: "Analista",
-  VIEWER: "Leitor",
-};
 
 /** `roles` ausente = todos os papéis. Espelha o que as rotas exigem (Configurações e seus filhos: só ADMIN). */
 const nav: { href: string; label: string; icon: React.ElementType; roles?: string[] }[] = [

@@ -104,13 +104,14 @@ export function UploadFlow({
           createBody.rowCount = browserPreview.rowCount;
         }
 
+        if (!/\.(csv|xlsx|xls)$/i.test(job.file.name)) throw new Error("Formato não suportado. Use CSV, XLSX ou XLS.");
         const first = await fetch("/api/v1/uploads", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(createBody),
         });
         const b = await first.json();
-        if (!first.ok) throw new Error(apiErrorText(b, "Falha ao criar upload"));
+        if (!first.ok) throw new Error(apiErrorText(b, "Falha ao criar upload", first.status));
 
         if (b.data.skip) {
           update({ status: "completed", statusLabel: "Concluído (sem alterações)" });
@@ -127,14 +128,13 @@ export function UploadFlow({
           headers: { "content-type": job.file.type || "application/octet-stream" },
           body: job.file,
         });
-        if (!r.ok) throw new Error("Falha ao enviar arquivo para storage");
+        if (!r.ok) throw new Error(apiErrorText(await r.json().catch(() => null), "Falha ao enviar o arquivo. Tente de novo.", r.status));
 
         // 3) Notify uploaded — if browser preview was set, server skips PREVIEW_UPLOAD
         //    and queues IMPORT_UPLOAD directly (no poll for preview needed)
         const notifyRes = await fetch(`/api/v1/uploads/${uploadId}?action=uploaded`, { method: "POST" });
         if (!notifyRes.ok) {
-          const errBody = await notifyRes.text().catch(() => "");
-          throw new Error(`Falha ao notificar upload concluído (${notifyRes.status})${errBody ? `: ${errBody}` : ""}`);
+          throw new Error(apiErrorText(await notifyRes.json().catch(() => null), "Não foi possível iniciar o processamento do arquivo.", notifyRes.status));
         }
 
         update({ status: "importing", statusLabel: "Importando..." });
@@ -160,7 +160,7 @@ export function UploadFlow({
             }),
           });
           const confirmBody = await confirmRes.json();
-          if (!confirmRes.ok) throw new Error(apiErrorText(confirmBody, "Falha ao confirmar"));
+          if (!confirmRes.ok) throw new Error(apiErrorText(confirmBody, "Falha ao confirmar", confirmRes.status));
 
           await pollForCompletion(uploadId, (label) => update({ statusLabel: label }));
         }

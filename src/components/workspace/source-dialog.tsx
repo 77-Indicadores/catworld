@@ -1,20 +1,8 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { Cron } from "croner";
 import { Cable, CheckCircle2, CircleSlash, DatabaseZap, GitMerge, Play, Plus, RefreshCw, Search, Table2 } from "lucide-react";
 import { apiErrorText } from "@/lib/api-client";
-
-function CronPreview({ cron }: { cron: string }) {
-  try {
-    const c = new Cron(cron.trim(), { timezone: "UTC" });
-    const n1 = c.nextRun();
-    const n2 = n1 ? c.nextRun(n1) : null;
-    const fmt = (d: Date) => d.toLocaleString("pt-BR", { timeZone: "UTC", dateStyle: "short", timeStyle: "short" }) + " UTC";
-    return <span className="label-text-alt mt-1 text-base-content/55">Próximo: {n1 ? fmt(n1) : "—"}{n2 ? ` · depois: ${fmt(n2)}` : ""}</span>;
-  } catch {
-    return <span className="label-text-alt mt-1 text-warning">Expressão cron inválida</span>;
-  }
-}
+import { CronPreview } from "./cron-field";
 
 type Connection = { id: string; name: string; provider: string; server: string; databaseName: string };
 type SchemaRow = { schema: string };
@@ -292,7 +280,7 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
                   value={refreshCron}
                   onChange={(e) => setRefreshCron(e.target.value)}
                 />
-                {mode !== "live" && refreshCron.trim() && <CronPreview cron={refreshCron} />}
+                {mode !== "live" && refreshCron.trim() && <CronPreview cron={refreshCron} onPick={setRefreshCron} />}
               </Field>
             </div>
           )}

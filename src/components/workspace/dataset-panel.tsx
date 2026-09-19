@@ -1,6 +1,5 @@
 "use client";
 import { useRef, useState } from "react";
-import { Cron } from "croner";
 import { Cable, ChevronDown, Code2, Database, DatabaseZap, Pencil, Plus, RefreshCw, Search, Server, Table2, ToggleLeft, ToggleRight, Trash2, UploadCloud } from "lucide-react";
 // Note: Pencil still used in GroupEditDialog and SourceEditDialog
 import { CopyableId } from "@/components/ui/copyable-id";
@@ -12,6 +11,7 @@ import { SourceEditDialog } from "./source-edit-dialog";
 import { PowerBIDialog } from "./powerbi-dialog";
 import { useApiAction, useFeedback } from "@/components/ui/feedback";
 import { apiErrorText } from "@/lib/api-client";
+import { CronPreview } from "./cron-field";
 
 type Source = {
   id: string; name: string; mode: string; sourceKind: string;
@@ -239,18 +239,6 @@ function BatchGroupRow({ groupId, datasetId, sources, tables, onSelectTable, onC
   );
 }
 
-function CronPreview({ cron }: { cron: string }) {
-  try {
-    const c = new Cron(cron.trim(), { timezone: "UTC" });
-    const n1 = c.nextRun();
-    const n2 = n1 ? c.nextRun(n1) : null;
-    const fmt = (d: Date) => d.toLocaleString("pt-BR", { timeZone: "UTC", dateStyle: "short", timeStyle: "short" }) + " UTC";
-    return <span className="label-text-alt mt-1 text-base-content/55">Próximo: {n1 ? fmt(n1) : "—"}{n2 ? ` · depois: ${fmt(n2)}` : ""}</span>;
-  } catch {
-    return <span className="label-text-alt mt-1 text-warning">Expressão cron inválida</span>;
-  }
-}
-
 // ── Dialog to edit mode/cron + manage tables for a batch group ───────────
 function GroupEditDialog({ groupId, datasetId, connectionId, connectionName, sourceSchema, mode: initMode, initRefreshCron, sources, tables, onComplete }: {
   groupId: string; datasetId: string; connectionId: string; connectionName: string; sourceSchema: string | null;
@@ -353,7 +341,7 @@ function GroupEditDialog({ groupId, datasetId, connectionId, connectionName, sou
                 onChange={e => setRefreshCron(e.target.value)}
                 disabled={mode === "live"}
               />
-              {mode !== "live" && refreshCron.trim() && <CronPreview cron={refreshCron} />}
+              {mode !== "live" && refreshCron.trim() && <CronPreview cron={refreshCron} onPick={setRefreshCron} />}
               {mode !== "live" && !refreshCron.trim() && (
                 <span className="label-text-alt mt-1 text-base-content/55">Vazio = sem agendamento automático</span>
               )}
@@ -600,7 +588,7 @@ function DerivedCreateDialog({ datasetId, onComplete }: { datasetId: string; onC
                 value={refreshCron}
                 onChange={e => setRefreshCron(e.target.value)}
               />
-              {refreshCron.trim() ? <CronPreview cron={refreshCron} /> : (
+              {refreshCron.trim() ? <CronPreview cron={refreshCron} onPick={setRefreshCron} /> : (
                 <span className="label-text-alt mt-1 text-base-content/55">Vazio = sem agendamento automático</span>
               )}
             </label>
@@ -677,7 +665,7 @@ function DerivedEditDialog({ dt, onComplete }: { dt: DerivedTable; onComplete: (
                 value={refreshCron}
                 onChange={e => setRefreshCron(e.target.value)}
               />
-              {refreshCron.trim() ? <CronPreview cron={refreshCron} /> : (
+              {refreshCron.trim() ? <CronPreview cron={refreshCron} onPick={setRefreshCron} /> : (
                 <span className="label-text-alt mt-1 text-base-content/55">Vazio = sem agendamento automático</span>
               )}
             </label>

@@ -301,7 +301,8 @@ export function ProjectWorkspace({ project, publicOrigin, storageServers }: { pr
 
   useEffect(() => {
     if (!hasActiveRefresh) return;
-    const id = window.setInterval(() => router.refresh(), 3000);
+    // Aba escondida não precisa atualizar a cada 3 s: retoma quando voltar a ficar visível.
+    const id = window.setInterval(() => { if (!document.hidden) router.refresh(); }, 3000);
     return () => window.clearInterval(id);
   }, [hasActiveRefresh, router]);
 
