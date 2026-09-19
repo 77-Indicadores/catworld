@@ -7,6 +7,8 @@ import type { WorkspaceSource as Source, WorkspaceTable as Table } from "@/lib/w
 import { Time } from "@/components/ui/time";
 import { GroupEditDialog } from "./group-edit-dialog";
 import { refreshText, sourceBadge } from "./helpers";
+import { normalizeRunStatus, worstFreshness } from "@/lib/present";
+import { sourceFreshness } from "@/lib/workspace/present";
 
 // ── Batch group row (N tables from one import) ─────────────────────────────
 export function BatchGroupRow({ groupId, datasetId, sources, tables, onSelectTable, onChanged }: {
@@ -17,12 +19,17 @@ export function BatchGroupRow({ groupId, datasetId, sources, tables, onSelectTab
   const [refreshing, setRefreshing] = useState(false);
   const rep = sources[0]!; // representative source — all share mode/policy/status/connection
   const activeSources = sources.filter(s => s.active);
-  const failedSources = sources.filter(s => s.active && s.lastStatus === "failed");
-  const runningSources = sources.filter(s => s.active && (s.lastStatus === "running" || s.lastStatus === "queued"));
-  const completedSources = sources.filter(s => s.active && (s.lastStatus === "completed" || s.lastStatus === "ready"));
+  const runStatus = (s: Source) => normalizeRunStatus(s.lastStatus);
+  const failedSources = sources.filter(s => s.active && runStatus(s) === "failed");
+  const runningSources = sources.filter(s => s.active && (runStatus(s) === "running" || runStatus(s) === "queued"));
+  const completedSources = sources.filter(s => s.active && runStatus(s) === "ok");
 
-  const groupStatus = failedSources.length ? "error" : runningSources.length ? "warning" : activeSources.length ? "healthy" : "inactive";
-  const groupLabel = groupStatus === "error" ? "Erro" : groupStatus === "warning" ? "Processando" : groupStatus === "healthy" ? "Pronto" : "Pausado";
+  // Estado do grupo = o pior estado entre as fontes ativas (mesma regra de frescor de todas as telas)
+  const groupFresh = worstFreshness(activeSources.map(s => sourceFreshness(s)));
+  const groupStatus = groupFresh?.tone ?? "inactive";
+  const groupLabel = groupFresh?.label ?? "Pausada";
+  const latestRefresh = sources.map(s => s.lastRefreshedAt).filter((v): v is string => !!v).sort().at(-1) ?? null;
+  const failingWithError = sources.filter(s => s.lastError && s.active && runStatus(s) === "failed");
   const groupSummary = failedSources.length
     ? `${completedSources.length} concluida${completedSources.length !== 1 ? "s" : ""} · ${failedSources.length} com erro`
     : runningSources.length
@@ -72,10 +79,11 @@ export function BatchGroupRow({ groupId, datasetId, sources, tables, onSelectTab
             {tables.length} tabela{tables.length !== 1 ? "s" : ""}
             {" · " + (rep.mode === "extract" ? refreshText(rep.refreshCron) : "Ao vivo")}
             {rep.nextRefreshAt && rep.mode === "extract" && rep.refreshCron && (
-              new Date(rep.nextRefreshAt) < new Date()
+              groupFresh?.kind === "stale"
                 ? <span className="text-warning"> · próx. sync atrasado</span>
                 : <span> · próx. <Time iso={rep.nextRefreshAt} /></span>
             )}
+            {latestRefresh && <span> · última <Time iso={latestRefresh} relative /></span>}
             {" · " + groupSummary}
           </p>
         </div>
@@ -111,9 +119,10 @@ export function BatchGroupRow({ groupId, datasetId, sources, tables, onSelectTab
       </div>
 
       {/* Erros */}
-      {sources.some(s => s.lastError) && (
-        <div className="mt-2 ml-10 rounded bg-error/8 px-2 py-1 font-mono text-[11px] text-error">
-          {(failedSources[0]?.sourceTable ?? failedSources[0]?.name ?? sources.find(s => s.lastError)?.name) + ": "}{failedSources[0]?.lastError ?? sources.find(s => s.lastError)?.lastError}
+      {failingWithError.length > 0 && (
+        <div className="mt-2 ml-10 space-y-1 rounded bg-error/8 px-2 py-1 font-mono text-[11px] text-error" role="alert">
+          {failingWithError.length > 1 && <p className="font-sans font-medium">{failingWithError.length} tabelas com erro</p>}
+          {failingWithError.map(s => <p key={s.id}>{(s.sourceTable ?? s.name) + ": " + s.lastError}</p>)}
         </div>
       )}
 

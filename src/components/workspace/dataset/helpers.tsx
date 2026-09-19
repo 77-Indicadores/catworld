@@ -1,6 +1,7 @@
 "use client";
 import type { WorkspaceSource as Source, WorkspaceTable as Table } from "@/lib/workspace/types";
 import { presentCount } from "@/lib/present";
+import { sourceFreshness } from "@/lib/workspace/present";
 
 // A group is either:
 //   - Multiple table sources that share a sourceGroupId (batch import)
@@ -33,30 +34,9 @@ export function buildGroups(tables: Table[]): SourceGroup[] {
   return groups;
 }
 
-export function isOverdue(source: Source): boolean {
-  if (source.lastStatus !== "completed" && source.lastStatus !== "ready") return false;
-  if (!source.nextRefreshAt || !source.refreshCron) return false;
-  return new Date(source.nextRefreshAt) < new Date();
-}
-
-export function statusKind(source: Source): "healthy" | "warning" | "error" | "inactive" {
-  if (source.lastStatus === "failed") return "error";
-  if (source.lastStatus === "running" || source.lastStatus === "queued") return "warning";
-  if (source.lastStatus === "completed" || source.lastStatus === "ready") {
-    if (isOverdue(source)) return "warning";
-    return "healthy";
-  }
-  return "inactive";
-}
-
 export function sourceBadge(source: Source) {
-  if (!source.active) return { status: "inactive" as const, label: "Pausado" };
-  const kind = statusKind(source);
-  const overdue = isOverdue(source);
-  return {
-    status: kind,
-    label: kind === "error" ? "Erro" : kind === "warning" ? (overdue ? "Atrasado" : "Processando") : kind === "healthy" ? "Pronto" : "Pendente",
-  };
+  const f = sourceFreshness(source);
+  return { status: f.tone, label: f.label };
 }
 
 export function refreshText(cron: string | null) {

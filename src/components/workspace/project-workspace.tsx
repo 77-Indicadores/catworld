@@ -9,9 +9,10 @@ import { TablePanel } from "./table-panel";
 import { QueryPanel } from "./query-panel";
 import { DatasetPanel } from "./dataset-panel";
 import { apiErrorText } from "@/lib/api-client";
-import type { StorageServerOption, WorkspaceColumn as Column, WorkspaceDataset as Dataset, WorkspaceDerived as DerivedTable, WorkspaceProject as Project, WorkspaceSource as TableSource, WorkspaceTable as Table } from "@/lib/workspace/types";
+import type { StorageServerOption, WorkspaceDataset as Dataset, WorkspaceProject as Project, WorkspaceTable as Table } from "@/lib/workspace/types";
 import { Time } from "@/components/ui/time";
 import { formatInt } from "@/lib/present";
+import { sourceFreshness } from "@/lib/workspace/present";
 
 
 type Tab =
@@ -34,16 +35,6 @@ function CopyId({ label, id, className }: { label: string; id: string; className
       <span className="font-mono truncate">{label}: {id}</span>
     </button>
   );
-}
-
-function sourceStatus(source: TableSource): "healthy" | "warning" | "error" | "inactive" {
-  if (source.lastStatus === "failed") return "error";
-  if (source.lastStatus === "queued" || source.lastStatus === "running") return "warning";
-  if (source.lastStatus === "completed" || source.lastStatus === "ready") {
-    if (source.nextRefreshAt && source.refreshCron && new Date(source.nextRefreshAt) < new Date()) return "warning";
-    return "healthy";
-  }
-  return "inactive";
 }
 
 function MetadataPanel({ table, dataset, onChanged }: { table: Table; dataset: Dataset; onChanged: () => void }) {
@@ -103,7 +94,7 @@ function MetadataPanel({ table, dataset, onChanged }: { table: Table; dataset: D
         {table.source && (
           <div className="flex justify-between gap-2">
             <span className="text-base-content/50">Status</span>
-            <StatusBadge status={sourceStatus(table.source)} label={sourceStatus(table.source) === "warning" && table.source.lastStatus === "completed" ? "Atrasado" : (table.source.lastStatus ?? "Pronta")} />
+            <StatusBadge status={sourceFreshness(table.source).tone} label={sourceFreshness(table.source).label} />
           </div>
         )}
       </div>

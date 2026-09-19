@@ -7,32 +7,16 @@ import type { WorkspaceDerived as DerivedTable } from "@/lib/workspace/types";
 import { Time } from "@/components/ui/time";
 import { DerivedEditDialog } from "./derived-dialogs";
 import { fmtRows } from "./helpers";
-
-// ── Derived tables helpers ─────────────────────────────────────────────────
-export function derivedStatusKind(dt: DerivedTable): "healthy" | "warning" | "error" | "inactive" {
-  if (!dt.active) return "inactive";
-  if (dt.lastStatus === "failed") return "error";
-  if (dt.lastStatus === "queued" || dt.lastStatus === "running") return "warning";
-  if (dt.lastStatus === "ok") return "healthy";
-  return "inactive";
-}
-export function derivedStatusLabel(dt: DerivedTable): string {
-  if (!dt.active) return "Pausado";
-  if (dt.lastStatus === "failed") return "Erro";
-  if (dt.lastStatus === "running") return "Processando";
-  if (dt.lastStatus === "queued") return "Na fila";
-  if (dt.lastStatus === "ok") return "Pronto";
-  return "Pendente";
-}
-
+import { derivedFreshness } from "@/lib/workspace/present";
 
 export function DerivedRow({ dt, schemaName, onSelectTable, onChanged }: {
   dt: DerivedTable; schemaName: string; onSelectTable: (id: string) => void; onChanged: () => void;
 }) {
   const { confirm: askConfirm } = useFeedback(); const runAction = useApiAction();
   const [refreshing, setRefreshing] = useState(false);
-  const status = derivedStatusKind(dt);
-  const label = derivedStatusLabel(dt);
+  const fresh = derivedFreshness(dt);
+  const status = fresh.tone;
+  const label = fresh.label;
   const rowCount = dt.targetTable?.rowCount ?? dt.lastRowCount;
 
   async function triggerRefresh() {

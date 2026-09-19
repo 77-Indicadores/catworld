@@ -61,7 +61,7 @@ export function presentRefreshFreshness(src: RefreshInput, now: Date = new Date(
   if (status === "queued") return F("running", "Na fila", "warning", 4);
   if (src.mode === "live") return F("live", "Ao vivo", "healthy", 2);
   if (!src.refreshCron && !src.nextRefreshAt) {
-    return status === "ok" || src.lastRefreshedAt ? F("manual", "Manual", "inactive", 1) : F("empty", "Aguardando 1ª carga", "warning", 3);
+    return status === "ok" || src.lastRefreshedAt ? F("manual", "Manual", "healthy", 1, "Sem agenda: atualiza só quando você pedir") : F("empty", "Aguardando 1ª carga", "warning", 3);
   }
   if (src.nextRefreshAt) {
     const next = Date.parse(src.nextRefreshAt);

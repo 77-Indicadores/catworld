@@ -6,6 +6,8 @@ import { SourceEditDialog } from "../source-edit-dialog";
 import { useApiAction, useFeedback } from "@/components/ui/feedback";
 import type { WorkspaceSource as Source, WorkspaceTable as Table } from "@/lib/workspace/types";
 import { fmtRows, refreshText, sourceBadge } from "./helpers";
+import { sourceOriginLabel } from "@/lib/workspace/present";
+import { Time } from "@/components/ui/time";
 
 // ── Single source row (query fonte or legacy without groupId) ──────────────
 export function SingleSourceRow({ source: s, table: t, onSelectTable, onChanged }: {
@@ -46,9 +48,10 @@ export function SingleSourceRow({ source: s, table: t, onSelectTable, onChanged 
             <StatusBadge status={sourceBadge(s).status} label={sourceBadge(s).label} />
           </div>
           <p className="truncate text-xs text-base-content/40">
-            {s.connection.name} · Consulta personalizada
+            {s.connection.name} · {sourceOriginLabel(s)}
             {s.mode === "extract" && " · " + refreshText(s.refreshCron)}
             {fmtRows(s.lastRowCount) && " · " + fmtRows(s.lastRowCount) + " linhas"}
+            {s.lastRefreshedAt && <> · atualizada <Time iso={s.lastRefreshedAt} relative /></>}
           </p>
         </div>
         <button onClick={() => onSelectTable(t.id)} className="btn btn-ghost btn-xs gap-1 shrink-0">
