@@ -563,7 +563,7 @@ function DerivedCreateDialog({ datasetId, onComplete }: { datasetId: string; onC
       body: JSON.stringify({ name, querySql, refreshCron: refreshCron.trim() || null, triggerNow: runNow }),
     });
     setSaving(false);
-    if (!r.ok) { const b = await r.json().catch(() => ({})); setError(b.error ?? "Erro ao criar"); return; }
+    if (!r.ok) { const b = await r.json().catch(() => ({})); setError(b.error?.message ?? "Erro ao criar"); return; }
     close(); onComplete();
   }
 
@@ -643,7 +643,7 @@ function DerivedEditDialog({ dt, onComplete }: { dt: DerivedTable; onComplete: (
       body: JSON.stringify({ name, querySql, refreshCron: refreshCron.trim() || null }),
     });
     setSaving(false);
-    if (!r.ok) { const b = await r.json().catch(() => ({})); setError(b.error ?? "Erro ao salvar"); return; }
+    if (!r.ok) { const b = await r.json().catch(() => ({})); setError(b.error?.message ?? "Erro ao salvar"); return; }
     close(); onComplete();
   }
 

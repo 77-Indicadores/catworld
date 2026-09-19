@@ -1,5 +1,6 @@
 import { prisma } from "@/server/db";
 import type { Actor } from "./actor";
+import { ApiError } from "@/server/http";
 
 export async function canAccess(actor: Actor, permission: "READ" | "WRITE", projectId?: string, datasetId?: string) {
   if (actor.type === "user" && actor.role === "ADMIN") return true;
@@ -11,6 +12,12 @@ export async function canAccess(actor: Actor, permission: "READ" | "WRITE", proj
     if (grant.scopeType === "PROJECT") return Boolean(projectId && grant.projectId === projectId);
     return Boolean(datasetId && grant.datasetId === datasetId);
   });
+}
+/** Lanca 403 FORBIDDEN se o ator nao tem a permissao no dataset (mesmo criterio de canAccess). */
+export async function assertDatasetAccess(actor: Actor, permission: "READ" | "WRITE", dataset: { id: string; projectId: string }) {
+  if (!(await canAccess(actor, permission, dataset.projectId, dataset.id))) {
+    throw new ApiError(403, "FORBIDDEN", "Sem permissão no dataset");
+  }
 }
 export async function hasAnyWriteGrant(actor: Actor): Promise<boolean> {
   if (actor.type === "user" && ["ADMIN", "DATA_MANAGER"].includes(actor.role)) return true;
