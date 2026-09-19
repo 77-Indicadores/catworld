@@ -2,6 +2,7 @@ import { ZodError } from "zod";
 import { randomUUID } from "node:crypto";
 import * as Sentry from "@sentry/nextjs";
 import { NextResponse } from "next/server";
+import { auditRequestFailed } from "@/server/audit-request";
 
 export function ok<T>(data: T, meta?: Record<string, unknown>, status = 200) {
   return NextResponse.json({ data: serialize(data), meta: meta ?? null, error: null }, { status });
@@ -35,6 +36,7 @@ export function queryTimeoutError(seconds?: number) {
 
 export async function handleApiError(error: unknown, context?: Record<string, unknown>) {
   if (error instanceof ApiError) {
+    auditRequestFailed(error.status, error.code);
     const res = fail(error.status, error.code, error.message, error.details);
     const retry = (error.details as { retryAfterSeconds?: number } | undefined)?.retryAfterSeconds;
     if (error.status === 429 && retry) res.headers.set("Retry-After", String(retry));
@@ -42,6 +44,7 @@ export async function handleApiError(error: unknown, context?: Record<string, un
   }
   // Entrada invalida e erro do CLIENTE (400), nao falha do servidor: nao vai para o Sentry.
   if (error instanceof ZodError) {
+    auditRequestFailed(400, "VALIDATION_ERROR");
     return fail(400, "VALIDATION_ERROR", "Requisição inválida.", {
       issues: error.issues.map((i) => ({ path: i.path.join("."), code: i.code, message: i.message })),
     });
@@ -54,6 +57,7 @@ export async function handleApiError(error: unknown, context?: Record<string, un
     const target = (error as { meta?: { target?: unknown } }).meta?.target;
     return fail(409, "CONFLICT", "Já existe um registro com esses dados.", { fields: Array.isArray(target) ? target : undefined });
   }
+  auditRequestFailed(500, "INTERNAL_ERROR");
   // Falha real: o detalhe fica no log/Sentry, com um identificador que o cliente pode informar ao suporte.
   const errorId = randomUUID().slice(0, 8);
   Sentry.withScope((scope) => {

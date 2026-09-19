@@ -4,6 +4,7 @@ import { prisma } from "@/server/db";
 import { ApiError } from "@/server/http";
 import { hashToken } from "@/server/security/crypto";
 import { TtlCache } from "@/server/cache/ttl-cache";
+import { auditAuthFailure, auditRequestBegin, auditRequestStart } from "@/server/audit-request";
 import { checkRateLimit } from "@/server/query/protection";
 
 export type Actor = { type: "user" | "token"; id: string; role: string; principal: string };
@@ -28,7 +29,15 @@ const TOKEN_TOUCH_MS = 60_000; // lastUsedAt: no maximo 1 escrita por minuto por
 
 /** `rateLimit: false` so para caminhos que paginam pesado por natureza (OData). */
 export async function resolveActor(request?: NextRequest, opts: { rateLimit?: boolean } = {}): Promise<Actor> {
-  const actor = await identify(request);
+  const auditStore = request ? auditRequestBegin() : null;
+  let actor: Actor;
+  try {
+    actor = await identify(request);
+  } catch (e) {
+    if (request && e instanceof ApiError && e.status === 401) auditAuthFailure(request, e.code);
+    throw e;
+  }
+  if (request && auditStore) auditRequestStart(auditStore, request, actor);
   if (request && opts.rateLimit !== false) checkRateLimit(actor.principal, "default");
   return actor;
 }
