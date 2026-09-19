@@ -7,8 +7,9 @@ import { fmtCellStr } from "@/lib/fmt-cell";
 import { apiErrorText } from "@/lib/api-client";
 import type { WorkspaceSource as Source, WorkspaceTable as Table } from "@/lib/workspace/types";
 import { Time } from "@/components/ui/time";
-import { formatInt } from "@/lib/present";
+import { formatInt, presentCount } from "@/lib/present";
 import { sourceFreshness, sourceOriginLabel } from "@/lib/workspace/present";
+import { ResultGrid } from "./result-grid";
 
 
 function sourceMode(source: Source) {
@@ -119,12 +120,25 @@ export function TablePanel({ datasetId, table, onChanged, compact }: { datasetId
           ) : rows.length === 0 ? (
             <div className="flex h-40 items-center justify-center text-sm text-base-content/40">Nenhuma linha para exibir.</div>
           ) : (
-            <table className="table table-zebra data-grid w-full">
-              <thead><tr>{table.columns.map(c => <th key={c.id} className="whitespace-nowrap">{c.sqlName}</th>)}</tr></thead>
-              <tbody>{rows.map((row, i) => <tr key={i}>{table.columns.map(c => <td className="whitespace-nowrap" key={c.id}>{fmtCellStr(row[c.sqlName])}</td>)}</tr>)}</tbody>
-            </table>
+            <ResultGrid
+              columns={table.columns.map(c => c.sqlName)}
+              rows={rows}
+              numericColumns={new Set(table.columns.filter(c => /^(BIGINT|INT|SMALLINT|TINYINT|DECIMAL|NUMERIC|FLOAT|REAL|MONEY)/i.test(c.sqlType)).map(c => c.sqlName))}
+              caption={`Dados de ${table.name}`}
+            />
           )}
         </div>
+        {!loading && rows.length > 0 && (() => {
+          const total = table.source?.mode === "live" ? null : presentCount(table.rowCount);
+          if (total && BigInt(rows.length) >= total.value) return null;
+          return (
+            <p role="status" className="shrink-0 border-t border-base-300 px-3 py-1.5 text-xs text-base-content/70">
+              {total
+                ? `Mostrando as primeiras ${formatInt(rows.length)} de ${total.exact} linhas. Para ver tudo, exporte ou use uma consulta SQL.`
+                : `Mostrando as primeiras ${formatInt(rows.length)} linhas (consulta ao vivo).`}
+            </p>
+          );
+        })()}
       </div>
     );
   }
