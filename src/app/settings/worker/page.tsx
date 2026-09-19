@@ -3,20 +3,26 @@ import { useEffect, useState } from "react";
 import { CheckCircle2, RefreshCw, Zap } from "lucide-react";
 import { PageHeader, Panel } from "@/components/ui/primitives";
 import { apiErrorText, apiRequest, errorMessage } from "@/lib/api-client";
+import { WorkersSection } from "@/components/settings/workers-section";
 
 type Settings = {
   max_heavy_jobs: number;
   max_syncs_per_storage: number;
   import_batch_delay_ms: number;
-  concurrency: number;
+  upload_max_bytes: number;
+  upload_xlsx_max_bytes: number;
+  stop_timeout_ms: number;
+  backoff_max_ms: number;
 };
+
+const MB = 1024 * 1024;
 
 type Preset = {
   id: string;
   label: string;
   emoji: string;
   description: string;
-  values: Omit<Settings, "concurrency">;
+  values: Pick<Settings, "max_heavy_jobs" | "max_syncs_per_storage" | "import_batch_delay_ms">;
 };
 
 const PRESETS: Preset[] = [
@@ -151,6 +157,10 @@ export default function WorkerPage() {
         max_heavy_jobs: settings.max_heavy_jobs,
         max_syncs_per_storage: settings.max_syncs_per_storage,
         import_batch_delay_ms: settings.import_batch_delay_ms,
+        upload_max_bytes: settings.upload_max_bytes,
+        upload_xlsx_max_bytes: settings.upload_xlsx_max_bytes,
+        stop_timeout_ms: settings.stop_timeout_ms,
+        backoff_max_ms: settings.backoff_max_ms,
       }),
     });
     setSaving(false);
@@ -188,9 +198,11 @@ export default function WorkerPage() {
     <div className="space-y-6">
       <PageHeader
         eyebrow="Configurações"
-        title="Performance do Worker"
-        description="Controla quantos jobs rodam em paralelo e com que intensidade. Mudanças entram em vigor em até 10 segundos, sem restart."
+        title="Workers"
+        description="Quais workers rodam e o que cada um processa, com que intensidade e quando reiniciar. Tudo é configurado aqui; nenhuma variável de ambiente é usada."
       />
+
+      <WorkersSection />
 
       {saved && (
         <div className="alert alert-success alert-soft">
@@ -268,16 +280,41 @@ export default function WorkerPage() {
           </div>
         </Panel>
 
-        {/* Info: concorrência */}
+        {/* Limites de upload */}
         <Panel>
-          <div className="p-5 space-y-1">
-            <div className="flex items-center justify-between">
-              <span className="text-sm font-medium">Loops de worker ativos</span>
-              <span className="font-mono text-sm font-semibold">{settings.concurrency}</span>
+          <div className="p-5 space-y-4">
+            <h2 className="font-semibold text-sm text-base-content/70 uppercase tracking-wide">Limites de upload</h2>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <label className="fieldset">
+                <span className="fieldset-legend">Tamanho máximo do arquivo (MB)</span>
+                <input type="number" min={1} max={2048} className="input w-full" value={Math.round(settings.upload_max_bytes / MB)} onChange={(e) => set("upload_max_bytes", Math.min(2048, Math.max(1, Number(e.target.value))) * MB)} />
+                <span className="label text-xs">Vale a partir do próximo envio. Máximo 2048 MB.</span>
+              </label>
+              <label className="fieldset">
+                <span className="fieldset-legend">Máximo para Excel (MB)</span>
+                <input type="number" min={1} max={2048} className="input w-full" value={Math.round(settings.upload_xlsx_max_bytes / MB)} onChange={(e) => set("upload_xlsx_max_bytes", Math.min(2048, Math.max(1, Number(e.target.value))) * MB)} />
+                <span className="label text-xs">Excel é lido inteiro na memória (cerca de 35 vezes o tamanho do arquivo). Prefira CSV para arquivos grandes.</span>
+              </label>
             </div>
-            <p className="text-xs text-base-content/50">
-              Definido pela variável de ambiente <code className="font-mono">CATWORLD_WORKER_CONCURRENCY</code>. Requer restart do worker para alterar.
-            </p>
+          </div>
+        </Panel>
+
+        {/* Reinício e recuperação */}
+        <Panel>
+          <div className="p-5 space-y-4">
+            <h2 className="font-semibold text-sm text-base-content/70 uppercase tracking-wide">Reinício e recuperação</h2>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <label className="fieldset">
+                <span className="fieldset-legend">Prazo do reinício seguro (minutos)</span>
+                <input type="number" min={1} max={60} className="input w-full" value={Math.round(settings.stop_timeout_ms / 60000)} onChange={(e) => set("stop_timeout_ms", Math.min(60, Math.max(1, Number(e.target.value))) * 60000)} />
+                <span className="label text-xs">Quanto esperar os jobs terminarem antes de forçar a parada. Passado o prazo, os jobs voltam para a fila.</span>
+              </label>
+              <label className="fieldset">
+                <span className="fieldset-legend">Espera máxima após uma falha (segundos)</span>
+                <input type="number" min={1} max={600} className="input w-full" value={Math.round(settings.backoff_max_ms / 1000)} onChange={(e) => set("backoff_max_ms", Math.min(600, Math.max(1, Number(e.target.value))) * 1000)} />
+                <span className="label text-xs">Um worker que cai é reiniciado com espera crescente (1 s, 2 s, 4 s…) até este limite.</span>
+              </label>
+            </div>
           </div>
         </Panel>
 
@@ -294,7 +331,8 @@ export default function WorkerPage() {
         <div className="p-5 space-y-2">
           <h2 className="font-semibold text-sm text-base-content/70 uppercase tracking-wide">Como funciona</h2>
           <ul className="text-sm text-base-content/65 space-y-1 list-disc list-inside">
-            <li>O worker relê as configs do banco antes de cada job — mudanças entram em vigor em até 10 s.</li>
+            <li>Estes limites e o intervalo de busca/memória de cada worker valem em até 10 s, sem reiniciar. Tipos de job e paralelismo de um worker só valem depois de reiniciá-lo.</li>
+            <li><strong>Reiniciar com segurança</strong> espera os jobs em andamento terminarem; <strong>reiniciar agora</strong> interrompe e os jobs recomeçam.</li>
             <li><strong>Jobs pesados</strong>: imports e syncs pesam 2; o worker não inicia um novo se o limite for atingido.</li>
             <li><strong>Syncs por storage</strong>: evita que um storage seja bombardeado com muitos syncs simultâneos.</li>
             <li><strong>Pausa entre batches</strong>: reduz pico de DTU/CPU sem alterar o throughput médio de dados grandes.</li>
