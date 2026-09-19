@@ -1,14 +1,15 @@
 ﻿import type { NextRequest } from "next/server";
 import { prisma } from "@/server/db";
 import { resolveActor } from "@/server/auth/actor";
-import { hasAnyWriteGrant } from "@/server/auth/permissions";
+import { assertUploadRead, assertUploadWrite } from "@/server/uploads/access";
 import { ApiError, handleApiError, ok } from "@/server/http";
 import { confirmUploadSchema, queueImportUpload, queuePreviewUpload } from "@/server/uploads/actions";
 import { storeUploadBody } from "@/server/uploads/store-upload-body";
 
 export async function GET(r: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
-    await resolveActor(r);
+    const actor = await resolveActor(r);
+    await assertUploadRead(actor, (await params).id);
     return ok(await prisma.upload.findUniqueOrThrow({ where: { id: (await params).id }, include: { dataset: true, table: true, jobs: true } }));
   } catch (e) {
     return handleApiError(e);
@@ -18,7 +19,7 @@ export async function GET(r: NextRequest, { params }: { params: Promise<{ id: st
 export async function PUT(r: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const actor = await resolveActor(r);
-    if (!await hasAnyWriteGrant(actor)) throw new ApiError(403, "FORBIDDEN", "Permissão insuficiente");
+    await assertUploadWrite(actor, (await params).id);
     const upload = await prisma.upload.findUniqueOrThrow({ where: { id: (await params).id } });
     if (!r.body) throw new ApiError(400, "EMPTY_BODY", "Corpo da requisição vazio");
 
@@ -32,6 +33,7 @@ export async function POST(r: NextRequest, { params }: { params: Promise<{ id: s
     const actor = await resolveActor(r);
     const id = (await params).id;
     const action = r.nextUrl.searchParams.get("action");
+    if (action !== "confirm") await assertUploadWrite(actor, id); // confirm valida WRITE no dataset de destino
 
     if (action === "uploaded") {
       // If the client already computed the preview (e.g. via DuckDB-WASM), skip the PREVIEW_UPLOAD

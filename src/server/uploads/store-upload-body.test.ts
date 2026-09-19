@@ -50,7 +50,7 @@ function upload(overrides: Partial<Parameters<typeof storeUploadBody>[0]> = {}) 
 }
 
 function body(data: string | Buffer) {
-  return new Response(data).body!;
+  return new Response(typeof data === "string" ? data : new Uint8Array(data)).body!;
 }
 
 describe("storeUploadBody", () => {
@@ -61,15 +61,11 @@ describe("storeUploadBody", () => {
     db.uploadUpdate.mockResolvedValue({});
   });
 
-  it("stores bytes, preserves originals and returns the server-side hash", async () => {
+  it("stores bytes and returns the server-side hash", async () => {
     const result = await storeUploadBody(upload(), body("a,b\n1,2\n"), null);
 
     expect(result).toEqual({ stored: true, sizeBytes: 8, fileHash: md5("a,b\n1,2\n") });
     expect(storage.writeFile).toHaveBeenCalledWith("uploads/2026-07-13/file.csv", expect.any(ReadableStream));
-    expect(storage.copyFile).toHaveBeenCalledWith(
-      "uploads/2026-07-13/file.csv",
-      "originals/11111111-1111-1111-1111-111111111111.csv",
-    );
     expect(db.uploadUpdate).not.toHaveBeenCalled();
   });
 

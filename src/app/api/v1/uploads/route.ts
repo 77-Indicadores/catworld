@@ -3,18 +3,20 @@ import { randomUUID } from "node:crypto";
 import { extname } from "node:path";
 import { z } from "zod";
 import { resolveActor } from "@/server/auth/actor";
-import { hasAnyWriteGrant } from "@/server/auth/permissions";
+import { assertDatasetAccess, hasAnyWriteGrant } from "@/server/auth/permissions";
 import { prisma } from "@/server/db";
 import { env } from "@/server/env";
 import { ApiError, handleApiError, ok } from "@/server/http";
+import { uploadVisibilityWhere } from "@/server/uploads/access";
 import { uploadTarget } from "@/server/storage";
 import { checkRateLimit } from "@/server/query/protection";
 
 export async function GET(r: NextRequest) {
   try {
-    await resolveActor(r);
+    const actor = await resolveActor(r);
     return ok(
       await prisma.upload.findMany({
+        where: await uploadVisibilityWhere(actor),
         take: 100,
         orderBy: { createdAt: "desc" },
         include: { dataset: true, table: true },
@@ -70,6 +72,11 @@ export async function POST(r: NextRequest) {
       throw new ApiError(413, "XLSX_TOO_LARGE", `Arquivos XLSX/XLS acima de ${maxMb}MB nao sao suportados (lidos inteiros em memoria) — exporte como CSV.`);
     }
 
+    if (input.datasetId) {
+      const ds = await prisma.dataset.findUnique({ where: { id: input.datasetId }, select: { id: true, projectId: true } });
+      if (!ds) throw new ApiError(404, "DATASET_NOT_FOUND", "Dataset não encontrado");
+      await assertDatasetAccess(actor, "WRITE", ds);
+    }
     const blobName = `uploads/${new Date().toISOString().slice(0, 10)}/${randomUUID()}${extname(input.filename).toLowerCase()}`;
     const upload = await prisma.upload.create({
       data: {
