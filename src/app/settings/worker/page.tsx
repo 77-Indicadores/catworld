@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import { CheckCircle2, RefreshCw, Zap } from "lucide-react";
 import { PageHeader, Panel } from "@/components/ui/primitives";
-import { apiErrorText, apiRequest, errorMessage } from "@/lib/api-client";
+import { apiRequest, errorMessage } from "@/lib/api-client";
 import { WorkersSection } from "@/components/settings/workers-section";
 
 type Settings = {
@@ -150,25 +150,25 @@ export default function WorkerPage() {
     e.preventDefault();
     if (!settings) return;
     setSaving(true); setError(""); setSaved(false);
-    const r = await fetch("/api/v1/settings/worker", {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        max_heavy_jobs: settings.max_heavy_jobs,
-        max_syncs_per_storage: settings.max_syncs_per_storage,
-        import_batch_delay_ms: settings.import_batch_delay_ms,
-        upload_max_bytes: settings.upload_max_bytes,
-        upload_xlsx_max_bytes: settings.upload_xlsx_max_bytes,
-        stop_timeout_ms: settings.stop_timeout_ms,
-        backoff_max_ms: settings.backoff_max_ms,
-      }),
-    });
-    setSaving(false);
-    if (!r.ok) {
-      const b = await r.json().catch(() => ({}));
-      setError(apiErrorText(b, "Falha ao salvar"));
-    } else {
+    try {
+      await apiRequest("/api/v1/settings/worker", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          max_heavy_jobs: settings.max_heavy_jobs,
+          max_syncs_per_storage: settings.max_syncs_per_storage,
+          import_batch_delay_ms: settings.import_batch_delay_ms,
+          upload_max_bytes: settings.upload_max_bytes,
+          upload_xlsx_max_bytes: settings.upload_xlsx_max_bytes,
+          stop_timeout_ms: settings.stop_timeout_ms,
+          backoff_max_ms: settings.backoff_max_ms,
+        }),
+      });
       setSaved(true);
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setSaving(false);
     }
   }
 

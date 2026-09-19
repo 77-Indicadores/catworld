@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { CheckCircle2, Eye, LifeBuoy, ShieldCheck, Undo2 } from "lucide-react";
 import { PageHeader, Panel } from "@/components/ui/primitives";
 import { Time } from "@/components/ui/time";
+import { apiRequest, errorMessage } from "@/lib/api-client";
 
 type Mode = "off" | "shadow" | "fallback" | "strict";
 
@@ -63,29 +64,26 @@ export default function SqlContractSettingsPage() {
   const [fmtSaving, setFmtSaving] = useState(false);
 
   useEffect(() => {
-    fetch("/api/v1/settings/sql-contract")
-      .then((r) => r.json())
-      .then((j) => {
-        if (j.error) setError(j.error.message ?? "Falha ao carregar");
-        else { setMode(j.data.mode); setSaved(j.data.mode); setStats(j.data.stats ?? null); setPgIsolation(j.data.pgIsolation ?? null); setResultFormat(j.data.resultFormat === "normalized" ? "normalized" : "legacy"); }
+    apiRequest<{ mode: Mode; stats?: Stats; pgIsolation?: string; resultFormat?: string }>("/api/v1/settings/sql-contract")
+      .then(({ data }) => {
+        setMode(data.mode); setSaved(data.mode); setStats(data.stats ?? null); setPgIsolation(data.pgIsolation ?? null);
+        setResultFormat(data.resultFormat === "normalized" ? "normalized" : "legacy");
       })
-      .catch(() => setError("Falha ao carregar"));
+      .catch((e) => setError(errorMessage(e)));
   }, []);
 
   async function saveFormat(next: "legacy" | "normalized") {
     if (next === resultFormat) return;
     setFmtSaving(true); setError("");
     try {
-      const r = await fetch("/api/v1/settings/sql-contract", {
+      await apiRequest("/api/v1/settings/sql-contract", {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ resultFormat: next }),
       });
-      const j = await r.json();
-      if (j.error) throw new Error(j.error.message ?? "Falha ao salvar");
       setResultFormat(next);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Falha ao salvar");
+      setError(errorMessage(e));
     } finally {
       setFmtSaving(false);
     }
@@ -95,16 +93,14 @@ export default function SqlContractSettingsPage() {
     if (!mode) return;
     setSaving(true); setError(""); setOk(false);
     try {
-      const r = await fetch("/api/v1/settings/sql-contract", {
+      await apiRequest("/api/v1/settings/sql-contract", {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ mode }),
       });
-      const j = await r.json();
-      if (j.error) throw new Error(j.error.message ?? "Falha ao salvar");
       setSaved(mode); setOk(true);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Falha ao salvar");
+      setError(errorMessage(e));
     } finally {
       setSaving(false);
     }

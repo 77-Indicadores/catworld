@@ -4,8 +4,8 @@ import SqlContractSettingsPage from "./page";
 
 let fetchMock: ReturnType<typeof vi.fn>;
 
-function respond(body: unknown) {
-  return Promise.resolve({ json: () => Promise.resolve(body) } as Response);
+function respond(body: unknown, status = 200) {
+  return Promise.resolve(new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } }));
 }
 
 beforeEach(() => {
@@ -80,7 +80,7 @@ describe("tela Contrato de SQL", () => {
   it("mostra o erro da API quando falha ao salvar", async () => {
     fetchMock.mockImplementation((url: string, init?: RequestInit) =>
       init?.method === "PATCH"
-        ? respond({ data: null, error: { message: "Sem permissão" } })
+        ? respond({ data: null, error: { message: "Sem permissão" } }, 400)
         : respond({ data: { mode: "fallback", modes: [] }, error: null }),
     );
     render(<SqlContractSettingsPage />);
@@ -90,7 +90,7 @@ describe("tela Contrato de SQL", () => {
   });
 
   it("erro ao carregar exibe a mensagem em vez de travar no spinner", async () => {
-    fetchMock.mockImplementation(() => respond({ data: null, error: { message: "Acesso negado" } }));
+    fetchMock.mockImplementation(() => respond({ data: null, error: { message: "Acesso negado" } }, 400));
     render(<SqlContractSettingsPage />);
     expect(await screen.findByText("Acesso negado")).toBeTruthy();
   });

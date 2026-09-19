@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { CheckCircle2, Trash2, RefreshCw, AlertCircle } from "lucide-react";
 import { PageHeader, Panel } from "@/components/ui/primitives";
 import { DangerZone } from "@/components/ui/danger-zone";
-import { apiErrorText, apiRequest, errorMessage } from "@/lib/api-client";
+import { apiRequest, errorMessage } from "@/lib/api-client";
 import { Time } from "@/components/ui/time";
 import { fmtDuration } from "@/lib/fmt";
 
@@ -133,9 +133,8 @@ export default function RetentionPage() {
   const [error, setError] = useState("");
 
   const loadHistory = useCallback(() => {
-    fetch("/api/v1/settings/retention/history")
-      .then((r) => r.json())
-      .then((b) => Array.isArray(b.data) && setHistory(b.data))
+    apiRequest<CleanupRun[]>("/api/v1/settings/retention/history")
+      .then((r) => Array.isArray(r.data) && setHistory(r.data))
       .catch(() => {});
   }, []);
 
@@ -158,31 +157,31 @@ export default function RetentionPage() {
       || !Number.isInteger(settings.dataset_versions_keep) || settings.dataset_versions_keep < 1 || settings.dataset_versions_keep > 1000;
     if (bad) { setError("Revise os campos destacados: use números inteiros dentro da faixa indicada."); return; }
     setSaving(true); setError(""); setSaved(false);
-    const r = await fetch("/api/v1/settings/retention", {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(settings),
-    });
-    setSaving(false);
-    if (!r.ok) {
-      const b = await r.json().catch(() => ({}));
-      setError(apiErrorText(b, "Falha ao salvar"));
-    } else {
+    try {
+      await apiRequest("/api/v1/settings/retention", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(settings),
+      });
       setSaved(true);
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setSaving(false);
     }
   }
 
   async function purge() {
     setPurging(true); setPurgeOk(false); setError("");
-    const r = await fetch("/api/v1/settings/retention/purge", { method: "POST" });
-    setPurging(false);
-    if (!r.ok) {
-      const b = await r.json().catch(() => ({}));
-      setError(apiErrorText(b, "Falha ao enfileirar purga"));
-    } else {
+    try {
+      await apiRequest("/api/v1/settings/retention/purge", { method: "POST" });
       purgeRef.current?.close();
       setPurgeOk(true);
       setTimeout(loadHistory, 1500);
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setPurging(false);
     }
   }
 

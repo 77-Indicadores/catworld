@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { CheckCircle2, CloudCog, DatabaseZap, Pencil, Plus, RefreshCw, Server, Trash2, XCircle } from "lucide-react";
 import { EmptyState, PageHeader, Panel, StatusBadge } from "@/components/ui/primitives";
 import { useApiAction, useFeedback } from "@/components/ui/feedback";
-import { apiErrorText } from "@/lib/api-client";
+import { apiRequest, errorMessage } from "@/lib/api-client";
 
 type Connection = { id: string; name: string; provider: string; environment: string; server: string; port: number | null; databaseName: string; sslMode: string; username: string; active: boolean; lastStatus: string | null; lastLatencyMs: number | null; lastCheckedAt: string | null; sshTunnelEnabled?: boolean; sshHost?: string | null; sshPort?: number | null; sshUsername?: string | null; sshAuthMethod?: string | null };
 type TestState = null | { ok: true; latencyMs: number; database?: string } | { ok: false; message: string };
@@ -42,16 +42,18 @@ export default function ConnectionsPage() {
 
   async function load() {
     setLoading(true);
-    const response = await fetch("/api/v1/connections");
-    const body = await response.json();
-    setRows(body.data ?? []);
-    setLoading(false);
+    try {
+      const { data } = await apiRequest<Connection[]>("/api/v1/connections");
+      setRows(data ?? []);
+    } finally {
+      setLoading(false);
+    }
   }
 
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/v1/connections").then(r => r.json()).then(body => {
-      if (!cancelled) setRows(body.data ?? []);
+    apiRequest<Connection[]>("/api/v1/connections").then(({ data }) => {
+      if (!cancelled) setRows(data ?? []);
     }).finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, []);
@@ -91,30 +93,40 @@ export default function ConnectionsPage() {
       payload.connectionId = editing.id;
       delete payload.password;
     }
-    const response = await fetch("/api/v1/connections/test", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
-    const body = await response.json().catch(() => ({}));
-    setFormTesting(false);
-    if (!response.ok) setFormTest({ ok: false, message: apiErrorText(body, "Falha ao conectar") });
-    else setFormTest({ ok: true, latencyMs: body.data?.latencyMs ?? 0, database: body.data?.database });
+    try {
+      const { data } = await apiRequest<{ latencyMs?: number; database?: string }>("/api/v1/connections/test", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+      setFormTest({ ok: true, latencyMs: data?.latencyMs ?? 0, database: data?.database });
+    } catch (err) {
+      setFormTest({ ok: false, message: errorMessage(err) });
+    } finally {
+      setFormTesting(false);
+    }
   }
 
   async function save(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault(); setError(""); setSaving(true);
     const payload = formPayload(e.currentTarget);
     if (editing && !payload.password) delete payload.password;
-    const response = await fetch(editing ? `/api/v1/connections/${editing.id}` : "/api/v1/connections", { method: editing ? "PATCH" : "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+    try {
+      await apiRequest(editing ? `/api/v1/connections/${editing.id}` : "/api/v1/connections", { method: editing ? "PATCH" : "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+    } catch (err) {
+      setSaving(false);
+      setError(errorMessage(err));
+      return;
+    }
     setSaving(false);
-    if (!response.ok) { const body = await response.json(); setError(apiErrorText(body, "Falha ao salvar conexão")); return; }
     dialog.current?.close(); setEditing(null); setNotice("Conexão salva."); await load();
   }
 
   async function test(id: string) {
     setTesting(id); setNotice(""); setError("");
-    const response = await fetch(`/api/v1/connections/${id}/test`, { method: "POST" });
-    const body = await response.json().catch(() => ({}));
+    try {
+      const { data } = await apiRequest<{ latencyMs?: number }>(`/api/v1/connections/${id}/test`, { method: "POST" });
+      setNotice(`Conexão testada em ${data?.latencyMs ?? "?"} ms.`);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
     setTesting("");
-    if (!response.ok) setError(apiErrorText(body, "Falha ao testar conexão"));
-    else setNotice(`Conexão testada em ${body.data?.latencyMs ?? "?"} ms.`);
     await load();
   }
 
