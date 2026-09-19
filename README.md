@@ -40,7 +40,7 @@ A mesma imagem deve ser publicada em dois serviços (veja `docker-compose.exampl
 - web: `node server.js`
 - worker: `./node_modules/.bin/tsx src/worker/index.ts`
 
-Use as mesmas variáveis e a mesma imagem para ambos. **Os dois serviços precisam compartilhar o mesmo volume** apontado por `CATWORLD_UPLOAD_DIR` (ex: `/data/uploads`) — o `web` grava o arquivo enviado e o `worker` precisa lê-lo do mesmo disco; sem volume compartilhado os uploads falham. Execute `npm run migrate` e `npm run seed` como comandos de implantação controlados (no Coolify, configure como post-deployment command). O worker inclui LibreOffice Calc para converter `.xls` legado antes do processamento.
+Use as mesmas variáveis e a mesma imagem para ambos. **Os dois serviços precisam compartilhar o mesmo volume** apontado por `CATWORLD_UPLOAD_DIR` (ex: `/data/uploads`) — o `web` grava o arquivo enviado e o `worker` precisa lê-lo do mesmo disco; sem volume compartilhado os uploads falham. O `docker-entrypoint.sh` da imagem roda `prisma migrate deploy` automaticamente antes de subir `web` ou `workers` (seguro mesmo com os dois containers iniciando juntos: o Prisma usa lock consultivo no banco). O `npm run seed` continua manual/controlado (no Coolify, post-deployment command) — ele reaplica `CATWORLD_ADMIN_PASSWORD` a cada execução, então rodá-lo sozinho evita resetar a senha do admin a cada deploy. O worker inclui LibreOffice Calc para converter `.xls` legado antes do processamento.
 
 ## Segurança
 
