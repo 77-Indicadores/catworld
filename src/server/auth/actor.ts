@@ -28,13 +28,13 @@ async function currentUser(id: string) {
 const TOKEN_TOUCH_MS = 60_000; // lastUsedAt: no maximo 1 escrita por minuto por token
 
 /** `rateLimit: false` so para caminhos que paginam pesado por natureza (OData). */
-export async function resolveActor(request?: NextRequest, opts: { rateLimit?: boolean } = {}): Promise<Actor> {
-  const auditStore = request ? auditRequestBegin() : null;
+export async function resolveActor(request?: NextRequest, opts: { rateLimit?: boolean; audit?: boolean } = {}): Promise<Actor> {
+  const auditStore = request && opts.audit !== false ? auditRequestBegin() : null;
   let actor: Actor;
   try {
     actor = await identify(request);
   } catch (e) {
-    if (request && e instanceof ApiError && e.status === 401) auditAuthFailure(request, e.code);
+    if (request && opts.audit !== false && e instanceof ApiError && e.status === 401) auditAuthFailure(request, e.code);
     throw e;
   }
   if (request && auditStore) auditRequestStart(auditStore, request, actor);

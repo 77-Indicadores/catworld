@@ -6,7 +6,7 @@ import { resolveActor } from "@/server/auth/actor";
 // Sem login: so o estado (sql.ok) — para monitores de disponibilidade. O detalhe (commit, banco, motivo da
 // falha) so aparece para quem esta autenticado: hostnames e mensagens de driver nao devem ir para o publico.
 export async function GET(request: NextRequest) {
-  const authenticated = await resolveActor(request).then(() => true, () => false);
+  const authenticated = await resolveActor(request, { audit: false }).then(() => true, () => false);
   const sqlResult = await checkSql()
     .then((r) => ({ ok: true as const, latencyMs: r.latencyMs, database: r.database }))
     .catch((err) => {

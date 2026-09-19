@@ -13,6 +13,7 @@ import { importUpload } from "@/server/uploads/importer";
 import { queueImportUploadAuto } from "@/server/uploads/actions";
 import { enqueueDueSourceRefreshes, enqueueDueReconciliations, refreshDatasetSource, nextRefreshFromCron } from "@/server/connections/sources";
 import { enqueueDueDerivedRefreshes, refreshDerivedTable } from "@/server/connections/derived";
+import { pickInt } from "@/server/worker/config";
 import { startHeartbeat, currentRssMb, recordJobMetric, writeWorkerLiveness } from "./metrics";
 
 // Camada 1 (auditoria): o processo do worker (tsx src/worker/index.ts) roda fora
@@ -108,11 +109,12 @@ async function runMetadataCleanup() {
       `SELECT key, value FROM cw_system_settings WHERE key = ANY($1::text[])`,
       ["retention.jobs_days", "retention.audit_events_days", "retention.uploads_days", "retention.dataset_versions_keep"],
     );
-    const cfg = Object.fromEntries(rows.map((r) => [r.key, Number(r.value)]));
-    const jobsDays     = cfg["retention.jobs_days"]             ?? 30;
-    const auditDays    = cfg["retention.audit_events_days"]     ?? 30;
-    const uploadsDays  = cfg["retention.uploads_days"]          ?? 30;
-    const versionsKeep = cfg["retention.dataset_versions_keep"] ?? 10;
+    const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+    // Valor invalido/fora da faixa cai no default (nunca NaN, que abortava o cleanup inteiro).
+    const jobsDays     = pickInt(cfg["retention.jobs_days"], 30, 1, 3650);
+    const auditDays    = pickInt(cfg["retention.audit_events_days"], 30, 1, 3650);
+    const uploadsDays  = pickInt(cfg["retention.uploads_days"], 30, 1, 3650);
+    const versionsKeep = pickInt(cfg["retention.dataset_versions_keep"], 10, 1, 1000);
 
     const deletedJobs = await prisma.$executeRawUnsafe(
       `DELETE FROM cw_jobs WHERE status IN ('COMPLETED','FAILED') AND created_at < NOW() - ($1 || ' days')::INTERVAL`,

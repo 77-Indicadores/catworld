@@ -4,15 +4,17 @@ jobs:
   test:
     runs-on: ubuntu-latest
     services:
-      sqlserver:
-        image: mcr.microsoft.com/mssql/server:2022-latest
-        env: { ACCEPT_EULA: Y, MSSQL_SA_PASSWORD: "StrongPass!12345" }
-        ports: ["1433:1433"]
+      postgres:
+        image: postgres:17-alpine
+        env: { POSTGRES_USER: catworld, POSTGRES_PASSWORD: catworld_ci, POSTGRES_DB: catworld }
+        ports: ["5432:5432"]
         options: >-
-          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'StrongPass!12345' -C -Q 'SELECT 1'"
-          --health-interval 10s --health-timeout 5s --health-retries 20
+          --health-cmd "pg_isready -U catworld -d catworld"
+          --health-interval 5s --health-timeout 5s --health-retries 20
     env:
-      CATWORLD_DATABASE_URL: "sqlserver://localhost:1433;database=catworld;user=sa;password=StrongPass!12345;encrypt=true;trustServerCertificate=true"
+      CATWORLD_DATABASE_URL: "postgres://catworld:catworld_ci@localhost:5432/catworld"
+      # Postgres DESCARTAVEL (o do proprio CI) para os testes *.pg.test.ts — nunca aponte para producao.
+      CW_TEST_PG_URL: "postgres://catworld:catworld_ci@localhost:5432/postgres"
       CATWORLD_ENCRYPTION_KEY: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
       AUTH_SECRET: "ci-auth-secret-with-more-than-thirty-two-bytes"
       AUTH_URL: "http://127.0.0.1:3000"
@@ -28,7 +30,6 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
-      - run: node scripts/create-database.mjs
       - run: npx prisma migrate deploy
       - run: npm run seed
       - run: npm run build
