@@ -128,4 +128,39 @@ d("conformidade T-SQL -> Postgres (executando)", () => {
     expect(r[0]!.b).toBe("2026/03/15");
     expect(r[0]!.c).toBe("2026-03-15 10:30:45");
   });
+
+  // ---- semantica: mesmo resultado que o SQL Server daria ----
+  it("NULL ordena como no T-SQL: primeiro em ASC, ultimo em DESC (tambem dentro de janela)", async () => {
+    expect(col(await run("SELECT nota FROM cwt.vendas ORDER BY nota"), "nota")).toEqual([null, null, "x"]);
+    expect(col(await run("SELECT nota FROM cwt.vendas ORDER BY nota DESC"), "nota")).toEqual(["x", null, null]);
+    const w = await run("SELECT [Id], ROW_NUMBER() OVER (ORDER BY nota) AS rn FROM cwt.vendas ORDER BY [Id]");
+    expect(col(w, "rn").map(Number)).toEqual([1, 3, 2]); // Id 2 tem nota 'x' -> ultimo
+  });
+
+  it("LIKE ignora maiusculas/minusculas (collation padrao do SQL Server)", async () => {
+    expect(col(await run("SELECT nome FROM cwt.vendas WHERE nome LIKE 'B%'"), "nome")).toEqual(["bia"]);
+    expect(col(await run("SELECT nome FROM cwt.vendas WHERE nome NOT LIKE 'B%' ORDER BY [Id]"), "nome")).toEqual(["ana", "cai"]);
+  });
+
+  it("CAST/CONVERT para inteiro TRUNCA (o Postgres arredondaria)", async () => {
+    const r = await run("SELECT CAST(2.7 AS INT) AS a, CAST(-2.7 AS INT) AS b, CONVERT(INT, 2.9) AS c, CAST([Valor Total] AS INT) AS d, CAST(2.7 AS BIGINT) AS e FROM cwt.vendas WHERE [Id]=1");
+    expect(Number(r[0]!.a)).toBe(2);
+    expect(Number(r[0]!.b)).toBe(-2);
+    expect(Number(r[0]!.c)).toBe(2);
+    expect(Number(r[0]!.d)).toBe(10); // 10.50 -> 10 (arredondar daria 11)
+    expect(Number(r[0]!.e)).toBe(2);
+  });
+
+  it("LEN ignora espacos finais (mas conta os iniciais) e devolve NULL para NULL", async () => {
+    const r = await run("SELECT LEN('ab  ') AS a, LEN(' a ') AS b, LEN(nota) AS c FROM cwt.vendas WHERE [Id]=1");
+    expect(Number(r[0]!.a)).toBe(2);
+    expect(Number(r[0]!.b)).toBe(2);
+    expect(r[0]!.c).toBeNull();
+  });
+
+  it("'1' + 2 e aritmetica (3); concatenacao de texto continua funcionando", async () => {
+    const r = await run("SELECT '1' + 2 AS a, nome + '-' + nome AS b FROM cwt.vendas WHERE [Id]=1");
+    expect(Number(r[0]!.a)).toBe(3);
+    expect(r[0]!.b).toBe("ana-ana");
+  });
 });

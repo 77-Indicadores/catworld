@@ -63,14 +63,26 @@ Semana e dia da semana seguem o padrao do SQL Server (domingo = 1; `DATEDIFF(wee
 (datas, bit), `TOP n PERCENT`, `DATEDIFF` em `millisecond`, `CONVERT` com estilo fora da lista, e o cast `::` (sintaxe Postgres;
 use `CAST`/`CONVERT`). O erro vem do Catworld, com a construcao citada — nunca um erro cru do banco.
 
-## Diferencas conhecidas por backend
+## Semantica: o que o Catworld emula e o que NAO
 
-- **Caixa dos identificadores:** `[Nome]` mantem a caixa exata. Sem colchetes, no Postgres o nome e
-  dobrado para minusculas (o storage PG cria colunas com caixa exata). Prefira colchetes quando a coluna tem maiuscula.
-- **Collation:** comparacao de texto e case-insensitive no SQL Server e case-sensitive no Postgres.
-- **Aliases:** `AS Nome` sem colchetes sai em minusculas no Postgres.
-- **TRY_CAST:** estouro de faixa (ex: numero maior que INT) gera erro no Postgres; no SQL Server devolve `NULL`.
-- **DATEDIFF(week):** para datas anteriores a 1900-01-07 o resultado nao e garantido.
+O contrato promete a **sintaxe** T-SQL e emula a semantica onde isso e barato e seguro. No destino Postgres:
+
+| Comportamento T-SQL | Postgres | Situacao |
+|---|---|---|
+| NULL e o menor valor (`ORDER BY x` = NULL primeiro; DESC = NULL por ultimo; tambem em `OVER (ORDER BY …)`) | NULL por ultimo em ASC | **emulado** (`NULLS FIRST/LAST`) |
+| `LIKE` ignora maiusculas/minusculas | `LIKE` diferencia | **emulado** (`LIKE` → `ILIKE`) |
+| `LEN` ignora espacos finais | `LENGTH` conta | **emulado** (`LENGTH(RTRIM(…))`) |
+| `CAST/CONVERT(x AS INT/BIGINT/SMALLINT)` **trunca** (2.7 → 2) | arredonda (2.7 → 3) | **emulado** (`TRUNC`) |
+| `'1' + 2` = 3; `'a' + 'b'` = concatenacao | `+` so numerico | **emulado** (literal numerico mantem `+`; texto vira `\|\|`) |
+| `=`, `IN`, `GROUP BY`, `DISTINCT`, `JOIN` em **texto** ignoram caixa (collation CI) | diferenciam | **NAO emulado** — `WHERE nome = 'BIA'` acha `Bia` no SQL Server e nao no Postgres |
+| Ordem de texto com acentos (collation) | depende da collation do banco | **NAO emulado** |
+| Conversoes implicitas em geral (texto ↔ numero ↔ data) | erro | **NAO emulado** |
+| `CAST(bit AS INT)` | `CAST(boolean AS NUMERIC)` falha | modo `fallback` refaz pelo caminho antigo; no `strict` da erro |
+
+Outras diferencas: `DATEDIFF` conta fronteiras; `[Nome]` mantem a caixa e sem colchetes vira minuscula no Postgres;
+`TRY_CAST` numerico com estouro de faixa gera erro no Postgres; `DATEDIFF(week)` antes de 1900-01-07 nao e garantido.
+`ORDER BY` com `NULLS FIRST` em ASC nao usa indice ordenado padrao do Postgres (NULLS LAST) — impacto so em tabelas grandes
+com indice na coluna de ordenacao.
 
 ## Formato do resultado
 

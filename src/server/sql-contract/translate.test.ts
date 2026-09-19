@@ -41,7 +41,7 @@ describe("translateTsql -> postgres", () => {
   it("funcoes: ISNULL, LEN, GETDATE, IIF, DATEADD", () => {
     const r = pg("SELECT ISNULL(b,0), LEN(c), IIF(a>1,'x','y') FROM t WHERE d > DATEADD(day,-7,GETDATE())").sql;
     expect(r).toContain("COALESCE(b, 0)");
-    expect(r).toContain("LENGTH(c)");
+    expect(r).toContain("LENGTH(RTRIM(CAST(c AS TEXT)))");
     expect(r).toContain("CASE WHEN a > 1 THEN 'x' ELSE 'y' END");
     expect(r).toContain("NOW() + (-7) * INTERVAL '1 day'");
   });
@@ -53,7 +53,7 @@ describe("translateTsql -> postgres", () => {
 
   it("CONVERT com estilo de texto e CAST de tipos", () => {
     expect(pg("SELECT CONVERT(VARCHAR(10), d, 120) FROM t").sql).toContain("to_char(d, 'YYYY-MM-DD HH24:MI:SS')");
-    expect(pg("SELECT CONVERT(INT, x) FROM t").sql).toContain("CAST(x AS INTEGER)");
+    expect(pg("SELECT CONVERT(INT, x) FROM t").sql).toContain("CAST(TRUNC(CAST(x AS NUMERIC)) AS INTEGER)");
     expect(pg("SELECT CAST(x AS NVARCHAR(50)) FROM t").sql).toMatch(/CAST\(x AS TEXT\)/i);
   });
 
@@ -87,5 +87,17 @@ describe("translateTsql -> postgres", () => {
     expect(pg("SELECT DATEPART(weekday, d) FROM t").sql).toContain("EXTRACT(DOW FROM d)");
     expect(pg("SELECT a FROM t CROSS APPLY (SELECT TOP 1 b FROM u WHERE u.id = t.id) x").sql).toMatch(/CROSS JOIN LATERAL .*LIMIT 1/);
     expect(pg("SELECT a FROM t OUTER APPLY (SELECT TOP 1 b FROM u WHERE u.id = t.id) x").sql).toMatch(/LEFT JOIN LATERAL .* ON TRUE/);
+  });
+
+  it("semantica T-SQL: NULLS, LIKE, LEN, CAST inteiro e '1' + 2", () => {
+    const o = pg("SELECT a FROM t ORDER BY a, b DESC").sql;
+    expect(o).toMatch(/ORDER BY a ASC NULLS FIRST, b DESC NULLS LAST/i);
+    expect(pg("SELECT ROW_NUMBER() OVER (PARTITION BY g ORDER BY x) FROM t").sql).toMatch(/ORDER BY x ASC NULLS FIRST/i);
+    expect(pg("SELECT 1 FROM t WHERE n LIKE 'b%' AND m NOT LIKE 'x%'").sql).toMatch(/n ILIKE 'b%' AND m NOT ILIKE 'x%'/);
+    expect(pg("SELECT LEN(c) FROM t").sql).toContain("LENGTH(RTRIM(CAST(c AS TEXT)))");
+    expect(pg("SELECT CAST(x AS INT), CAST(y AS BIGINT), CAST(z AS DECIMAL(10,2)) FROM t").sql)
+      .toMatch(/CAST\(TRUNC\(CAST\(x AS NUMERIC\)\) AS INTEGER\).*AS BIGINT\).*CAST\(z AS DECIMAL\(10,2\)\)/);
+    expect(pg("SELECT '1' + 2 FROM t").sql).toContain("'1' + 2"); // continua aritmetico
+    expect(pg("SELECT n + '-' FROM t").sql).toContain("||");     // texto: concatena
   });
 });

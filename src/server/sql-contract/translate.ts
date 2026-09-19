@@ -10,6 +10,10 @@
  * O parser so LE T-SQL; a emissao Postgres (TOP, ISNULL, DATEADD, CONVERT...) e
  * feita aqui, com trechos verbatim via nos `{type:"default"}`.
  *
+ * Semantica emulada (alem da sintaxe): NULL ordena como no T-SQL (ASC primeiro / DESC ultimo), LIKE ignora caixa,
+ * LEN ignora espacos finais, CAST/CONVERT para inteiro trunca e `'1' + 2` continua aritmetico.
+ * NAO emulado (documentado): `=`, IN, GROUP BY, DISTINCT e JOIN em texto continuam sensiveis a caixa no Postgres.
+ *
  * Identificadores: `[colchetes]` mantem caixa exata (colunas do storage PG sao
  * criadas com caixa exata); os sem colchetes saem em minusculas, como o Postgres
  * ja dobrava antes deste contrato.
@@ -178,8 +182,20 @@ function transform(n: Node): Node {
   }
 
   // 'a' + 'b' (concatenacao T-SQL) -> ||
-  if (n.type === "binary_expr" && n.operator === "+" && (isText(n.left) || isText(n.right))) {
+  if (n.type === "binary_expr" && n.operator === "+" && (isText(n.left) || isText(n.right)) && !isNumber(n.left) && !isNumber(n.right)) {
     n.operator = "||";
+  }
+
+  // LIKE do SQL Server ignora maiusculas/minusculas (collation padrao CI); o do Postgres nao.
+  if (n.type === "binary_expr" && (n.operator === "LIKE" || n.operator === "NOT LIKE")) {
+    n.operator = n.operator === "LIKE" ? "ILIKE" : "NOT ILIKE";
+  }
+
+  // NULL: no T-SQL e o MENOR valor (ASC = primeiro, DESC = ultimo); no Postgres e o contrario por padrao.
+  if (Array.isArray(n.orderby)) {
+    for (const item of n.orderby) {
+      if (item && typeof item === "object" && !item.nulls) item.nulls = item.type === "DESC" ? "NULLS LAST" : "NULLS FIRST";
+    }
   }
 
   if (typeof n.join === "string" && /APPLY$/i.test(n.join)) {
@@ -192,6 +208,7 @@ function transform(n: Node): Node {
     for (const t of n.target) {
       const params = t.length != null && t.length !== "max" ? [String(t.length), ...(t.scale != null ? [String(t.scale)] : [])] : [];
       t.dataType = mssqlTypeToPg(String(t.dataType), params);
+      if (INT_TYPES.has(t.dataType) && n.target.length === 1) return raw(intCast(emit(n.expr), t.dataType));
       t.length = null;
       t.scale = null;
       t.parentheses = false;
@@ -203,6 +220,8 @@ function transform(n: Node): Node {
   if (n.type === "function" && n.name?.name) return transformFunction(n);
   return n;
 }
+
+const isNumber = (e: Node): boolean => e?.type === "number";
 
 const isText = (e: Node): boolean =>
   !!e && (e.type === "single_quote_string" || e.type === "string" || e.type === "var_string" ||
@@ -231,7 +250,7 @@ function transformFunction(n: Node): Node {
   const a = args(n);
   switch (f) {
     case "ISNULL": n.name.name[0].value = "COALESCE"; return n;
-    case "LEN": n.name.name[0].value = "LENGTH"; return n;
+    case "LEN": return raw(`LENGTH(RTRIM(CAST(${emit(a[0])} AS TEXT)))`); // T-SQL: LEN ignora espacos finais
     // NOW() (instante) e nao LOCALTIMESTAMP / AT TIME ZONE 'UTC': estes devolvem horario SEM fuso, que o driver
     // le como horario local do processo e desloca o valor quando app e banco tem fusos diferentes.
     case "GETDATE": case "SYSDATETIME": case "GETUTCDATE": case "SYSUTCDATETIME": return raw("NOW()");
@@ -383,6 +402,13 @@ function tryCast(a: Node[]): Node {
   return raw(`CAST((CASE WHEN CAST(${x} AS TEXT) ~ '${isInt ? INT_RE : NUM_RE}' THEN CAST(${x} AS TEXT) END) AS ${pgType})`);
 }
 
+const INT_TYPES = new Set(["INTEGER", "BIGINT", "SMALLINT"]);
+
+/** T-SQL: CAST(2.7 AS INT) = 2 (trunca); Postgres arredonda para 3. */
+function intCast(x: string, pgType: string): string {
+  return `CAST(TRUNC(CAST(${x} AS NUMERIC)) AS ${pgType})`;
+}
+
 const CONVERT_STYLE: Record<number, string> = {
   23: "YYYY-MM-DD", 120: "YYYY-MM-DD HH24:MI:SS", 121: "YYYY-MM-DD HH24:MI:SS.MS",
   112: "YYYYMMDD", 103: "DD/MM/YYYY", 101: "MM/DD/YYYY", 108: "HH24:MI:SS",
@@ -405,6 +431,7 @@ function transformConvert(a: Node[]): Node {
     }
     return raw(`to_char(${emit(a[1])}, '${fmt}')`);
   }
+  if (INT_TYPES.has(pgType)) return raw(intCast(emit(a[1]), pgType));
   return raw(`CAST(${emit(a[1])} AS ${pgType})`);
 }
 
