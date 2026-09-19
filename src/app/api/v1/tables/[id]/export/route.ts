@@ -10,6 +10,7 @@ import type { PgStorageConnection } from "@/server/storage/pg-storage";
 import type { MssqlStorageConnection } from "@/server/storage/mssql-storage";
 import { ApiError, handleApiError } from "@/server/http";
 import { fmtCell } from "@/lib/fmt-cell";
+import { mssqlKind, normalizeRows, pgKind, type ColumnKind } from "@/server/sql-contract/result";
 
 const BOM = "﻿";
 const SEP = ";";
@@ -56,6 +57,11 @@ async function streamStorageCsv(
               `SELECT * FROM ${quotedTable} LIMIT ${PAGE} OFFSET ${offset}`,
             );
             if (result.rows.length === 0) break;
+            // dateFormat=iso: DATE/TIME/bigint/decimal pelo tipo da coluna (sem isso DATE sai deslocada por fuso)
+            const kinds: Record<string, ColumnKind> = isoDates
+              ? Object.fromEntries(result.fields.map((f) => [f.name, pgKind(f.dataTypeID)]))
+              : {};
+            if (isoDates) normalizeRows(result.rows as Record<string, unknown>[], kinds, "pg");
             const chunk = (result.rows as Record<string, unknown>[])
               .map((row) => csvLine(columns.map((c) => row[c]), isoDates))
               .join("\r\n") + "\r\n";
@@ -93,7 +99,12 @@ async function streamStorageCsv(
         batch = [];
       }
 
+      let kinds: Record<string, ColumnKind> = {};
+      request.on("recordset", (cols: Record<string, { type?: { declaration?: string } }>) => {
+        if (isoDates) kinds = Object.fromEntries(Object.entries(cols).map(([n, c]) => [n, mssqlKind(c.type?.declaration)]));
+      });
       request.on("row", (row: Record<string, unknown>) => {
+        if (isoDates) normalizeRows([row], kinds, "mssql");
         batch.push(columns.map((c) => row[c]));
         if (batch.length >= BATCH) flush();
       });

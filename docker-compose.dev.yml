@@ -1,0 +1,41 @@
+# Ambiente de desenvolvimento ISOLADO (nunca aponta para producao).
+#
+#   docker compose -f docker-compose.dev.yml up -d postgres           # plano de controle + storage Postgres
+#   docker compose -f docker-compose.dev.yml --profile mssql up -d    # + SQL Server (storage/live MSSQL)
+#
+# As credenciais abaixo sao so de dev. As de producao ficam comentadas no .env
+# ("# [PROD-DESATIVADO]"); o bloco "# [DEV-DOCKER]" do .env aponta para este compose.
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: catworld-dev-postgres
+    environment:
+      POSTGRES_USER: catworld
+      POSTGRES_PASSWORD: catworld_dev
+      POSTGRES_DB: cw_dev
+    ports:
+      - "5433:5432"
+    volumes:
+      - catworld-dev-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U catworld -d cw_dev"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  mssql:
+    profiles: ["mssql"]
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: catworld-dev-mssql
+    environment:
+      ACCEPT_EULA: "Y"          # EULA da edicao Developer — precisa de aceite explicito de quem sobe
+      MSSQL_SA_PASSWORD: "Catworld_dev_1!"
+      MSSQL_PID: Developer
+    ports:
+      - "1434:1433"
+    volumes:
+      - catworld-dev-mssql:/var/opt/mssql
+
+volumes:
+  catworld-dev-pg:
+  catworld-dev-mssql:
