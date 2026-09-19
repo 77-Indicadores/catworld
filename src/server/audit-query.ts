@@ -1,0 +1,52 @@
+import { z } from "zod";
+import { prisma } from "@/server/db";
+
+/** Filtros da trilha de auditoria — os mesmos na API (`GET /audit-events`) e na tela de Auditoria. */
+export const auditFilterSchema = z.object({
+  cursor: z.string().uuid().optional(),
+  eventType: z.string().max(80).optional(),
+  success: z.enum(["true", "false"]).optional(),
+  userId: z.string().uuid().optional(),
+  tokenId: z.string().uuid().optional(),
+  since: z.coerce.date().optional(),
+  until: z.coerce.date().optional(),
+});
+export type AuditFilters = z.infer<typeof auditFilterSchema>;
+
+export const AUDIT_PAGE_SIZE = 100;
+
+export async function queryAuditEvents(q: AuditFilters) {
+  const rows = await prisma.auditEvent.findMany({
+    where: {
+      ...(q.eventType ? { eventType: q.eventType } : {}),
+      ...(q.success ? { success: q.success === "true" } : {}),
+      ...(q.userId ? { userId: q.userId } : {}),
+      ...(q.tokenId ? { tokenId: q.tokenId } : {}),
+      ...(q.since || q.until ? { createdAt: { ...(q.since ? { gte: q.since } : {}), ...(q.until ? { lt: q.until } : {}) } } : {}),
+    },
+    take: AUDIT_PAGE_SIZE + 1,
+    ...(q.cursor ? { skip: 1, cursor: { id: q.cursor } } : {}),
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    include: { user: { select: { name: true, email: true } } },
+  });
+  const hasMore = rows.length > AUDIT_PAGE_SIZE;
+  const data = hasMore ? rows.slice(0, AUDIT_PAGE_SIZE) : rows;
+  return { data, nextCursor: hasMore ? (data.at(-1)?.id ?? null) : null };
+}
+
+/** Nome legivel de cada tipo de evento (o codigo original continua visivel na tela). */
+export const AUDIT_EVENT_LABELS: Record<string, string> = {
+  API_WRITE: "Alteração pela API",
+  DATA_READ: "Leitura de dados",
+  ADMIN_READ: "Consulta a área administrativa",
+  ACCESS_DENIED: "Acesso negado",
+  AUTH_FAILED: "Falha de autenticação",
+  LOGIN_SUCCESS: "Login",
+  LOGIN_FAILED: "Login recusado",
+  LOGOUT: "Logout",
+  JOB_COMPLETED: "Tarefa concluída",
+  JOB_FAILED: "Tarefa com falha",
+  QUERY_EXECUTED: "Consulta SQL",
+  SQL_CONTRACT_MODE_CHANGED: "Modo do contrato SQL alterado",
+  UPLOAD_IMPORT_PERF: "Importação de upload",
+};

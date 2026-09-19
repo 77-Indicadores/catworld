@@ -216,3 +216,21 @@ export async function auditJob(info: {
     // auditoria nunca derruba o worker
   }
 }
+
+/** Leitura de uma pagina administrativa renderizada no servidor (ex.: tela de Auditoria): 1 evento por ator+pagina por minuto. */
+
+export function auditPageRead(actor: Actor, page: string): void {
+
+  try {
+
+    if (throttled(`PAGE:${actor.id}:${page}`)) return;
+
+    void record({ ...actorFields(actor), eventType: "ADMIN_READ", resourceType: "page", resourceId: page.slice(0, 255), detailJson: JSON.stringify({ method: "GET" }), success: true });
+
+  } catch {
+
+    // auditoria nunca derruba a requisicao
+
+  }
+
+}
