@@ -2,7 +2,7 @@
 import { useRef, useState, useEffect } from "react";
 import { Check, Loader2, UploadCloud, XCircle, AlertTriangle } from "lucide-react";
 import { previewFileInBrowser, type FilePreviewResult } from "@/lib/duckdb-preview";
-import { apiErrorText } from "@/lib/api-client";
+import { apiErrorText, apiRequest } from "@/lib/api-client";
 
 type FileJob = {
   id: string;
@@ -105,25 +105,24 @@ export function UploadFlow({
         }
 
         if (!/\.(csv|xlsx|xls)$/i.test(job.file.name)) throw new Error("Formato não suportado. Use CSV, XLSX ou XLS.");
-        const first = await fetch("/api/v1/uploads", {
+        const { data: created } = await apiRequest<{ skip?: boolean; upload?: { id: string }; sas?: { url: string } }>("/api/v1/uploads", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(createBody),
         });
-        const b = await first.json();
-        if (!first.ok) throw new Error(apiErrorText(b, "Falha ao criar upload", first.status));
 
-        if (b.data.skip) {
+        if (created.skip) {
           update({ status: "completed", statusLabel: "Concluído (sem alterações)" });
           oc();
           return;
         }
 
-        uploadId = b.data.upload.id as string;
+        uploadId = created.upload!.id;
         update({ uploadId });
 
-        // 2) Upload to blob
-        const r = await fetch(b.data.sas.url, {
+        // 2) Upload to blob — URL de armazenamento (SAS), não é a API do Catworld: fica de fora do
+        // envelope {data,meta,error} e por isso usa fetch cru mesmo.
+        const r = await fetch(created.sas!.url, {
           method: "PUT",
           headers: { "content-type": job.file.type || "application/octet-stream" },
           body: job.file,
@@ -132,10 +131,7 @@ export function UploadFlow({
 
         // 3) Notify uploaded — if browser preview was set, server skips PREVIEW_UPLOAD
         //    and queues IMPORT_UPLOAD directly (no poll for preview needed)
-        const notifyRes = await fetch(`/api/v1/uploads/${uploadId}?action=uploaded`, { method: "POST" });
-        if (!notifyRes.ok) {
-          throw new Error(apiErrorText(await notifyRes.json().catch(() => null), "Não foi possível iniciar o processamento do arquivo.", notifyRes.status));
-        }
+        await apiRequest(`/api/v1/uploads/${uploadId}?action=uploaded`, { method: "POST" });
 
         update({ status: "importing", statusLabel: "Importando..." });
 
@@ -148,7 +144,7 @@ export function UploadFlow({
           const preview = await pollForPreview(uploadId, (label) => update({ statusLabel: label }));
 
           update({ status: "importing", statusLabel: "Importando..." });
-          const confirmRes = await fetch(`/api/v1/uploads/${uploadId}?action=confirm`, {
+          await apiRequest(`/api/v1/uploads/${uploadId}?action=confirm`, {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({
@@ -159,8 +155,6 @@ export function UploadFlow({
               mapping: preview.columns,
             }),
           });
-          const confirmBody = await confirmRes.json();
-          if (!confirmRes.ok) throw new Error(apiErrorText(confirmBody, "Falha ao confirmar", confirmRes.status));
 
           await pollForCompletion(uploadId, (label) => update({ statusLabel: label }));
         }
@@ -173,11 +167,8 @@ export function UploadFlow({
         let actuallyFailed = true;
         if (uploadId) {
           try {
-            const check = await fetch(`/api/v1/uploads/${uploadId}`);
-            if (check.ok) {
-              const body = await check.json() as { data?: { status?: string } };
-              if (body.data?.status === "COMPLETED") actuallyFailed = false;
-            }
+            const { data } = await apiRequest<{ status?: string }>(`/api/v1/uploads/${uploadId}`);
+            if (data?.status === "COMPLETED") actuallyFailed = false;
           } catch { /* ignore — show failed */ }
         }
         if (!actuallyFailed) {
@@ -356,9 +347,7 @@ async function pollForPreview(
   onStatus: (label: string) => void
 ): Promise<Preview> {
   for (let i = 0; i < 180; i++) {
-    const r = await fetch(`/api/v1/uploads/${uploadId}`);
-    const b = await r.json();
-    const u = b.data;
+    const { data: u } = await apiRequest<{ status: string; previewJson: string; errorMessage?: string }>(`/api/v1/uploads/${uploadId}`);
     onStatus(u.status);
     if (u.status === "AWAITING_CONFIRMATION") {
       return JSON.parse(u.previewJson) as Preview;
@@ -386,10 +375,8 @@ async function pollForCompletion(
   onStatus: (label: string) => void
 ): Promise<void> {
   for (let i = 0; i < 300; i++) {
-    const r = await fetch(`/api/v1/uploads/${uploadId}`);
-    const b = await r.json();
-    const u = b.data;
-    onStatus(STATUS_LABELS[u.status as string] ?? u.status);
+    const { data: u } = await apiRequest<{ status: string; errorMessage?: string }>(`/api/v1/uploads/${uploadId}`);
+    onStatus(STATUS_LABELS[u.status] ?? u.status);
     if (u.status === "COMPLETED") return;
     if (u.status === "FAILED") throw new Error(u.errorMessage ?? "Importação falhou");
     await new Promise((resolve) => setTimeout(resolve, 2000));

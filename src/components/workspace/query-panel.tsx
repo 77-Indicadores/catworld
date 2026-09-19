@@ -1,7 +1,7 @@
 "use client";
 import { useRef, useState } from "react";
 import { Download, Play, Table2 } from "lucide-react";
-import { apiErrorText, warningsOf } from "@/lib/api-client";
+import { apiErrorText, apiRequest, errorMessage, warningsOf } from "@/lib/api-client";
 import { useFeedback } from "@/components/ui/feedback";
 import { SchemaBrowser } from "./schema-browser";
 import { ResultGrid } from "./result-grid";
@@ -40,16 +40,14 @@ export function QueryPanel({ datasets, projectId }: { datasets: WorkspaceDataset
   async function execute() {
     setRunning(true); setError(""); setWarnings([]);
     try {
-      const response = await fetch(
+      const { data, meta } = await apiRequest<Result>(
         liveSourceId ? `/api/v1/dataset-sources/${liveSourceId}/query` : "/api/v1/queries",
         { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sql, limit: 10000, timeout: 30, normalize: true, ...(projectId ? { projectId } : {}) }) }
       );
-      const body = await response.json();
-      if (!response.ok) throw new Error(apiErrorText(body, "Falha na consulta"));
-      setResult(body.data);
-      setWarnings(warningsOf(body.meta));
+      setResult(data);
+      setWarnings(warningsOf(meta));
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Falha na consulta");
+      setError(errorMessage(e));
     } finally {
       setRunning(false);
     }
