@@ -8,7 +8,8 @@
 
 import { Query, type PoolClient } from "pg";
 import { validateReadOnlySql } from "@/server/security/sql-safety";
-import { ApiError, publicQueryErrorMessage } from "@/server/http";
+import { ApiError, isQueryTimeout, publicQueryErrorMessage } from "@/server/http";
+import { dedupeColumnNames, rowsFromArrays } from "@/server/sql-contract/columns";
 import { MAX_RESULT_BYTES, approxRowBytes } from "@/server/query/protection";
 import { contractTranslate, getContractMode, runWithContract } from "@/server/sql-contract/apply";
 import { pgQuote, type PgStorageConnection } from "./pg-storage";
@@ -96,7 +97,7 @@ export async function executeReadOnlyPg(
     // — não impede 100% do tráfego já em trânsito, mas evita continuar
     // acumulando linhas em memória e nunca chega a serializar/cachear a
     // resposta inteira.
-    const rows: Record<string, unknown>[] = [];
+    const rows: unknown[][] = [];
     let approxBytes = 0;
     let tooLarge = false;
     // processID existe em runtime (PoolClient é sempre um Client de fato),
@@ -111,13 +112,15 @@ export async function executeReadOnlyPg(
 
     let kinds: Record<string, ColumnKind> = {};
     const columns = await new Promise<string[]>((resolve, reject) => {
-      const query = new Query(paged);
+      // rowMode "array": objeto por linha perderia colunas de mesmo nome (ver columns.ts)
+      // (os typings do pg nao declaram rowMode em Query, mas o driver aceita)
+      const query = new Query({ text: paged, rowMode: "array" } as never);
       client!.query(query);
 
-      query.on("row", (row: Record<string, unknown>) => {
+      query.on("row", (row: unknown[]) => {
         if (tooLarge) return;
         rows.push(row);
-        approxBytes += approxRowBytes(row);
+        approxBytes += approxRowBytes(row as unknown as Record<string, unknown>);
         if (approxBytes > MAX_RESULT_BYTES) {
           tooLarge = true;
           if (pid) conn._pool.query("SELECT pg_cancel_backend($1)", [pid]).catch(() => {});
@@ -131,12 +134,14 @@ export async function executeReadOnlyPg(
       query.on("error", (err: Error) => reject(tooLarge ? tooLargeError() : err));
       query.on("end", (result) => {
         if (tooLarge) return reject(tooLargeError());
-        kinds = Object.fromEntries(result.fields.map((f) => [f.name, pgKind(f.dataTypeID)]));
-        resolve(result.fields.map((f) => f.name));
+        const names = dedupeColumnNames(result.fields.map((f) => f.name));
+        kinds = Object.fromEntries(result.fields.map((f, i) => [names[i]!, pgKind(f.dataTypeID)]));
+        resolve(names);
       });
     });
 
-    const limitedRows = normalize ? normalizeRows(rows.slice(0, effectiveLimit), kinds, "pg") : rows.slice(0, effectiveLimit);
+    const asObjects = rowsFromArrays(rows.slice(0, effectiveLimit), columns);
+    const limitedRows = normalize ? normalizeRows(asObjects, kinds, "pg") : asObjects;
 
     return {
       columns,
@@ -210,15 +215,16 @@ export async function executeReadOnlyPgStream(
       try {
         client = await conn._pool.connect();
         await beginReadOnly(client, { timeoutMs, role, schemas });
-        const result = await client.query(statement);
-        const columns = result.fields.map((f) => f.name);
+        const result = await client.query({ text: statement, rowMode: "array" });
+        const columns = dedupeColumnNames(result.fields.map((f) => f.name));
         const streamKinds: Record<string, ColumnKind> = normalize
-          ? Object.fromEntries(result.fields.map((f) => [f.name, pgKind(f.dataTypeID)]))
+          ? Object.fromEntries(result.fields.map((f, i) => [columns[i]!, pgKind(f.dataTypeID)]))
           : {};
         safeEnqueue(encoder.encode(JSON.stringify({ __columns__: columns }) + "\n"));
         let rowCount = 0;
-        for (const row of result.rows as Record<string, unknown>[]) {
+        for (const arr of result.rows as unknown[][]) {
           if (closed) break; // cliente desconectou — não vale a pena continuar serializando
+          const row = rowsFromArrays([arr], columns)[0]!;
           if (normalize) normalizeRows([row], streamKinds, "pg");
           safeEnqueue(encoder.encode(JSON.stringify(row) + "\n"));
           rowCount++;
@@ -226,7 +232,7 @@ export async function executeReadOnlyPgStream(
         safeEnqueue(encoder.encode(JSON.stringify({ __done__: true, rowCount, executionTimeMs: Date.now() - started }) + "\n"));
       } catch (err) {
         const msg = publicQueryErrorMessage(err instanceof Error ? err.message : String(err));
-        safeEnqueue(encoder.encode(JSON.stringify({ __error__: true, message: msg }) + "\n"));
+        safeEnqueue(encoder.encode(JSON.stringify({ __error__: true, message: msg, ...(isQueryTimeout(err) ? { code: "QUERY_TIMEOUT" } : {}) }) + "\n"));
       } finally {
         await endTx(client);
         client?.release();

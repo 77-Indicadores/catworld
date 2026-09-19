@@ -335,7 +335,7 @@ class CatworldClient:
                     break
                 elif "__error__" in obj:
                     from .exceptions import from_api_error
-                    raise from_api_error(None, obj.get("message", "Erro desconhecido no stream"))
+                    raise from_api_error(obj.get("code"), obj.get("message", "Erro desconhecido no stream"))
                 else:
                     rows.append(obj)
 

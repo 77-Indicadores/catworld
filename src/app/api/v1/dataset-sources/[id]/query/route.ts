@@ -4,7 +4,7 @@ import * as Sentry from "@sentry/nextjs";
 import { prisma } from "@/server/db";
 import { resolveActor } from "@/server/auth/actor";
 import { canAccess } from "@/server/auth/permissions";
-import { ApiError, handleApiError, ok } from "@/server/http";
+import { ApiError, handleApiError, isQueryTimeout, ok, queryTimeoutError } from "@/server/http";
 import { executePostgresReadOnly, quotedPgTable } from "@/server/connections/postgres";
 import { executeMssqlReadOnly, quotedMssqlTable } from "@/server/connections/mssql";
 import { runWithContract } from "@/server/sql-contract/apply";
@@ -40,6 +40,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     // Compatibilidade: todo erro com "code" continua virando QUERY_FAILED (comportamento anterior);
     // so o erro novo do contrato de SQL mantem o proprio codigo.
     if (e instanceof SqlContractError) return handleApiError(e);
+    if (isQueryTimeout(e)) return handleApiError(queryTimeoutError());
     if (e instanceof Error && "code" in e) {
       Sentry.captureException(e);
       return handleApiError(new ApiError(400, "QUERY_FAILED", e.message));

@@ -4,11 +4,12 @@ import * as Sentry from "@sentry/nextjs";
 import { resolveActor } from "@/server/auth/actor";
 import { syncActorGrants } from "@/server/auth/sync-grants";
 import { executeReadOnly, executeReadOnlyStream } from "@/server/azure/sql";
-import { ApiError, handleApiError, ok, publicQueryErrorMessage } from "@/server/http";
+import { ApiError, handleApiError, isQueryTimeout, ok, publicQueryErrorMessage, queryTimeoutError } from "@/server/http";
 import { audit } from "@/server/audit";
 import { prisma } from "@/server/db";
 import { getStorageConnection } from "@/server/storage/connection";
 import { pgRoleForActor, runStorageQuery, type QueryResult } from "@/server/sql-contract/run";
+import { getContractMode } from "@/server/sql-contract/apply";
 import { resolveQueryScope } from "@/server/auth/permissions";
 import {
   acquireQuerySlot,
@@ -70,12 +71,23 @@ export async function POST(request: NextRequest) {
     }
 
     // Cache: verifica antes de executar
-    const cacheKey = queryCacheKey(input.sql, input.datasetId, input.projectId, input.limit, input.offset, actor.principal, storageServerId, input.normalize);
+    // Versao dos dados do escopo: upload/sync/derivada gravam last_data_at, entao o cache nao serve dado velho.
+    const versionIds = (scope.datasets.length ? scope.datasets : scope.accessible).map((d) => d.id);
+    const agg = await prisma.datasetTable.aggregate({
+      where: { datasetId: { in: versionIds } },
+      _max: { lastDataAt: true, updatedAt: true },
+      _count: { _all: true },
+    });
+    const dataVersion = `${agg._count._all}:${agg._max.lastDataAt?.getTime() ?? 0}:${agg._max.updatedAt?.getTime() ?? 0}`;
+    const cacheKey = queryCacheKey(input.sql, input.datasetId, input.projectId, input.limit, input.offset, actor.principal, storageServerId, input.normalize, dataVersion, await getContractMode());
+    // O executor limita o tempo de consultas paginadas a 120s (so o stream vai ate 300s): avisa em vez de calar.
+    const warnings = input.timeout > 120 ? [`timeout limitado a 120s nesta rota (informado: ${input.timeout}s); "stream": true aceita ate 300s`] : [];
     const cached = getCachedResult(cacheKey);
     if (cached) {
-      const res = ok(cached);
+      // Campos de cache ficam em meta/cabecalhos, nao dentro de data (o MISS nao os tem: mesma forma de data nos dois).
+      const res = ok(cached.result, { cached: true, cacheHits: cached.hits, ...(warnings.length ? { warnings } : {}) });
       res.headers.set("X-Cache", "HIT");
-      res.headers.set("X-Cache-Hits", String(cached.cacheHits));
+      res.headers.set("X-Cache-Hits", String(cached.hits));
       return res;
     }
 
@@ -101,7 +113,7 @@ export async function POST(request: NextRequest) {
       rowCount: result.rowCount,
       executionTimeMs: result.executionTimeMs,
     });
-    const res = ok(result);
+    const res = ok(result, warnings.length ? { warnings } : undefined);
     res.headers.set("X-Cache", "MISS");
     return res;
   } catch (e) {
@@ -113,6 +125,7 @@ export async function POST(request: NextRequest) {
     if (e instanceof ApiError) return handleApiError(e);
     if (e instanceof Error && "code" in e) {
       Sentry.captureException(e);
+      if (isQueryTimeout(e)) return handleApiError(queryTimeoutError());
       return handleApiError(new ApiError(400, "QUERY_FAILED", publicQueryErrorMessage(e.message)));
     }
     return handleApiError(e);

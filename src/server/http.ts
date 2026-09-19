@@ -20,6 +20,19 @@ export function publicQueryErrorMessage(message: string): string {
   return CONNECTION_ERROR.test(message) ? "Falha ao conectar ao banco de dados. Tente novamente em instantes." : message;
 }
 
+/** Estouro do tempo limite da consulta (Postgres 57014 statement_timeout; SQL Server ETIMEOUT). */
+export function isQueryTimeout(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const e = error as Error & { code?: unknown; details?: { postgresCode?: string } };
+  if (e.code === "57014" || e.details?.postgresCode === "57014") return /timeout|tempo/i.test(e.message) || e.code === "57014";
+  if (e.code === "ETIMEOUT" || e.code === "ETIMEDOUT" && /request/i.test(e.message)) return true;
+  return /Timeout: Request failed to complete/i.test(e.message);
+}
+
+export function queryTimeoutError(seconds?: number) {
+  return new ApiError(408, "QUERY_TIMEOUT", `A consulta excedeu o tempo limite${seconds ? ` de ${seconds}s` : ""}. Filtre mais, selecione menos colunas ou use "stream": true.`);
+}
+
 export async function handleApiError(error: unknown, context?: Record<string, unknown>) {
   if (error instanceof ApiError) {
     const res = fail(error.status, error.code, error.message, error.details);

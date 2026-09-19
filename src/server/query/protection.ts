@@ -69,6 +69,7 @@ type CacheEntry = {
   result: QueryCacheResult;
   expiresAt: number;
   hits: number;
+  bytes: number;
 };
 
 export type QueryCacheResult = {
@@ -80,7 +81,33 @@ export type QueryCacheResult = {
 };
 
 const cache = new Map<string, CacheEntry>();
+let cacheBytes = 0;
 
+// Orcamento em BYTES (antes so havia teto de 200 entradas, cada uma de ate 50MB): resultado grande nao e cacheado.
+const CACHE_MAX_BYTES = 64 * 1024 * 1024;      // total
+const CACHE_MAX_ENTRY_BYTES = 2 * 1024 * 1024; // por entrada
+
+/** Estimativa barata do tamanho serializado (amostra de ate 50 linhas). */
+export function estimateResultBytes(r: QueryCacheResult): number {
+  const n = r.rows.length;
+  if (n === 0) return 200;
+  const sample = r.rows.slice(0, Math.min(50, n));
+  const per = sample.reduce((acc, row) => acc + approxRowBytes(row), 0) / sample.length;
+  return Math.ceil(per * n) + r.columns.join("").length + 200;
+}
+
+function dropEntry(key: string): void {
+  const e = cache.get(key);
+  if (!e) return;
+  cacheBytes -= e.bytes;
+  cache.delete(key);
+}
+
+/**
+ * Chave do cache. `dataVersion` (max de last_data_at/updated_at + n. de tabelas dos datasets do escopo) faz o cache
+ * "mudar de endereco" quando um upload, sync ou derivada grava dados novos — antes o resultado velho vivia ate 5 min.
+ * `contractMode` evita servir, apos trocar o modo do contrato, um resultado gerado pelo outro modo.
+ */
 export function queryCacheKey(
   sql: string,
   datasetId: string | undefined,
@@ -91,23 +118,25 @@ export function queryCacheKey(
   principal: string,
   storageServerId: string | null,
   normalize = false,
+  dataVersion = "",
+  contractMode = "",
 ): string {
-  const raw = JSON.stringify({ sql: sql.trim(), datasetId, projectId, limit, offset, principal, storageServerId, normalize });
+  const raw = JSON.stringify({ sql: sql.trim(), datasetId, projectId, limit, offset, principal, storageServerId, normalize, dataVersion, contractMode });
   return createHash("sha256").update(raw).digest("hex").slice(0, 32);
 }
 
-export function getCachedResult(key: string): (QueryCacheResult & { cached: true; cacheHits: number }) | null {
+export function getCachedResult(key: string): { result: QueryCacheResult; hits: number } | null {
   const entry = cache.get(key);
   if (!entry) return null;
   if (Date.now() > entry.expiresAt) {
-    cache.delete(key);
+    dropEntry(key);
     return null;
   }
   entry.hits++;
   // Move para o final (LRU touch)
   cache.delete(key);
   cache.set(key, entry);
-  return { ...entry.result, cached: true, cacheHits: entry.hits };
+  return { result: entry.result, hits: entry.hits };
 }
 
 export function setCachedResult(
@@ -115,21 +144,22 @@ export function setCachedResult(
   result: QueryCacheResult,
   ttlMs = CACHE_TTL_MS,
 ): void {
-  // Evict entrada mais antiga se atingiu o limite
-  if (cache.size >= CACHE_MAX_ENTRIES) {
+  const bytes = estimateResultBytes(result);
+  if (bytes > CACHE_MAX_ENTRY_BYTES) return; // grande demais para valer a pena guardar
+  dropEntry(key);
+  // Libera os mais antigos ate caber (por entradas E por bytes)
+  while (cache.size > 0 && (cache.size >= CACHE_MAX_ENTRIES || cacheBytes + bytes > CACHE_MAX_BYTES)) {
     const oldest = cache.keys().next().value;
-    if (oldest) cache.delete(oldest);
+    if (oldest === undefined) break;
+    dropEntry(oldest);
   }
-  cache.set(key, { result, expiresAt: Date.now() + ttlMs, hits: 0 });
+  cache.set(key, { result, expiresAt: Date.now() + ttlMs, hits: 0, bytes });
+  cacheBytes += bytes;
 }
 
-export function invalidateCache(datasetId?: string, projectId?: string): void {
-  // Sem índice reverso — se precisar invalidar, limpa tudo ou deixa expirar
-  if (!datasetId && !projectId) {
-    cache.clear();
-    return;
-  }
-  // Mantém para expirar naturalmente (TTL curto já resolve)
+export function invalidateCache(): void {
+  cache.clear();
+  cacheBytes = 0;
 }
 
 export function getCacheStats() {
@@ -138,7 +168,7 @@ export function getCacheStats() {
   for (const entry of cache.values()) {
     if (now <= entry.expiresAt) active++;
   }
-  return { totalEntries: cache.size, activeEntries: active };
+  return { totalEntries: cache.size, activeEntries: active, bytes: cacheBytes };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

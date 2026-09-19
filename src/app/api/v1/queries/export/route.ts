@@ -5,7 +5,7 @@ import { resolveActor } from "@/server/auth/actor";
 import { syncActorGrants } from "@/server/auth/sync-grants";
 import { runStorageQuery } from "@/server/sql-contract/run";
 import { resolveQueryScope } from "@/server/auth/permissions";
-import { ApiError, handleApiError, publicQueryErrorMessage } from "@/server/http";
+import { ApiError, handleApiError, isQueryTimeout, publicQueryErrorMessage, queryTimeoutError } from "@/server/http";
 import { prisma } from "@/server/db";
 
 export async function POST(r: NextRequest) {
@@ -46,6 +46,7 @@ export async function POST(r: NextRequest) {
   } catch (e) {
     // Erro do banco (sintaxe, permissao, coluna...) e erro da CONSULTA do usuario: 400, como em /queries.
     if (!(e instanceof ApiError) && e instanceof Error && "code" in e) {
+      if (isQueryTimeout(e)) return handleApiError(queryTimeoutError(120));
       return handleApiError(new ApiError(400, "QUERY_FAILED", publicQueryErrorMessage(e.message)));
     }
     return handleApiError(e);

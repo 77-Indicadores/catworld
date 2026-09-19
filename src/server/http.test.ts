@@ -8,7 +8,7 @@ const sentry = vi.hoisted(() => ({
 }));
 vi.mock("@sentry/nextjs", () => sentry);
 
-import { ApiError, handleApiError, publicQueryErrorMessage } from "./http";
+import { ApiError, handleApiError, isQueryTimeout, publicQueryErrorMessage, queryTimeoutError } from "./http";
 
 const body = async (r: Response) => (await r.json()) as { data: unknown; meta: unknown; error: { code: string; message: string; details: any } };
 
@@ -87,5 +87,28 @@ describe("publicQueryErrorMessage", () => {
   it("mantem erro do SQL do usuario", () => {
     expect(publicQueryErrorMessage('column "id" does not exist')).toBe('column "id" does not exist');
     expect(publicQueryErrorMessage("Incorrect syntax near 'LIMIT'.")).toBe("Incorrect syntax near 'LIMIT'.");
+  });
+});
+
+describe("isQueryTimeout / queryTimeoutError", () => {
+  const pg = (code: string, message: string) => Object.assign(new Error(message), { code });
+  it("reconhece estouro de tempo do Postgres e do SQL Server", () => {
+    expect(isQueryTimeout(pg("57014", "canceling statement due to statement timeout"))).toBe(true);
+    expect(isQueryTimeout(new ApiError(400, "POSTGRES_QUERY_FAILED", "canceling statement due to statement timeout", { postgresCode: "57014" }))).toBe(true);
+    expect(isQueryTimeout(pg("ETIMEOUT", "Timeout: Request failed to complete in 30000ms"))).toBe(true);
+    expect(isQueryTimeout(new Error("Timeout: Request failed to complete in 120000ms"))).toBe(true);
+  });
+  it("nao confunde com outros erros de banco", () => {
+    expect(isQueryTimeout(pg("42601", "syntax error"))).toBe(false);
+    expect(isQueryTimeout(pg("42501", "permission denied"))).toBe(false);
+    expect(isQueryTimeout(new Error("qualquer"))).toBe(false);
+    expect(isQueryTimeout("texto")).toBe(false);
+  });
+  it("erro tem 408 e codigo QUERY_TIMEOUT (o SDK mapeia para QueryTimeoutError)", async () => {
+    const r = await handleApiError(queryTimeoutError(30));
+    expect(r.status).toBe(408);
+    const b = (await r.json()) as { error: { code: string; message: string } };
+    expect(b.error.code).toBe("QUERY_TIMEOUT");
+    expect(b.error.message).toContain("30s");
   });
 });
