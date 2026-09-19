@@ -11,6 +11,9 @@ const nextConfig: NextConfig = {
   env: { NEXT_PUBLIC_GIT_COMMIT: gitCommit() },
   reactStrictMode: true,
   output: "standalone",
+  // Pacotes com binários nativos (.node): o webpack não sabe empacotá-los e falha o build
+  // (ex.: ssh2/mssql/@node-rs/argon2/@duckdb/node-api). Mantê-los fora do bundle do servidor.
+  serverExternalPackages: ["ssh2", "mssql", "@node-rs/argon2", "@duckdb/node-api"],
   experimental: {
     // Default is 10 MB — data files routinely exceed this.
     // Valor fixo de build (nao acompanha o banco): teto alto de seguranca, igual a UPLOAD_HARD_CEILING_BYTES em
