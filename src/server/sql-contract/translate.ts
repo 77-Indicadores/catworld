@@ -106,12 +106,12 @@ function rejectKnownUnsupported(sql: string): void {
 
 const SENTINEL = "cwq_";
 
-/** `[Nome Col]` -> `cwq_0`, guardando o nome exato; literais e comentarios intactos. */
+/** `[Nome Col]` e `"Nome Col"` -> `cwq_0`, guardando o nome exato (identificador delimitado preserva a caixa). */
 function protectBracketIdentifiers(sql: string): { text: string; quoted: string[] } {
   const quoted: string[] = [];
   const text = mapOutsideLiterals(sql, (s) =>
-    s.replace(/\[([^\]]+)\]/g, (_m, name: string) => {
-      quoted.push(name);
+    s.replace(/\[([^\]]+)\]|"((?:[^"]|"")+)"/g, (_m, br: string | undefined, dq: string | undefined) => {
+      quoted.push(br ?? dq!.replace(/""/g, '"'));
       return `${SENTINEL}${quoted.length - 1}_`;
     }),
   );

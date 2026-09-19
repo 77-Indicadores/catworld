@@ -24,6 +24,14 @@ describe("translateTsql -> postgres", () => {
     expect(r.sql).toMatch(/\bvalor\b/);
   });
 
+  it("identificador entre aspas duplas mantem a caixa exata (delimitado, como no T-SQL)", () => {
+    const r = pg('SELECT "Id", "Nome Cliente" FROM "Vendas" ORDER BY "Id"');
+    expect(r.sql).toContain('"Id"');
+    expect(r.sql).toContain('"Nome Cliente"');
+    expect(r.sql).toContain('"Vendas"');
+    expect(r.sql).not.toMatch(/"id"/);
+  });
+
   it("comentario e string com palavras-chave nao sao tocados", () => {
     const r = pg("SELECT 'TOP 5 [x] ISNULL(' AS s FROM t -- SELECT TOP 9");
     expect(r.sql).toContain("'TOP 5 [x] ISNULL('");

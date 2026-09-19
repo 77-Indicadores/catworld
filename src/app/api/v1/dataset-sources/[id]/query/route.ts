@@ -8,6 +8,7 @@ import { ApiError, handleApiError, ok } from "@/server/http";
 import { executePostgresReadOnly, quotedPgTable } from "@/server/connections/postgres";
 import { executeMssqlReadOnly, quotedMssqlTable } from "@/server/connections/mssql";
 import { contractTranslate } from "@/server/sql-contract/apply";
+import { SqlContractError } from "@/server/sql-contract/translate";
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -31,7 +32,10 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     // TOP n pedido pelo usuario nao e truncamento (o corte e intencional)
     return ok(translated?.topLimit != null ? { ...result, truncated: false } : result);
   } catch (e) {
-    if (!(e instanceof ApiError) && e instanceof Error && "code" in e) {
+    // Compatibilidade: todo erro com "code" continua virando QUERY_FAILED (comportamento anterior);
+    // so o erro novo do contrato de SQL mantem o proprio codigo.
+    if (e instanceof SqlContractError) return handleApiError(e);
+    if (e instanceof Error && "code" in e) {
       Sentry.captureException(e);
       return handleApiError(new ApiError(400, "QUERY_FAILED", e.message));
     }
