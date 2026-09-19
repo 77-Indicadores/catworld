@@ -42,8 +42,7 @@ Somente leitura: uma instrucao, iniciando em `SELECT` ou `WITH`.
 | `ISNULL(a,b)` | `COALESCE(a,b)` |
 | `LEN(x)` | `LENGTH(x)` |
 | `IIF(c,a,b)` | `CASE WHEN c THEN a ELSE b END` |
-| `GETDATE()` / `SYSDATETIME()` | `LOCALTIMESTAMP` |
-| `GETUTCDATE()` | `NOW() AT TIME ZONE 'UTC'` |
+| `GETDATE()` / `GETUTCDATE()` / `SYSDATETIME()` | `NOW()` (instante; evita deslocamento de fuso no resultado) |
 | `NEWID()` | `gen_random_uuid()` |
 | `DATEADD(u,n,d)` | `d + n * INTERVAL '1 u'` |
 | `DATEDIFF(u,a,b)` | conta **fronteiras** cruzadas (igual ao T-SQL) |

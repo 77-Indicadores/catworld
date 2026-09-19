@@ -43,7 +43,7 @@ describe("translateTsql -> postgres", () => {
     expect(r).toContain("COALESCE(b, 0)");
     expect(r).toContain("LENGTH(c)");
     expect(r).toContain("CASE WHEN a > 1 THEN 'x' ELSE 'y' END");
-    expect(r).toContain("LOCALTIMESTAMP + (-7) * INTERVAL '1 day'");
+    expect(r).toContain("NOW() + (-7) * INTERVAL '1 day'");
   });
 
   it("DATEDIFF conta fronteiras", () => {

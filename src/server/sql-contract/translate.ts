@@ -232,8 +232,9 @@ function transformFunction(n: Node): Node {
   switch (f) {
     case "ISNULL": n.name.name[0].value = "COALESCE"; return n;
     case "LEN": n.name.name[0].value = "LENGTH"; return n;
-    case "GETDATE": case "SYSDATETIME": return raw("LOCALTIMESTAMP");
-    case "GETUTCDATE": case "SYSUTCDATETIME": return raw("(NOW() AT TIME ZONE 'UTC')");
+    // NOW() (instante) e nao LOCALTIMESTAMP / AT TIME ZONE 'UTC': estes devolvem horario SEM fuso, que o driver
+    // le como horario local do processo e desloca o valor quando app e banco tem fusos diferentes.
+    case "GETDATE": case "SYSDATETIME": case "GETUTCDATE": case "SYSUTCDATETIME": return raw("NOW()");
     case "NEWID": return raw("gen_random_uuid()");
     case "IIF": return raw(`(CASE WHEN ${emit(a[0])} THEN ${emit(a[1])} ELSE ${emit(a[2])} END)`);
     case "YEAR": case "MONTH": case "DAY":
