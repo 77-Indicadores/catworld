@@ -19,8 +19,9 @@ export function derivedRefreshInput(d: WorkspaceDerived): RefreshInput {
 export const sourceFreshness = (s: WorkspaceSource, now?: Date): Freshness => presentRefreshFreshness(sourceRefreshInput(s), now);
 export const derivedFreshness = (d: WorkspaceDerived, now?: Date): Freshness => presentRefreshFreshness(derivedRefreshInput(d), now);
 
-export function tableFreshness(t: WorkspaceTable, now?: Date): Freshness {
-  return presentTableFreshness({ lastDataAt: t.lastDataAt, sources: t.source ? [sourceRefreshInput(t.source)] : [] }, now);
+/** Frescor da tabela: da fonte e/ou da derivada que a alimenta; só upload = neutro. */
+export function tableFreshness(t: WorkspaceTable, derived: WorkspaceDerived | null = null, now?: Date): Freshness {
+  return presentTableFreshness({ lastDataAt: t.lastDataAt, sources: t.source ? [sourceRefreshInput(t.source)] : [], derived: derived ? derivedRefreshInput(derived) : null }, now);
 }
 
 /** De onde a fonte lê: `schema.tabela` (fonte de tabela) ou "Consulta personalizada" (fonte de SQL). */

@@ -13,6 +13,9 @@ import { FreshnessBlock } from "./table-detail/freshness-block";
 import { OriginBlock } from "./table-detail/origin-block";
 import { UsageBlock } from "./table-detail/usage-block";
 import { HistoryBlock } from "./table-detail/history-block";
+import { FreshnessDot } from "./freshness-dot";
+import { tableFreshness } from "@/lib/workspace/present";
+import { worstFreshness } from "@/lib/present";
 
 
 type Tab =
@@ -245,6 +248,11 @@ function ProjectMigrateStorageDialog({ project, storageServers, onChanged }: {
   );
 }
 
+/** Pior estado entre as tabelas do dataset (para o ponto na árvore). */
+function datasetFreshness(d: Dataset) {
+  return worstFreshness(d.tables.map(t => tableFreshness(t, d.derivedTables.find(dt => dt.targetTable?.id === t.id) ?? null)));
+}
+
 export function ProjectWorkspace({ project, publicOrigin, storageServers }: { project: Project; publicOrigin: string; storageServers: StorageServerOption[] }) {
   const router = useRouter();
   const [tabs, setTabs] = useState<Tab[]>([]);
@@ -361,7 +369,8 @@ export function ProjectWorkspace({ project, publicOrigin, storageServers }: { pr
                 >
                   <Database size={14} className="shrink-0 text-primary" />
                   <span className={"flex-1 truncate font-medium " + (activeTabId === "dataset-" + d.id ? "" : "text-base-content")}>{d.name}</span>
-                  <span className="text-xs text-base-content/30">{d.tables.length}</span>
+                  {datasetFreshness(d) && <FreshnessDot freshness={datasetFreshness(d)!} />}
+                  <span className="text-xs text-base-content/50">{d.tables.length}</span>
                 </button>
               </div>
               {expanded.has(d.id) && (
@@ -375,6 +384,7 @@ export function ProjectWorkspace({ project, publicOrigin, storageServers }: { pr
                     >
                       {t.source?.mode === "live" ? <Cable size={11} className="shrink-0" /> : t.source?.mode === "extract" ? <DatabaseZap size={11} className="shrink-0" /> : <Table2 size={11} className="shrink-0" />}
                       <span className="flex-1 truncate">{t.name}</span>
+                      <FreshnessDot freshness={tableFreshness(t, d.derivedTables.find(dt => dt.targetTable?.id === t.id) ?? null)} />
                       {tabs.some(tab => tab.id === "table-" + t.id) && activeTabId !== "table-" + t.id && <span className="size-1.5 shrink-0 rounded-full bg-primary/40" />}
                     </button>
                   ))}

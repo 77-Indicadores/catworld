@@ -3,6 +3,14 @@ import { ChevronRight, Database, FolderKanban, Timer } from "lucide-react";
 import { prisma } from "@/server/db";
 import { PageHeader, Panel, StatCard } from "@/components/ui/primitives";
 import { presentLongDate } from "@/lib/present";
+import { StatusBadge } from "@/components/ui/primitives";
+import { presentTableFreshness, type RefreshInput } from "@/lib/present";
+import { freshnessHeadline, summarizeFreshness, type FreshnessItem } from "@/lib/workspace/summary";
+
+/** Campos de frescor de uma fonte/derivada (Prisma) no formato do apresentador. */
+function toRefreshInput(x: { mode?: string | null; active?: boolean | null; lastStatus: string | null; lastError: string | null; refreshCron: string | null; nextRefreshAt: Date | null; lastRefreshedAt: Date | null }): RefreshInput {
+  return { mode: x.mode ?? "extract", active: x.active ?? true, lastStatus: x.lastStatus, lastError: x.lastError, refreshCron: x.refreshCron, nextRefreshAt: x.nextRefreshAt?.toISOString() ?? null, lastRefreshedAt: x.lastRefreshedAt?.toISOString() ?? null };
+}
 export const dynamic = "force-dynamic";
 
 type JobStatsRow = {
@@ -14,8 +22,6 @@ type JobStatsRow = {
 type AvgRow = { avg_sec: number | null };
 
 export default async function DashboardPage() {
-  const STALE_THRESHOLD = new Date(Date.now() - 24 * 60 * 60 * 1000);
-
   const [projectCount, datasetCount, avgRows, jobStatsRows, projectsData] =
     await Promise.all([
       prisma.project.count({ where: { active: true } }),
@@ -44,7 +50,10 @@ export default async function DashboardPage() {
           datasets: {
             where: { active: true },
             orderBy: { name: "asc" },
-            include: { tables: { select: { lastDataAt: true } } },
+            include: {
+              tables: { select: { id: true, name: true, lastDataAt: true, source: { select: { mode: true, active: true, lastStatus: true, lastError: true, refreshCron: true, nextRefreshAt: true, lastRefreshedAt: true } } } },
+              derivedTables: { where: { active: true }, select: { targetTableId: true, active: true, lastStatus: true, lastError: true, refreshCron: true, nextRefreshAt: true, lastRefreshedAt: true } },
+            },
           },
         },
       }),
@@ -53,6 +62,26 @@ export default async function DashboardPage() {
   const avgSec = avgRows[0]?.avg_sec ?? 0;
   const jobs = jobStatsRows[0] ?? { running_count: 0, queued_count: 0, completed_today: 0, failed_today: 0 };
   const tableCount = projectsData.reduce((n, p) => n + p.datasets.reduce((m, d) => m + d.tables.length, 0), 0);
+
+  // Frescor de verdade (cron, estado da fonte e da derivada), não "24 h sem dado": tabela só de upload não tem agenda.
+  const now = new Date();
+  const itemsByDataset = new Map<string, FreshnessItem[]>();
+  for (const p of projectsData) {
+    for (const d of p.datasets) {
+      const derivedByTarget = new Map(d.derivedTables.map((dt) => [dt.targetTableId, dt]));
+      itemsByDataset.set(d.id, d.tables.map((t) => {
+        const dt = derivedByTarget.get(t.id);
+        const freshness = presentTableFreshness({
+          lastDataAt: t.lastDataAt?.toISOString() ?? null,
+          sources: t.source ? [toRefreshInput(t.source)] : [],
+          derived: dt ? toRefreshInput({ ...dt, mode: "extract" }) : null,
+        }, now);
+        return { key: t.id, name: t.name, group: `${p.name} › ${d.name}`, href: `/projects/${p.slug}`, freshness };
+      }));
+    }
+  }
+  const allItems = [...itemsByDataset.values()].flat();
+  const attention = [...summarizeFreshness(allItems).failing, ...summarizeFreshness(allItems).stale];
 
   return (
     <div className="space-y-6">
@@ -83,6 +112,24 @@ export default async function DashboardPage() {
         </div>
       </Panel>
 
+      {attention.length > 0 && (
+        <Panel title="Precisa de atenção">
+          <ul className="divide-y divide-base-300">
+            {attention.slice(0, 12).map((it) => (
+              <li key={it.key} className="flex flex-wrap items-center justify-between gap-2 px-5 py-2.5 text-sm">
+                <div className="min-w-0">
+                  <Link href={it.href ?? "/projects"} className="font-medium hover:underline">{it.name}</Link>
+                  <span className="ml-2 text-xs text-base-content/70">{it.group}</span>
+                  {it.freshness.reason && <p className="truncate font-mono text-[11px] text-base-content/70">{it.freshness.reason}</p>}
+                </div>
+                <StatusBadge status={it.freshness.tone} label={it.freshness.label} />
+              </li>
+            ))}
+          </ul>
+          {attention.length > 12 && <p className="border-t border-base-300 px-5 py-2 text-xs text-base-content/70">e mais {attention.length - 12}…</p>}
+        </Panel>
+      )}
+
       <div className="grid gap-6">
         <Panel title="Atualização dos projetos">
           <div className="divide-y divide-base-300">
@@ -91,10 +138,8 @@ export default async function DashboardPage() {
             )}
             {projectsData.map((project) => {
               const allTables = project.datasets.flatMap((d) => d.tables);
-              const staleTables = allTables.filter(
-                (t) => !t.lastDataAt || t.lastDataAt < STALE_THRESHOLD,
-              );
-              const hasStale = staleTables.length > 0;
+              const projectSummary = summarizeFreshness(project.datasets.flatMap((d) => itemsByDataset.get(d.id) ?? []));
+              const headline = freshnessHeadline(projectSummary);
 
               return (
                 <details key={project.id} className="group">
@@ -107,15 +152,7 @@ export default async function DashboardPage() {
                       <span className="truncate text-sm font-medium">{project.name}</span>
                     </div>
                     <div className="ml-3 flex shrink-0 items-center gap-2">
-                      {hasStale ? (
-                        <span className="badge badge-sm badge-warning gap-1">
-                          {staleTables.length} desatualizada{staleTables.length !== 1 ? "s" : ""}
-                        </span>
-                      ) : allTables.length > 0 ? (
-                        <span className="badge badge-sm badge-success gap-1">Em dia</span>
-                      ) : (
-                        <span className="badge badge-sm badge-ghost">Sem tabelas</span>
-                      )}
+                      <StatusBadge status={headline.tone} label={headline.label} />
                       <span className="text-xs text-base-content/40">{allTables.length} tab.</span>
                     </div>
                   </summary>
@@ -125,9 +162,8 @@ export default async function DashboardPage() {
                       <p className="px-10 py-3 text-xs text-base-content/50">Sem datasets.</p>
                     )}
                     {project.datasets.map((dataset) => {
-                      const dsStale = dataset.tables.filter(
-                        (t) => !t.lastDataAt || t.lastDataAt < STALE_THRESHOLD,
-                      ).length;
+                      const dsSummary = summarizeFreshness(itemsByDataset.get(dataset.id) ?? []);
+                      const dsHeadline = freshnessHeadline(dsSummary);
                       const dsTotal = dataset.tables.length;
                       return (
                         <div key={dataset.id} className="flex items-center justify-between px-10 py-2.5">
@@ -138,11 +174,7 @@ export default async function DashboardPage() {
                             {dataset.name}
                           </Link>
                           <div className="flex items-center gap-2">
-                            {dsStale > 0 ? (
-                              <span className="badge badge-xs badge-warning">{dsStale} desatual.</span>
-                            ) : dsTotal > 0 ? (
-                              <span className="badge badge-xs badge-success">Em dia</span>
-                            ) : null}
+                            {dsTotal > 0 && <StatusBadge status={dsHeadline.tone} label={dsHeadline.label} />}
                             <span className="text-xs text-base-content/40">{dsTotal} tab.</span>
                           </div>
                         </div>
