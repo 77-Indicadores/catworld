@@ -29,7 +29,7 @@ const TOKEN_TOUCH_MS = 60_000; // lastUsedAt: no maximo 1 escrita por minuto por
 
 /** `rateLimit: false` so para caminhos que paginam pesado por natureza (OData). */
 export async function resolveActor(request?: NextRequest, opts: { rateLimit?: boolean; audit?: boolean } = {}): Promise<Actor> {
-  const auditStore = request && opts.audit !== false ? auditRequestBegin() : null;
+  const auditStore = request && opts.audit !== false ? auditRequestBegin(request) : null;
   let actor: Actor;
   try {
     actor = await identify(request);

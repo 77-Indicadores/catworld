@@ -14,6 +14,7 @@ import { queueImportUploadAuto } from "@/server/uploads/actions";
 import { enqueueDueSourceRefreshes, enqueueDueReconciliations, refreshDatasetSource, nextRefreshFromCron } from "@/server/connections/sources";
 import { enqueueDueDerivedRefreshes, refreshDerivedTable } from "@/server/connections/derived";
 import { pickInt } from "@/server/worker/config";
+import { auditJob } from "@/server/audit-request";
 import { startHeartbeat, currentRssMb, recordJobMetric, writeWorkerLiveness } from "./metrics";
 
 // Camada 1 (auditoria): o processo do worker (tsx src/worker/index.ts) roda fora
@@ -251,6 +252,19 @@ async function runMetadataCleanup() {
     }
     throw e;
   }
+}
+
+/** Recurso afetado pelo job, para a trilha de auditoria (id da fonte/derivada/upload; nunca o payload inteiro). */
+function jobResource(job: Claimed): { resourceType?: string; resourceId?: string | null } {
+  if (job.upload_id) return { resourceType: "upload", resourceId: job.upload_id };
+  try {
+    const p = job.payload_json ? (JSON.parse(job.payload_json) as Record<string, unknown>) : {};
+    if (typeof p.datasetSourceId === "string") return { resourceType: "dataset_source", resourceId: p.datasetSourceId };
+    if (typeof p.derivedTableId === "string") return { resourceType: "derived_table", resourceId: p.derivedTableId };
+  } catch {
+    // payload invalido: cai no id do job
+  }
+  return {};
 }
 
 async function work(job: Claimed) {
@@ -589,12 +603,17 @@ async function loop(concurrencyId: number) {
         fileSizeBytes, rssBeforeMb: rssBefore, rssAfterMb: currentRssMb(),
         durationMs: Date.now() - t0, workerLabel,
       });
+      await auditJob({ jobId: job.id, jobType: job.type, success: true, workerLabel, durationMs: Date.now() - t0, attempts: job.attempts, ...jobResource(job) });
     } catch (e) {
       await recordJobMetric({
         jobId: job.id, jobType: job.type, status: "FAILED", weight: job.weight,
         fileSizeBytes, rssBeforeMb: rssBefore, rssAfterMb: currentRssMb(),
         durationMs: Date.now() - t0, workerLabel,
         errorMessage: e instanceof Error ? e.message : String(e),
+      });
+      await auditJob({
+        jobId: job.id, jobType: job.type, success: false, workerLabel, durationMs: Date.now() - t0, attempts: job.attempts,
+        willRetry: job.attempts < job.max_attempts, error: e instanceof Error ? e.message : String(e), ...jobResource(job),
       });
       try {
         await fail(job, e);
