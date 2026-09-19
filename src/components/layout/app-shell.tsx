@@ -4,49 +4,77 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
-  ArrowUpFromLine, Bell, BookOpen, CheckCircle2, ChevronRight, CircleUserRound, CircleX, CloudCog, Database,
-  FolderKanban, Home, LayoutDashboard, Menu, Moon, Search,
+  ArrowUpFromLine, BookOpen, CheckCircle2, ChevronRight, CircleUserRound, CircleX, CloudCog, Database,
+  FolderKanban, Home, LayoutDashboard, LogOut, Menu, Moon, ScrollText,
   Settings, Sun, X,
 } from "lucide-react";
 
 type StorageStatus = { name: string; status: string | null; latencyMs: number | null } | null;
+export type ShellUser = { name: string; email: string; role: string } | null;
 
-const nav = [
+const ROLE_LABEL: Record<string, string> = {
+  ADMIN: "Administrador",
+  DATA_MANAGER: "Gestor de dados",
+  ANALYST: "Analista",
+  VIEWER: "Leitor",
+};
+
+/** `roles` ausente = todos os papéis. Espelha o que as rotas exigem (Configurações e seus filhos: só ADMIN). */
+const nav: { href: string; label: string; icon: React.ElementType; roles?: string[] }[] = [
   { href: "/dashboard", label: "Visão geral", icon: LayoutDashboard },
   { href: "/projects", label: "Projetos", icon: FolderKanban },
   { href: "/uploads", label: "Uploads", icon: ArrowUpFromLine },
-  { href: "/settings", label: "Configurações", icon: Settings },
+  { href: "/audit", label: "Auditoria", icon: ScrollText, roles: ["ADMIN", "DATA_MANAGER"] },
+  { href: "/settings", label: "Configurações", icon: Settings, roles: ["ADMIN"] },
 ];
+
+const CRUMB_LABEL: Record<string, string> = {
+  dashboard: "Visão geral", projects: "Projetos", uploads: "Uploads", settings: "Configurações", audit: "Auditoria",
+  users: "Usuários", tokens: "Tokens de API", "database-users": "Usuários SQL", "storage-servers": "Servidores SQL",
+  knowledge: "Base de conhecimento", connections: "Conexões", worker: "Worker", retention: "Retenção", "sql-contract": "Contrato SQL",
+};
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const crumbLabel = (segment: string) => CRUMB_LABEL[segment] ?? (UUID.test(segment) ? "Detalhe" : decodeURIComponent(segment).replaceAll("-", " "));
 
 const navBottom = [
   { href: "/knowledge", label: "Base de conhecimento", icon: BookOpen },
 ];
 
-export function AppShell({ children }: { children: React.ReactNode }) {
+export function AppShell({ children, user, signOutAction }: { children: React.ReactNode; user?: ShellUser; signOutAction?: () => Promise<void> }) {
   const pathname = usePathname();
 
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [dark, setDark] = useState(false);
   const [storageStatus, setStorageStatus] = useState<StorageStatus>(null);
 
+  // O tema inicial é aplicado antes da pintura por um script no layout (sem "piscar"); aqui só sincronizamos o estado.
   useEffect(() => {
-    document.documentElement.setAttribute("data-theme", dark ? "catworld-dark" : "catworld");
-  }, [dark]);
+    setDark(document.documentElement.getAttribute("data-theme") === "catworld-dark");
+  }, []);
+
+  function toggleTheme() {
+    const next = !dark;
+    setDark(next);
+    document.documentElement.setAttribute("data-theme", next ? "catworld-dark" : "catworld");
+    try { localStorage.setItem("cw-theme", next ? "dark" : "light"); } catch { /* armazenamento bloqueado: vale só nesta sessão */ }
+  }
 
   useEffect(() => {
+    if (!user) return;
     fetch("/api/v1/storage-servers")
-      .then(r => r.json())
-      .then((j: { data?: { name: string; lastStatus: string | null; lastLatencyMs: number | null; isDefault: boolean }[] }) => {
-        const def = j.data?.find(s => s.isDefault) ?? j.data?.[0];
+      .then(r => (r.ok ? r.json() : null))
+      .then((j: { data?: { name: string; lastStatus: string | null; lastLatencyMs: number | null; isDefault: boolean }[] } | null) => {
+        const def = j?.data?.find(s => s.isDefault) ?? j?.data?.[0];
         if (def) setStorageStatus({ name: def.name, status: def.lastStatus, latencyMs: def.lastLatencyMs });
       })
       .catch(() => undefined);
-  }, []);
+  }, [user]);
 
   if (pathname === "/login") return <>{children}</>;
 
   const isWorkspace = /^\/projects\/[^/]+/.test(pathname);
-  const crumbs = pathname.split("/").filter(Boolean).map((item) => item.replaceAll("-", " "));
+  const crumbs = pathname.split("/").filter(Boolean).map(crumbLabel);
+  const visibleNav = nav.filter((item) => !item.roles || (user && item.roles.includes(user.role)));
 
   const sidebar = isWorkspace ? null : (
     <aside className={`fixed inset-y-0 left-0 z-40 flex w-[220px] flex-col border-r border-base-300 bg-base-100 transition-transform lg:sticky lg:top-0 lg:h-screen lg:w-[60px] xl:w-[220px] ${sidebarOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"}`}>
@@ -55,13 +83,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-primary text-primary-content shadow-sm"><Database size={19} /></span>
             <span className="xl:block hidden"><strong className="block leading-none">Catworld</strong><small className="text-[10px] uppercase tracking-[0.2em] text-base-content/45">data lake</small></span>
           </Link>
-          <button className="btn btn-ghost btn-sm btn-square lg:hidden" onClick={() => setSidebarOpen(false)}><X size={18} /></button>
+          <button aria-label="Fechar menu" className="btn btn-ghost btn-sm btn-square lg:hidden" onClick={() => setSidebarOpen(false)}><X size={18} /></button>
         </div>
         <nav className="flex-1 overflow-y-auto p-2 xl:p-3">
           <p className="hidden px-3 pb-2 pt-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-base-content/40 xl:block">Workspace</p>
           <ul className="menu w-full gap-1 p-0">
-            {nav.map((item) => {
-              const settingsSubpaths = ["/settings", "/storage-servers", "/users", "/tokens", "/database-users", "/audit"];
+            {visibleNav.map((item) => {
+              const settingsSubpaths = ["/settings", "/storage-servers", "/users", "/tokens", "/database-users"];
               const active = item.href === "/settings"
                 ? settingsSubpaths.some(p => pathname === p || pathname.startsWith(`${p}/`))
                 : pathname === item.href || (item.href !== "/dashboard" && pathname.startsWith(`${item.href}/`));
@@ -118,32 +146,35 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           {isWorkspace ? (
             <Link href="/projects" className="btn btn-ghost btn-sm btn-square" aria-label="Voltar para projetos"><Home size={20} /></Link>
           ) : (
-            <button className="btn btn-ghost btn-sm btn-square lg:hidden" onClick={() => setSidebarOpen(true)}><Menu size={20} /></button>
+            <button aria-label="Abrir menu" aria-expanded={sidebarOpen} className="btn btn-ghost btn-sm btn-square lg:hidden" onClick={() => setSidebarOpen(true)}><Menu size={20} /></button>
           )}
-          <label className="input input-sm hidden w-full max-w-md items-center gap-2 bg-base-200 md:flex">
-            <Search size={15} className="text-base-content/45" />
-            <input type="search" placeholder="Buscar projetos, datasets ou tabelas..." className="grow" />
-            <kbd className="kbd kbd-xs">⌘ K</kbd>
-          </label>
           <div className="ml-auto flex items-center gap-1">
-            <button aria-label="Alternar tema" className="btn btn-ghost btn-sm btn-square" onClick={() => setDark(!dark)}>{dark ? <Sun size={18} /> : <Moon size={18} />}</button>
-            <button aria-label="Notificações" className="btn btn-ghost btn-sm btn-square"><Bell size={18} /></button>
-            <div className="dropdown dropdown-end">
-              <button tabIndex={0} className="btn btn-ghost btn-sm gap-2"><CircleUserRound size={20} /><span className="hidden sm:inline">Ana Souza</span></button>
-              <ul tabIndex={0} className="menu dropdown-content z-50 mt-2 w-52 rounded-box border border-base-300 bg-base-100 p-2 shadow-xl">
-                <li><a>Meu perfil</a></li><li><a>Preferências</a></li><li><a>Sair</a></li>
-              </ul>
-            </div>
+            <button aria-label={dark ? "Usar tema claro" : "Usar tema escuro"} className="btn btn-ghost btn-sm btn-square" onClick={toggleTheme}>{dark ? <Sun size={18} /> : <Moon size={18} />}</button>
+            {user && (
+              <div className="dropdown dropdown-end">
+                <button tabIndex={0} className="btn btn-ghost btn-sm gap-2" aria-label={`Conta de ${user.name}`}><CircleUserRound size={20} /><span className="hidden sm:inline">{user.name}</span></button>
+                <div tabIndex={0} className="dropdown-content z-50 mt-2 w-64 rounded-box border border-base-300 bg-base-100 p-3 shadow-xl">
+                  <p className="truncate text-sm font-medium">{user.name}</p>
+                  <p className="truncate text-xs text-base-content/70">{user.email}</p>
+                  <p className="mt-1 text-xs text-base-content/70">{ROLE_LABEL[user.role] ?? user.role}</p>
+                  {signOutAction && (
+                    <form action={signOutAction} className="mt-3 border-t border-base-300 pt-3">
+                      <button type="submit" className="btn btn-ghost btn-sm w-full justify-start gap-2"><LogOut size={15} />Sair</button>
+                    </form>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         </header>
         {isWorkspace ? (
           <main className="overflow-hidden">{children}</main>
         ) : (
           <main className="p-4 sm:p-6 lg:p-8">
-            <div className="mb-5 flex items-center gap-1 text-xs capitalize text-base-content/45">
+            <nav aria-label="Você está em" className="mb-5 flex items-center gap-1 text-xs text-base-content/60">
               <span>Catworld</span>
-              {crumbs.map((crumb) => <span className="flex items-center gap-1" key={crumb}><ChevronRight size={12} /><span>{crumb}</span></span>)}
-            </div>
+              {crumbs.map((crumb, i) => <span className="flex items-center gap-1" key={`${i}-${crumb}`}><ChevronRight size={12} /><span>{crumb}</span></span>)}
+            </nav>
             <div className="mx-auto max-w-[1500px]">{children}</div>
           </main>
         )}
