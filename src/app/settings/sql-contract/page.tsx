@@ -182,15 +182,15 @@ export default function SqlContractSettingsPage() {
           )}
           {stats && stats.top.length > 0 ? (
             <div className="overflow-x-auto">
-              <table className="table table-xs">
+              <table className="table table-xs table-stack">
                 <thead><tr><th>Ocorrências</th><th>O que aconteceu</th><th>Caminho</th><th>Consulta (formato)</th></tr></thead>
                 <tbody>
                   {stats.top.map((t) => (
                     <tr key={`${t.kind}|${t.path}|${t.hash}`}>
-                      <td className="font-mono">{t.count}</td>
-                      <td>{KIND_LABEL[t.kind] ?? t.kind}{t.message ? <div className="text-base-content/65">{t.message}</div> : null}</td>
-                      <td className="font-mono">{t.path}</td>
-                      <td className="font-mono max-w-md truncate" title={t.shape}>{t.shape}</td>
+                      <td data-label="Ocorrências" className="font-mono">{t.count}</td>
+                      <td data-label="O que aconteceu">{KIND_LABEL[t.kind] ?? t.kind}{t.message ? <div className="text-base-content/65">{t.message}</div> : null}</td>
+                      <td data-label="Caminho" className="font-mono">{t.path}</td>
+                      <td data-label="Consulta" className="font-mono max-w-md truncate" title={t.shape}>{t.shape}</td>
                     </tr>
                   ))}
                 </tbody>

@@ -83,10 +83,10 @@ function RunRow({ run }: { run: CleanupRun }) {
 
   return (
     <tr className="text-xs">
-      <td className="py-2 pr-4 whitespace-nowrap text-base-content/70">
+      <td data-label="Início" className="py-2 pr-4 whitespace-nowrap text-base-content/70">
         <Time iso={run.started_at} />
       </td>
-      <td className="py-2 pr-4">
+      <td data-label="Status" className="py-2 pr-4">
         {running ? (
           <span className="badge badge-sm badge-warning badge-soft">rodando</span>
         ) : failed ? (
@@ -97,8 +97,8 @@ function RunRow({ run }: { run: CleanupRun }) {
           <span className="badge badge-sm badge-success badge-soft">ok</span>
         )}
       </td>
-      <td className="py-2 pr-4 text-base-content/65">{run.duration_ms ? fmtDuration(run.duration_ms) : "—"}</td>
-      <td className="py-2 pr-4 tabular-nums">
+      <td data-label="Duração" className="py-2 pr-4 text-base-content/65">{run.duration_ms ? fmtDuration(run.duration_ms) : "—"}</td>
+      <td data-label="Resultado" className="py-2 pr-4 tabular-nums">
         {failed ? (
           <span className="text-error text-xs truncate max-w-[200px] block" title={run.error ?? ""}>
             {run.error}
@@ -109,7 +109,7 @@ function RunRow({ run }: { run: CleanupRun }) {
           </span>
         )}
       </td>
-      <td className="py-2 text-base-content/65 text-right tabular-nums">
+      <td data-label="Detalhes" className="py-2 text-base-content/65 text-right tabular-nums">
         {!failed && (
           <span title={`jobs=${run.deleted_jobs} audit=${run.deleted_audit} uploads=${run.deleted_uploads} arquivos=${run.deleted_files} órfãos=${run.deleted_orphans} versões=${run.deleted_versions}`}>
             j{run.deleted_jobs} · a{run.deleted_audit} · u{run.deleted_uploads} · v{run.deleted_versions}
@@ -287,7 +287,7 @@ export default function RetentionPage() {
             <p className="text-sm text-base-content/65 py-4 text-center">Nenhuma execução registrada ainda.</p>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full">
+              <table className="w-full table-stack">
                 <thead>
                   <tr className="text-xs text-base-content/65 border-b border-base-200">
                     <th className="pb-2 pr-4 text-left font-medium">Início</th>
