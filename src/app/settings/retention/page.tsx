@@ -2,6 +2,8 @@
 import { useEffect, useState, useCallback } from "react";
 import { CheckCircle2, Trash2, RefreshCw, Clock, AlertCircle } from "lucide-react";
 import { PageHeader, Panel } from "@/components/ui/primitives";
+import { useFeedback } from "@/components/ui/feedback";
+import { apiErrorText } from "@/lib/api-client";
 
 type Settings = {
   jobs_days: number;
@@ -119,6 +121,7 @@ function RunRow({ run }: { run: CleanupRun }) {
 }
 
 export default function RetentionPage() {
+  const { confirm: askConfirm } = useFeedback();
   const [settings, setSettings] = useState<Settings | null>(null);
   const [history, setHistory] = useState<CleanupRun[]>([]);
   const [saved, setSaved] = useState(false);
@@ -158,20 +161,25 @@ export default function RetentionPage() {
     setSaving(false);
     if (!r.ok) {
       const b = await r.json().catch(() => ({}));
-      setError(b.error?.message ?? "Falha ao salvar");
+      setError(apiErrorText(b, "Falha ao salvar"));
     } else {
       setSaved(true);
     }
   }
 
   async function purge() {
-    if (!confirm("Isso vai deletar registros além do período de retenção agora. Confirma?")) return;
+    if (!await askConfirm({
+      title: "Limpar agora",
+      message: "Apaga já os jobs, eventos de auditoria, uploads e versões de dados mais antigos que os períodos salvos nesta tela. Eventos de auditoria apagados não podem ser recuperados.",
+      confirmLabel: "Limpar agora",
+      danger: true,
+    })) return;
     setPurging(true); setPurgeOk(false); setError("");
     const r = await fetch("/api/v1/settings/retention/purge", { method: "POST" });
     setPurging(false);
     if (!r.ok) {
       const b = await r.json().catch(() => ({}));
-      setError(b.error?.message ?? "Falha ao enfileirar purga");
+      setError(apiErrorText(b, "Falha ao enfileirar purga"));
     } else {
       setPurgeOk(true);
       setTimeout(loadHistory, 1500);

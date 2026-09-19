@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { AppShell } from "@/components/layout/app-shell";
+import { FeedbackProvider } from "@/components/ui/feedback";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -11,7 +12,9 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
   return (
     <html lang="pt-BR" data-theme="catworld" suppressHydrationWarning>
       <body>
-        <AppShell>{children}</AppShell>
+        <FeedbackProvider>
+          <AppShell>{children}</AppShell>
+        </FeedbackProvider>
       </body>
     </html>
   );

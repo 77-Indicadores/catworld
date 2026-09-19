@@ -3,6 +3,7 @@
 import { useRef, useState } from "react";
 import { Cron } from "croner";
 import { Pencil, Play } from "lucide-react";
+import { apiErrorText } from "@/lib/api-client";
 
 type Column = { originalName: string; sqlName: string; sqlType: string };
 type Source = {
@@ -74,7 +75,7 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
     const response = await fetch(`/api/v1/connections/${source.connection.id}/columns?sql=${encodeURIComponent(sql)}`);
     const body = await response.json();
     setTesting(false);
-    if (!response.ok) { setSqlStatus("error"); setError(body.error?.message ?? "Falha ao testar consulta"); return; }
+    if (!response.ok) { setSqlStatus("error"); setError(apiErrorText(body, "Falha ao testar consulta")); return; }
     setColumns(body.data ?? []);
     setSqlTested(sql);
     setSqlStatus("ok");
@@ -104,7 +105,7 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
       body: JSON.stringify(body),
     });
     setLoading(false);
-    if (!response.ok) { const b = await response.json(); setError(b.error?.message ?? "Falha ao salvar"); return; }
+    if (!response.ok) { const b = await response.json(); setError(apiErrorText(b, "Falha ao salvar")); return; }
     ref.current?.close();
     onComplete();
   }

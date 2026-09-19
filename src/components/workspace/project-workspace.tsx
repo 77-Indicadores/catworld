@@ -8,6 +8,7 @@ import { EditCatalogDialog } from "@/components/management/edit-catalog-dialog";
 import { TablePanel } from "./table-panel";
 import { QueryPanel } from "./query-panel";
 import { DatasetPanel } from "./dataset-panel";
+import { apiErrorText } from "@/lib/api-client";
 
 type Column = { id: string; sqlName: string; originalName: string; sqlType: string; nullable: boolean };
 type TableSource = { id: string; name: string; mode: string; sourceKind: string; sourceGroupId: string | null; sourceSchema: string | null; sourceTable: string | null; sourceSql: string | null; refreshCron: string | null; keyColumn: string | null; deltaColumn: string | null; reconciliationCron: string | null; sourceSqlReconciliation: string | null; active: boolean; lastStatus: string | null; lastRowCount: string | null; lastError: string | null; lastRefreshedAt: string | null; nextRefreshAt: string | null; connection: { id: string; name: string } };
@@ -59,7 +60,7 @@ function MetadataPanel({ table, dataset, onChanged }: { table: Table; dataset: D
     setRefreshing(true); setError(""); setNotice("");
     const r = await fetch(`/api/v1/dataset-sources/${table.source.id}/refresh`, { method: "POST" });
     setRefreshing(false);
-    if (!r.ok) { const body = await r.json().catch(() => ({})); setError(body.error?.message ?? "Falha ao enfileirar"); return; }
+    if (!r.ok) { const body = await r.json().catch(() => ({})); setError(apiErrorText(body, "Falha ao enfileirar")); return; }
     setNotice("Atualização enfileirada."); onChanged();
   }
 
@@ -163,7 +164,7 @@ function DeleteTableButton({ tableId, tableName, onDeleted }: { tableId: string;
     setDeleting(true); setError("");
     const r = await fetch(`/api/v1/tables/${tableId}`, { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ confirmName: confirm }) });
     setDeleting(false);
-    if (!r.ok) { const b = await r.json(); setError(b.error?.message ?? "Falha ao excluir"); return; }
+    if (!r.ok) { const b = await r.json(); setError(apiErrorText(b, "Falha ao excluir")); return; }
     onDeleted();
   }
 
@@ -223,7 +224,7 @@ function ProjectMigrateStorageDialog({ project, storageServers, onChanged }: {
         body: JSON.stringify({ targetStorageServerId: targetId }),
       });
       const j = await r.json() as { data?: { datasetsMigrated: number }; error?: { message: string } };
-      if (!r.ok) { setError(j.error?.message ?? "Erro na migração"); setMigrating(false); return; }
+      if (!r.ok) { setError(apiErrorText(j, "Erro na migração")); setMigrating(false); return; }
       setResult(`✓ ${j.data?.datasetsMigrated ?? 0} dataset(s) migrado(s) com sucesso`);
       setMigrating(false);
       onChanged();

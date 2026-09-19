@@ -10,6 +10,8 @@ import { UploadFlow } from "./upload-flow";
 import { SourceDialog } from "./source-dialog";
 import { SourceEditDialog } from "./source-edit-dialog";
 import { PowerBIDialog } from "./powerbi-dialog";
+import { useApiAction, useFeedback } from "@/components/ui/feedback";
+import { apiErrorText } from "@/lib/api-client";
 
 type Source = {
   id: string; name: string; mode: string; sourceKind: string;
@@ -110,6 +112,7 @@ function BatchGroupRow({ groupId, datasetId, sources, tables, onSelectTable, onC
   groupId: string; datasetId: string; sources: Source[]; tables: Table[];
   onSelectTable: (id: string) => void; onChanged: () => void;
 }) {
+  const { confirm: askConfirm } = useFeedback(); const runAction = useApiAction();
   const [refreshing, setRefreshing] = useState(false);
   const rep = sources[0]!; // representative source — all share mode/policy/status/connection
   const activeSources = sources.filter(s => s.active);
@@ -147,9 +150,8 @@ function BatchGroupRow({ groupId, datasetId, sources, tables, onSelectTable, onC
 
   async function deleteGroup() {
     const label = `${tables.length} tabela${tables.length !== 1 ? "s" : ""} de ${rep.sourceSchema ?? rep.connection.name}`;
-    if (!confirm(`Remover importacao com ${label}? Isto removera ${tables.length} tabela${tables.length !== 1 ? "s" : ""} deste dataset e os dados materializados no Catworld. A origem externa nao sera alterada.`)) return;
-    await fetch(`/api/v1/source-groups/${groupId}`, { method: "DELETE" });
-    onChanged();
+    if (!await askConfirm({ title: "Remover importação", message: `Remover a importação com ${label}? Isto removerá ${tables.length} tabela${tables.length !== 1 ? "s" : ""} deste dataset e os dados materializados no Catworld. A origem externa não será alterada.`, confirmLabel: "Remover", danger: true })) return;
+    if (await runAction(`/api/v1/source-groups/${groupId}`, { method: "DELETE" }, "Importação removida.")) onChanged();
   }
 
   return (
@@ -195,9 +197,8 @@ function BatchGroupRow({ groupId, datasetId, sources, tables, onSelectTable, onC
             </button>
             <button
               onClick={async () => {
-                if (tables.length <= 1 && !confirm("Remover a última tabela apagará a importação inteira. Continuar?")) return;
-                await fetch("/api/v1/dataset-sources/" + t.source!.id, { method: "DELETE" });
-                onChanged();
+                if (tables.length <= 1 && !await askConfirm({ title: "Remover a última tabela", message: "Remover a última tabela apagará a importação inteira. Continuar?", confirmLabel: "Remover", danger: true })) return;
+                if (await runAction("/api/v1/dataset-sources/" + t.source!.id, { method: "DELETE" }, "Tabela removida.")) onChanged();
               }}
               className="mr-1 hidden rounded p-1 text-error/30 hover:text-error group-hover:block"
               title="Remover tabela"
@@ -453,6 +454,7 @@ function GroupEditDialog({ groupId, datasetId, connectionId, connectionName, sou
 function SingleSourceRow({ source: s, table: t, onSelectTable, onChanged }: {
   source: Source; table: Table; onSelectTable: (id: string) => void; onChanged: () => void;
 }) {
+  const { confirm: askConfirm } = useFeedback(); const runAction = useApiAction();
   const [refreshing, setRefreshing] = useState(false);
 
   async function refreshSource() {
@@ -463,9 +465,8 @@ function SingleSourceRow({ source: s, table: t, onSelectTable, onChanged }: {
   }
 
   async function deleteSource() {
-    if (!confirm(`Remover a fonte "${s.name}"? Isto removera a tabela "${t.name}" deste dataset e os dados materializados no Catworld. A origem externa nao sera alterada.`)) return;
-    await fetch(`/api/v1/dataset-sources/${s.id}`, { method: "DELETE" });
-    onChanged();
+    if (!await askConfirm({ title: "Remover fonte", message: `Remover a fonte "${s.name}"? Isto removerá a tabela "${t.name}" deste dataset e os dados materializados no Catworld. A origem externa não será alterada.`, confirmLabel: "Remover", danger: true })) return;
+    if (await runAction(`/api/v1/dataset-sources/${s.id}`, { method: "DELETE" }, "Fonte removida.")) onChanged();
   }
 
   async function toggleActive() {
@@ -563,7 +564,7 @@ function DerivedCreateDialog({ datasetId, onComplete }: { datasetId: string; onC
       body: JSON.stringify({ name, querySql, refreshCron: refreshCron.trim() || null, triggerNow: runNow }),
     });
     setSaving(false);
-    if (!r.ok) { const b = await r.json().catch(() => ({})); setError(b.error?.message ?? "Erro ao criar"); return; }
+    if (!r.ok) { const b = await r.json().catch(() => ({})); setError(apiErrorText(b, "Erro ao criar")); return; }
     close(); onComplete();
   }
 
@@ -643,7 +644,7 @@ function DerivedEditDialog({ dt, onComplete }: { dt: DerivedTable; onComplete: (
       body: JSON.stringify({ name, querySql, refreshCron: refreshCron.trim() || null }),
     });
     setSaving(false);
-    if (!r.ok) { const b = await r.json().catch(() => ({})); setError(b.error?.message ?? "Erro ao salvar"); return; }
+    if (!r.ok) { const b = await r.json().catch(() => ({})); setError(apiErrorText(b, "Erro ao salvar")); return; }
     close(); onComplete();
   }
 
@@ -698,6 +699,7 @@ function DerivedEditDialog({ dt, onComplete }: { dt: DerivedTable; onComplete: (
 function DerivedRow({ dt, schemaName, onSelectTable, onChanged }: {
   dt: DerivedTable; schemaName: string; onSelectTable: (id: string) => void; onChanged: () => void;
 }) {
+  const { confirm: askConfirm } = useFeedback(); const runAction = useApiAction();
   const [refreshing, setRefreshing] = useState(false);
   const status = derivedStatusKind(dt);
   const label = derivedStatusLabel(dt);
@@ -711,9 +713,8 @@ function DerivedRow({ dt, schemaName, onSelectTable, onChanged }: {
   }
 
   async function deleteDerived() {
-    if (!confirm(`Excluir "${dt.name}"? A tabela materializada será removida do Catworld.`)) return;
-    await fetch(`/api/v1/derived-tables/${dt.id}`, { method: "DELETE" });
-    onChanged();
+    if (!await askConfirm({ title: "Excluir tabela derivada", message: `Excluir "${dt.name}"? A tabela materializada será removida do Catworld.`, confirmLabel: "Excluir", danger: true })) return;
+    if (await runAction(`/api/v1/derived-tables/${dt.id}`, { method: "DELETE" }, "Tabela derivada excluída.")) onChanged();
   }
 
   return (
@@ -785,15 +786,15 @@ export function DatasetPanel({ dataset, projectSlug, publicOrigin, storageServer
   dataset: Dataset; projectSlug: string; publicOrigin: string; storageServers: StorageServerOption[];
   onSelectTable: (tableId: string) => void; onChanged: () => void;
 }) {
+  const { confirm: askConfirm } = useFeedback(); const runAction = useApiAction();
   const derivedTargetIds = new Set(dataset.derivedTables.map(dt => dt.targetTable?.id).filter(Boolean));
   const uploadTables = dataset.tables.filter(t => !t.source && !derivedTargetIds.has(t.id));
   const sourceGroups = buildGroups(dataset.tables);
   const [uploadOpen, setUploadOpen] = useState(false);
 
   async function deleteTable(id: string, name: string) {
-    if (!confirm(`Excluir a tabela "${name}"? Esta ação não pode ser desfeita.`)) return;
-    await fetch(`/api/v1/tables/${id}`, { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ confirmName: name }) });
-    onChanged();
+    if (!await askConfirm({ title: "Excluir tabela", message: `Excluir a tabela "${name}"? Esta ação não pode ser desfeita.`, confirmLabel: "Excluir", danger: true, typeToConfirm: name })) return;
+    if (await runAction(`/api/v1/tables/${id}`, { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ confirmName: name }) }, "Tabela excluída.")) onChanged();
   }
 
   return (

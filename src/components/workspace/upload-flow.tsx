@@ -2,6 +2,7 @@
 import { useRef, useState, useEffect } from "react";
 import { Check, Loader2, UploadCloud, XCircle, AlertTriangle } from "lucide-react";
 import { previewFileInBrowser, type FilePreviewResult } from "@/lib/duckdb-preview";
+import { apiErrorText } from "@/lib/api-client";
 
 type FileJob = {
   id: string;
@@ -109,7 +110,7 @@ export function UploadFlow({
           body: JSON.stringify(createBody),
         });
         const b = await first.json();
-        if (!first.ok) throw new Error(b.error?.message ?? "Falha ao criar upload");
+        if (!first.ok) throw new Error(apiErrorText(b, "Falha ao criar upload"));
 
         if (b.data.skip) {
           update({ status: "completed", statusLabel: "Concluído (sem alterações)" });
@@ -159,7 +160,7 @@ export function UploadFlow({
             }),
           });
           const confirmBody = await confirmRes.json();
-          if (!confirmRes.ok) throw new Error(confirmBody.error?.message ?? "Falha ao confirmar");
+          if (!confirmRes.ok) throw new Error(apiErrorText(confirmBody, "Falha ao confirmar"));
 
           await pollForCompletion(uploadId, (label) => update({ statusLabel: label }));
         }

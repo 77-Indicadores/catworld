@@ -2,11 +2,14 @@
 import { useRef, useState } from "react";
 import { ShieldCheck, Trash2 } from "lucide-react";
 import { useRouter } from "next/navigation";
+import { useApiAction, useFeedback } from "@/components/ui/feedback";
+import { apiErrorText } from "@/lib/api-client";
 
 type Grant = { id: string; scopeType: string; permission: string; project: { name: string } | null; dataset: { name: string; project: { name: string } } | null };
 type Project = { id: string; name: string; datasets: { id: string; name: string }[] };
 
 export function ManageGrantsDialog({ userId, userName }: { userId: string; userName: string }) {
+  const { confirm: askConfirm } = useFeedback(); const runAction = useApiAction();
   const ref = useRef<HTMLDialogElement>(null), router = useRouter();
   const [grants, setGrants] = useState<Grant[]>([]), [projects, setProjects] = useState<Project[]>([]), [error, setError] = useState("");
   const [scopeType, setScopeType] = useState("GLOBAL");
@@ -21,10 +24,11 @@ export function ManageGrantsDialog({ userId, userName }: { userId: string; userN
   }
   function open() { ref.current?.showModal(); void load(); }
   async function revoke(id: string) {
-    if (!confirm("Revogar este acesso?")) return;
-    await fetch(`/api/v1/users/${userId}/grants/${id}`, { method: "DELETE" });
-    await load();
-    router.refresh();
+    if (!await askConfirm({ title: "Revogar acesso", message: "A pessoa perde o acesso imediatamente.", confirmLabel: "Revogar", danger: true })) return;
+    if (await runAction(`/api/v1/users/${userId}/grants/${id}`, { method: "DELETE" }, "Acesso revogado.")) {
+      await load();
+      router.refresh();
+    }
   }
   async function add(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -42,7 +46,7 @@ export function ManageGrantsDialog({ userId, userName }: { userId: string; userN
         permission: f.get("permission"),
       }),
     });
-    if (!response.ok) { const body = await response.json(); setError(body.error?.message ?? "Falha ao conceder acesso"); return; }
+    if (!response.ok) { const body = await response.json(); setError(apiErrorText(body, "Falha ao conceder acesso")); return; }
     e.currentTarget.reset();
     setScopeType("GLOBAL");
     await load();

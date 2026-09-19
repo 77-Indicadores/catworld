@@ -2,6 +2,7 @@
 import { useRef, useState } from "react";
 import { Pencil, TriangleAlert } from "lucide-react";
 import { useRouter } from "next/navigation";
+import { apiErrorText } from "@/lib/api-client";
 
 type Props = { kind: "project" | "dataset"; id: string; name: string; description: string | null; active: boolean };
 
@@ -24,7 +25,7 @@ export function EditCatalogDialog({ kind, id, name, description, active }: Props
       body: JSON.stringify({ name: f.get("name"), description: f.get("description") || null, active: f.get("active") === "on" }),
     });
     const body = await response.json();
-    if (!response.ok) { setError(body.error?.message ?? "Falha ao salvar"); return; }
+    if (!response.ok) { setError(apiErrorText(body, "Falha ao salvar")); return; }
     close();
     router.refresh();
   }
@@ -38,7 +39,7 @@ export function EditCatalogDialog({ kind, id, name, description, active }: Props
       body: JSON.stringify({ confirmName }),
     });
     setDeleting(false);
-    if (!response.ok) { const body = await response.json(); setError(body.error?.message ?? "Falha ao excluir"); return; }
+    if (!response.ok) { const body = await response.json(); setError(apiErrorText(body, "Falha ao excluir")); return; }
     close();
     router.refresh();
   }

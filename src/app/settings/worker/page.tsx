@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { CheckCircle2, RefreshCw, Zap } from "lucide-react";
 import { PageHeader, Panel } from "@/components/ui/primitives";
+import { apiErrorText } from "@/lib/api-client";
 
 type Settings = {
   max_heavy_jobs: number;
@@ -144,7 +145,7 @@ export default function WorkerPage() {
     setSaving(false);
     if (!r.ok) {
       const b = await r.json().catch(() => ({}));
-      setError(b.error?.message ?? "Falha ao salvar");
+      setError(apiErrorText(b, "Falha ao salvar"));
     } else {
       setSaved(true);
     }

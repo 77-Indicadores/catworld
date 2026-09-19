@@ -1,6 +1,8 @@
 "use client";
 import { useRef, useState } from "react";
 import { Download, Play } from "lucide-react";
+import { apiErrorText, warningsOf } from "@/lib/api-client";
+import { useFeedback } from "@/components/ui/feedback";
 
 type Dataset = { id: string; name: string; schemaName: string; tables: { id: string; name: string; sqlName: string; source: { id: string; mode: string } | null; columns: { sqlName: string }[] }[] };
 type Result = { columns: string[]; rows: Record<string, unknown>[]; executionTimeMs: number; truncated: boolean };
@@ -10,6 +12,8 @@ export function QueryPanel({ datasets, projectId }: { datasets: Dataset[]; proje
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<Result | null>(null);
   const [error, setError] = useState("");
+  const [warnings, setWarnings] = useState<string[]>([]);
+  const { notify } = useFeedback();
   const [liveSourceId, setLiveSourceId] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -18,15 +22,16 @@ export function QueryPanel({ datasets, projectId }: { datasets: Dataset[]; proje
   void datasets;
 
   async function execute() {
-    setRunning(true); setError("");
+    setRunning(true); setError(""); setWarnings([]);
     try {
       const response = await fetch(
         liveSourceId ? `/api/v1/dataset-sources/${liveSourceId}/query` : "/api/v1/queries",
-        { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sql, limit: 10000, timeout: 30, ...(projectId ? { projectId } : {}) }) }
+        { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sql, limit: 10000, timeout: 30, normalize: true, ...(projectId ? { projectId } : {}) }) }
       );
       const body = await response.json();
-      if (!response.ok) throw new Error(body.error?.message ?? "Falha na consulta");
+      if (!response.ok) throw new Error(apiErrorText(body, "Falha na consulta"));
       setResult(body.data);
+      setWarnings(warningsOf(body.meta));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Falha na consulta");
     } finally {
@@ -53,7 +58,10 @@ export function QueryPanel({ datasets, projectId }: { datasets: Dataset[]; proje
       return;
     }
     const response = await fetch("/api/v1/queries/export", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sql, format }) });
-    if (!response.ok) return;
+    if (!response.ok) {
+      notify("error", apiErrorText(await response.json().catch(() => null), "Não foi possível exportar.", response.status));
+      return;
+    }
     const blob = await response.blob(), url = URL.createObjectURL(blob), a = document.createElement("a");
     a.href = url; a.download = `query.${format}`; a.click(); URL.revokeObjectURL(url);
   }
@@ -104,11 +112,20 @@ export function QueryPanel({ datasets, projectId }: { datasets: Dataset[]; proje
         </div>
       )}
 
+      {warnings.length > 0 && (
+        <div role="status" className="m-4 space-y-1 rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs">
+          {warnings.map((w) => <p key={w}>{w}</p>)}
+        </div>
+      )}
+
       {/* Results */}
       <div className="min-h-0 flex-1 overflow-auto">
         {!result && !error && (
           <div className="flex h-full items-center justify-center text-sm text-base-content/35 select-none">
-            Pressione Executar ou <kbd className="kbd kbd-xs mx-1">Ctrl+Enter</kbd> para rodar a consulta
+            <span className="text-center">
+              Pressione Executar ou <kbd className="kbd kbd-xs mx-1">Ctrl+Enter</kbd> para rodar a consulta.
+              <span className="mt-1 block text-xs">A linguagem é T-SQL. Use ORDER BY junto com TOP para o resultado vir sempre na mesma ordem.</span>
+            </span>
           </div>
         )}
         {result && (
@@ -127,7 +144,7 @@ export function QueryPanel({ datasets, projectId }: { datasets: Dataset[]; proje
         )}
         {result?.truncated && (
           <div className="border-t border-warning/30 bg-warning/5 px-4 py-2 text-xs text-warning">
-            Resultado truncado — exibindo apenas as primeiras {result.rows.length} linhas.
+            Resultado truncado: mostrando as primeiras {result.rows.length} linhas (limite de 10.000 por consulta). Filtre ou use TOP para ver o que precisa.
           </div>
         )}
       </div>

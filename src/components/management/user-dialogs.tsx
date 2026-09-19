@@ -2,6 +2,7 @@
 import { useRef, useState } from "react";
 import { Pencil, UserPlus } from "lucide-react";
 import { useRouter } from "next/navigation";
+import { apiErrorText } from "@/lib/api-client";
 
 const roles = ["ADMIN", "DATA_MANAGER", "ANALYST", "VIEWER"];
 
@@ -18,7 +19,7 @@ export function CreateUserDialog() {
       body: JSON.stringify({ name: f.get("name"), email: f.get("email"), password: f.get("password"), role: f.get("role") }),
     });
     const body = await response.json();
-    if (!response.ok) { setError(body.error?.message ?? "Falha ao criar usuário"); return; }
+    if (!response.ok) { setError(apiErrorText(body, "Falha ao criar usuário")); return; }
     e.currentTarget.reset();
     ref.current?.close();
     router.refresh();
@@ -61,7 +62,7 @@ export function EditUserDialog({ id, name, role, active }: { id: string; name: s
       body: JSON.stringify({ name: f.get("name"), role: f.get("role"), active: f.get("active") === "on", ...(password ? { password } : {}) }),
     });
     const body = await response.json();
-    if (!response.ok) { setError(body.error?.message ?? "Falha ao salvar"); return; }
+    if (!response.ok) { setError(apiErrorText(body, "Falha ao salvar")); return; }
     ref.current?.close();
     router.refresh();
   }

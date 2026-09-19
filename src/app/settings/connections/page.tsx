@@ -2,6 +2,8 @@
 import { useEffect, useRef, useState } from "react";
 import { CheckCircle2, CloudCog, DatabaseZap, Pencil, Plus, RefreshCw, Server, Trash2, XCircle } from "lucide-react";
 import { EmptyState, PageHeader, Panel, StatusBadge } from "@/components/ui/primitives";
+import { useApiAction, useFeedback } from "@/components/ui/feedback";
+import { apiErrorText } from "@/lib/api-client";
 
 type Connection = { id: string; name: string; provider: string; environment: string; server: string; port: number | null; databaseName: string; sslMode: string; username: string; active: boolean; lastStatus: string | null; lastLatencyMs: number | null; lastCheckedAt: string | null; sshTunnelEnabled?: boolean; sshHost?: string | null; sshPort?: number | null; sshUsername?: string | null; sshAuthMethod?: string | null };
 type TestState = null | { ok: true; latencyMs: number; database?: string } | { ok: false; message: string };
@@ -22,6 +24,7 @@ function mssqlSslLabel(sslMode: string) {
 }
 
 export default function ConnectionsPage() {
+  const { confirm: askConfirm } = useFeedback(); const runAction = useApiAction();
   const [rows, setRows] = useState<Connection[]>([]);
   const [testing, setTesting] = useState("");
   const [editing, setEditing] = useState<Connection | null>(null);
@@ -91,7 +94,7 @@ export default function ConnectionsPage() {
     const response = await fetch("/api/v1/connections/test", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
     const body = await response.json().catch(() => ({}));
     setFormTesting(false);
-    if (!response.ok) setFormTest({ ok: false, message: body.error?.message ?? "Falha ao conectar" });
+    if (!response.ok) setFormTest({ ok: false, message: apiErrorText(body, "Falha ao conectar") });
     else setFormTest({ ok: true, latencyMs: body.data?.latencyMs ?? 0, database: body.data?.database });
   }
 
@@ -101,7 +104,7 @@ export default function ConnectionsPage() {
     if (editing && !payload.password) delete payload.password;
     const response = await fetch(editing ? `/api/v1/connections/${editing.id}` : "/api/v1/connections", { method: editing ? "PATCH" : "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
     setSaving(false);
-    if (!response.ok) { const body = await response.json(); setError(body.error?.message ?? "Falha ao salvar conexão"); return; }
+    if (!response.ok) { const body = await response.json(); setError(apiErrorText(body, "Falha ao salvar conexão")); return; }
     dialog.current?.close(); setEditing(null); setNotice("Conexão salva."); await load();
   }
 
@@ -110,12 +113,16 @@ export default function ConnectionsPage() {
     const response = await fetch(`/api/v1/connections/${id}/test`, { method: "POST" });
     const body = await response.json().catch(() => ({}));
     setTesting("");
-    if (!response.ok) setError(body.error?.message ?? "Falha ao testar conexão");
+    if (!response.ok) setError(apiErrorText(body, "Falha ao testar conexão"));
     else setNotice(`Conexão testada em ${body.data?.latencyMs ?? "?"} ms.`);
     await load();
   }
 
-  async function remove(c: Connection) { if (!confirm(`Remover a conexão "${c.name}"?`)) return; await fetch(`/api/v1/connections/${c.id}`, { method: "DELETE" }); setNotice("Conexão removida."); await load(); }
+  async function remove(c: Connection) {
+    if (!await askConfirm({ title: "Remover conexão", message: `Remover a conexão "${c.name}"?`, confirmLabel: "Remover", danger: true })) return;
+    if (await runAction(`/api/v1/connections/${c.id}`, { method: "DELETE" })) setNotice("Conexão removida.");
+    await load();
+  }
   const active = rows.filter(c => c.active);
   const isMssqlEdit = editing?.provider === "mssql";
 

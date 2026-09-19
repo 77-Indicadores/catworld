@@ -4,6 +4,7 @@ import { Cable, Columns3, DatabaseZap, Download, FileText, RefreshCw, Rows3, Tra
 import { StatusBadge } from "@/components/ui/primitives";
 import { UploadFlow } from "./upload-flow";
 import { fmtCellStr } from "@/lib/fmt-cell";
+import { apiErrorText } from "@/lib/api-client";
 
 type Source = { id: string; mode: string; sourceKind: string; sourceSchema: string | null; sourceTable: string | null; refreshCron: string | null; lastStatus: string | null; lastError: string | null; lastRefreshedAt: string | null; nextRefreshAt: string | null; connection: { name: string } };
 type Table = { id: string; name: string; sqlName: string; rowCount: string; lastDataAt: string | null; source: Source | null; columns: { id: string; sqlName: string; originalName: string; sqlType: string; nullable: boolean }[] };
@@ -28,7 +29,7 @@ function DeleteTableDialog({ id, name, onDeleted }: { id: string; name: string; 
     setDeleting(true); setError("");
     const response = await fetch(`/api/v1/tables/${id}`, { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ confirmName }) });
     setDeleting(false);
-    if (!response.ok) { const body = await response.json(); setError(body.error?.message ?? "Falha ao excluir"); return; }
+    if (!response.ok) { const body = await response.json(); setError(apiErrorText(body, "Falha ao excluir")); return; }
     close(); onDeleted();
   }
   return (
@@ -93,7 +94,7 @@ export function TablePanel({ datasetId, table, onChanged, compact }: { datasetId
     setRefreshing(true); setError(""); setNotice("");
     const response = await fetch(`/api/v1/dataset-sources/${table.source.id}/refresh`, { method: "POST" });
     setRefreshing(false);
-    if (!response.ok) { const body = await response.json().catch(() => ({})); setError(body.error?.message ?? "Falha ao enfileirar atualização"); return; }
+    if (!response.ok) { const body = await response.json().catch(() => ({})); setError(apiErrorText(body, "Falha ao enfileirar atualização")); return; }
     setNotice("Atualização enfileirada. O worker vai processar a fonte.");
     onChanged();
   }
@@ -104,7 +105,7 @@ export function TablePanel({ datasetId, table, onChanged, compact }: { datasetId
     const live = sourceModeValue === "live";
     fetch(live ? `/api/v1/dataset-sources/${sourceId}/query` : `/api/v1/tables/${table.id}/rows?limit=100`, live ? { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ limit: 100 }) } : undefined)
       .then((r) => r.json().then((body) => ({ ok: r.ok, body })))
-      .then(({ ok, body }) => { if (cancelled) return; if (!ok) setError(body.error?.message ?? "Falha ao carregar dados"); else setRows(live ? body.data?.rows ?? [] : body.data ?? []); })
+      .then(({ ok, body }) => { if (cancelled) return; if (!ok) setError(apiErrorText(body, "Falha ao carregar dados")); else setRows(live ? body.data?.rows ?? [] : body.data ?? []); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [table.id, sourceId, sourceModeValue]);

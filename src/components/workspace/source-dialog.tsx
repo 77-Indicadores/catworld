@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Cron } from "croner";
 import { Cable, CheckCircle2, CircleSlash, DatabaseZap, GitMerge, Play, Plus, RefreshCw, Search, Table2 } from "lucide-react";
+import { apiErrorText } from "@/lib/api-client";
 
 function CronPreview({ cron }: { cron: string }) {
   try {
@@ -149,7 +150,7 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
     const response = await fetch(`/api/v1/connections/${connectionId}/columns?sql=${encodeURIComponent(sourceSql)}`);
     const body = await response.json();
     setLoading(false);
-    if (!response.ok) { setColumns([]); setQueryStatus("error"); setError(body.error?.message ?? "Falha ao testar consulta"); return false; }
+    if (!response.ok) { setColumns([]); setQueryStatus("error"); setError(apiErrorText(body, "Falha ao testar consulta")); return false; }
     setColumns(body.data ?? []);
     setQueryTestedSql(sourceSql);
     setQueryStatus("ok");
@@ -182,7 +183,7 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
         }),
       });
       const body = await response.json();
-      if (!response.ok) throw new Error(body.error?.message ?? "Falha ao criar fonte");
+      if (!response.ok) throw new Error(apiErrorText(body, "Falha ao criar fonte"));
       ref.current?.close();
       onComplete();
     } catch (e) {

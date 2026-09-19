@@ -2,6 +2,8 @@
 
 import { useState, useTransition } from "react";
 import { CheckCircle2, CircleX, Clock3, Database, Pencil, Plus, RefreshCw, Star, Trash2, Wifi } from "lucide-react";
+import { useApiAction, useFeedback } from "@/components/ui/feedback";
+import { apiErrorText } from "@/lib/api-client";
 
 type Server = {
   id: string;
@@ -35,6 +37,7 @@ function maskedUrl(url: string | null) {
 }
 
 export function StorageServerManager({ initialServers }: { initialServers: Server[] }) {
+  const { confirm: askConfirm } = useFeedback(); const runAction = useApiAction();
   const [servers, setServers] = useState(initialServers);
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<Server | null>(null);
@@ -92,7 +95,7 @@ export function StorageServerManager({ initialServers }: { initialServers: Serve
           { method: editing ? "PATCH" : "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
         );
         const json = await res.json() as { error?: { message: string } };
-        if (!res.ok) { setError(json.error?.message ?? "Erro desconhecido"); return; }
+        if (!res.ok) { setError(apiErrorText(json, "Erro desconhecido")); return; }
         closeModal();
         await reload();
       } catch (err) {
@@ -102,10 +105,8 @@ export function StorageServerManager({ initialServers }: { initialServers: Serve
   }
 
   async function handleDelete(s: Server) {
-    if (!confirm(`Remover "${s.name}"? Esta ação não pode ser desfeita.`)) return;
-    const res = await fetch(`/api/v1/storage-servers/${s.id}`, { method: "DELETE" });
-    const json = await res.json() as { error?: { message: string } };
-    if (!res.ok) { alert(json.error?.message ?? "Erro ao remover"); return; }
+    if (!await askConfirm({ title: "Remover servidor de armazenamento", message: `Remover "${s.name}"? Esta ação não pode ser desfeita.`, confirmLabel: "Remover", danger: true })) return;
+    if (!await runAction(`/api/v1/storage-servers/${s.id}`, { method: "DELETE" }, "Servidor removido.")) return;
     await reload();
   }
 
@@ -115,7 +116,7 @@ export function StorageServerManager({ initialServers }: { initialServers: Serve
       const res = await fetch(`/api/v1/storage-servers/${s.id}/test`, { method: "POST" });
       const json = await res.json() as { data?: { healthy: boolean; latencyMs: number; database: string }; error?: { message: string } };
       if (!res.ok || !json.data) {
-        setTestResults((p) => ({ ...p, [s.id]: { error: json.error?.message ?? "Falha na conexão" } }));
+        setTestResults((p) => ({ ...p, [s.id]: { error: apiErrorText(json, "Falha na conexão") } }));
       } else {
         setTestResults((p) => ({ ...p, [s.id]: json.data! }));
       }
@@ -128,13 +129,12 @@ export function StorageServerManager({ initialServers }: { initialServers: Serve
   }
 
   async function handleSetDefault(s: Server) {
-    const res = await fetch(`/api/v1/storage-servers/${s.id}`, {
+    const done = await runAction(`/api/v1/storage-servers/${s.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ isDefault: true }),
-    });
-    if (!res.ok) { const j = await res.json() as { error?: { message: string } }; alert(j.error?.message ?? "Erro"); return; }
-    await reload();
+    }, "Servidor padrão atualizado.");
+    if (done) await reload();
   }
 
   return (

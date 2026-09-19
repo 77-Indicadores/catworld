@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { CheckCircle2, CircleAlert, CircleX, Clock3, Loader2, RefreshCw, X } from "lucide-react";
 import type { Upload, Dataset, Project } from "@prisma/client";
 import { fmtBytes, fmtRelative, fmtDuration } from "@/lib/fmt";
+import { useApiAction, useFeedback } from "@/components/ui/feedback";
 
 type JobSummary = { lockedBy: string | null; status: string; weight: number; attempts: number; maxAttempts: number };
 type UploadWithDataset = Upload & { dataset: (Dataset & { project: Project }) | null; jobs: JobSummary[] };
@@ -52,6 +53,7 @@ const MODE_LABELS: Record<string, string> = {
 const CANCELLABLE = new Set(["PENDING_UPLOAD","QUEUED_PREVIEW","PREVIEWING","AWAITING_CONFIRMATION","QUEUED_IMPORT","IMPORTING","RETRYING"]);
 
 export function UploadCard({ upload, importSummary }: { upload: UploadWithDataset; importSummary?: ImportSummary }) {
+  const { confirm: askConfirm } = useFeedback(); const runAction = useApiAction();
   const router = useRouter();
   const [cancelling, setCancelling] = useState(false);
   const [retrying, setRetrying] = useState(false);
@@ -63,11 +65,10 @@ export function UploadCard({ upload, importSummary }: { upload: UploadWithDatase
   const canRetry = upload.status === "FAILED";
 
   const handleCancel = async () => {
-    if (!confirm(`Cancelar o upload de "${upload.originalFilename}"?`)) return;
+    if (!await askConfirm({ title: "Cancelar upload", message: `Cancelar o upload de "${upload.originalFilename}"?`, confirmLabel: "Cancelar upload", cancelLabel: "Manter", danger: true })) return;
     setCancelling(true);
     try {
-      await fetch(`/api/v1/uploads/${upload.id}?action=cancel`, { method: "POST" });
-      router.refresh();
+      if (await runAction(`/api/v1/uploads/${upload.id}?action=cancel`, { method: "POST" })) router.refresh();
     } finally {
       setCancelling(false);
     }
