@@ -5,6 +5,20 @@ import { PageHeader, Panel } from "@/components/ui/primitives";
 
 type Mode = "off" | "shadow" | "fallback" | "strict";
 
+type Stats = {
+  since: string;
+  translated: Record<string, number>;
+  byKind: Record<string, number>;
+  top: { kind: string; path: string; hash: string; shape: string; count: number; lastAt: string; message?: string }[];
+};
+
+const KIND_LABEL: Record<string, string> = {
+  "shadow-diff": "traduziria diferente",
+  "shadow-reject": "motor novo rejeitaria",
+  "fallback-reject": "motor novo rejeitou → usou o antigo",
+  "fallback-exec": "SQL novo falhou no banco → usou o antigo",
+};
+
 const MODES: { id: Mode; label: string; icon: React.ElementType; description: string; detail: string }[] = [
   {
     id: "off",
@@ -42,13 +56,15 @@ export default function SqlContractSettingsPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [ok, setOk] = useState(false);
+  const [stats, setStats] = useState<Stats | null>(null);
+  const [pgIsolation, setPgIsolation] = useState<string | null>(null);
 
   useEffect(() => {
     fetch("/api/v1/settings/sql-contract")
       .then((r) => r.json())
       .then((j) => {
         if (j.error) setError(j.error.message ?? "Falha ao carregar");
-        else { setMode(j.data.mode); setSaved(j.data.mode); }
+        else { setMode(j.data.mode); setSaved(j.data.mode); setStats(j.data.stats ?? null); setPgIsolation(j.data.pgIsolation ?? null); }
       })
       .catch(() => setError("Falha ao carregar"));
   }, []);
@@ -125,6 +141,53 @@ export default function SqlContractSettingsPage() {
               {saving ? <span className="loading loading-spinner loading-xs" /> : "Salvar"}
             </button>
           </div>
+        </div>
+      </Panel>
+
+      <Panel>
+        <div className="p-5 space-y-3">
+          <h2 className="font-semibold text-sm text-base-content/70 uppercase tracking-wide">Uso do contrato</h2>
+          <p className="text-xs text-base-content/55">
+            Contadores desta instância desde {stats ? new Date(stats.since).toLocaleString("pt-BR") : "—"} (zeram ao reiniciar). Guardam só o
+            formato da consulta, sem valores.
+          </p>
+          {stats && Object.keys(stats.translated).length > 0 && (
+            <div className="flex flex-wrap gap-2 text-xs" data-testid="translated">
+              {Object.entries(stats.translated).map(([path, n]) => (
+                <span key={path} className="badge badge-ghost">{path}: {n} consulta(s)</span>
+              ))}
+            </div>
+          )}
+          {stats && stats.top.length > 0 ? (
+            <div className="overflow-x-auto">
+              <table className="table table-xs">
+                <thead><tr><th>Ocorrências</th><th>O que aconteceu</th><th>Caminho</th><th>Consulta (formato)</th></tr></thead>
+                <tbody>
+                  {stats.top.map((t) => (
+                    <tr key={`${t.kind}|${t.path}|${t.hash}`}>
+                      <td className="font-mono">{t.count}</td>
+                      <td>{KIND_LABEL[t.kind] ?? t.kind}{t.message ? <div className="text-base-content/50">{t.message}</div> : null}</td>
+                      <td className="font-mono">{t.path}</td>
+                      <td className="font-mono max-w-md truncate" title={t.shape}>{t.shape}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="text-sm text-base-content/60">Nenhum caso registrado: nada foi rejeitado nem caiu no caminho antigo.</p>
+          )}
+        </div>
+      </Panel>
+
+      <Panel>
+        <div className="p-5 space-y-2 text-sm text-base-content/70">
+          <h2 className="font-semibold text-sm text-base-content/70 uppercase tracking-wide">Isolamento no storage Postgres</h2>
+          <p>
+            Estado: <strong>{pgIsolation === "off" ? "desligado (consultas de não-admin NÃO são isoladas por schema)" : "ativo"}</strong>.
+            Cada ator consulta com um papel de banco que só enxerga os schemas dos seus datasets, em transação somente leitura.
+            Exige que a conta do storage tenha <code>CREATEROLE</code>.
+          </p>
         </div>
       </Panel>
 

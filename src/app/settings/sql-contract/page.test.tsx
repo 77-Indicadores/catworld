@@ -11,7 +11,18 @@ function respond(body: unknown) {
 beforeEach(() => {
   fetchMock = vi.fn((url: string, init?: RequestInit) => {
     if (init?.method === "PATCH") return respond({ data: { mode: JSON.parse(String(init.body)).mode }, error: null });
-    return respond({ data: { mode: "fallback", modes: ["off", "shadow", "fallback", "strict"] }, error: null });
+    return respond({
+      data: {
+        mode: "fallback", modes: ["off", "shadow", "fallback", "strict"], pgIsolation: "enforce",
+        stats: {
+          since: "2026-09-19T00:00:00.000Z", scope: "instancia",
+          translated: { "storage-pg": 40, "live-pg": 3 },
+          byKind: { "fallback-reject": 5 },
+          top: [{ kind: "fallback-reject", path: "live-pg", hash: "abc123", shape: "SELECT a::text FROM t", count: 5, lastAt: "2026-09-19T01:00:00.000Z", message: "O cast '::' e sintaxe Postgres" }],
+        },
+      },
+      error: null,
+    });
   });
   vi.stubGlobal("fetch", fetchMock);
 });
@@ -26,6 +37,16 @@ describe("tela Contrato de SQL", () => {
     expect(screen.getByText("Estrito")).toBeTruthy();
     // modo atual = fallback: nada a salvar ainda
     expect((screen.getByRole("button", { name: "Salvar" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("mostra os contadores do contrato e o estado do isolamento", async () => {
+    render(<SqlContractSettingsPage />);
+    expect(await screen.findByText("storage-pg: 40 consulta(s)")).toBeTruthy();
+    expect(screen.getByText("live-pg: 3 consulta(s)")).toBeTruthy();
+    expect(screen.getByText("motor novo rejeitou → usou o antigo")).toBeTruthy();
+    expect(screen.getByText("SELECT a::text FROM t")).toBeTruthy();
+    expect(screen.getByText("5")).toBeTruthy();
+    expect(screen.getByText("ativo")).toBeTruthy();
   });
 
   it("estrito mostra o aviso e salva via PATCH", async () => {

@@ -15,13 +15,13 @@ import { prisma } from "@/server/db";
 import { resolveActor, requireRole } from "@/server/auth/actor";
 import { handleApiError, ok } from "@/server/http";
 import { audit } from "@/server/audit";
-import { getContractMode, invalidateContractModeCache } from "@/server/sql-contract/apply";
+import { getContractMode, getContractStats, invalidateContractModeCache } from "@/server/sql-contract/apply";
 import { getPgIsolationMode, invalidatePgIsolationModeCache } from "@/server/storage/pg-roles";
 
 export async function GET(r: NextRequest) {
   try {
     requireRole(await resolveActor(r), ["ADMIN"]);
-    return ok({ mode: await getContractMode(), modes: ["off", "shadow", "fallback", "strict"], pgIsolation: await getPgIsolationMode() });
+    return ok({ mode: await getContractMode(), modes: ["off", "shadow", "fallback", "strict"], pgIsolation: await getPgIsolationMode(), stats: getContractStats() });
   } catch (e) {
     return handleApiError(e);
   }

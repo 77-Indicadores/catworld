@@ -51,6 +51,7 @@ export async function contractTranslate(
   legacy: LegacyBehavior,
 ): Promise<ContractTranslation> {
   if (target === "mssql") return { sql: input.trim(), topLimit: null };
+  countTranslated(path);
 
   const mode = await getContractMode();
   if (mode === "strict") return translateTsql(input, "postgres");
@@ -108,6 +109,7 @@ export async function runWithContract<T>(
   if (target === "mssql") return exec({ sql: input.trim(), topLimit: null });
   const mode = await getContractMode();
   if (mode !== "fallback") return exec(await contractTranslate(input, target, path, legacy));
+  countTranslated(path);
 
   const old = legacyTranslation(input, legacy);
   let next: ContractTranslation;
@@ -133,10 +135,61 @@ const canon = (sql: string) => sql.replace(/\s+ASC\b/gi, "").replace(/\s+/g, "")
 /** Log sem dados: literais viram '?', SQL truncado, hash para agrupar iguais. */
 function log(kind: string, path: string, sql: string, message?: string) {
   const shape = mapOutsideLiterals(sql, (s) => s).replace(/N?'(?:[^']|'')*'/g, "'?'").replace(/\s+/g, " ").trim();
-  console.warn(JSON.stringify({
-    tag: "sql-contract", kind, path,
-    hash: createHash("sha256").update(shape).digest("hex").slice(0, 12),
-    shape: shape.slice(0, 300),
-    ...(message ? { message: message.split("\n")[0]!.slice(0, 160) } : {}),
-  }));
+  const hash = createHash("sha256").update(shape).digest("hex").slice(0, 12);
+  const msg = message ? message.split("\n")[0]!.slice(0, 160) : undefined;
+  console.warn(JSON.stringify({ tag: "sql-contract", kind, path, hash, shape: shape.slice(0, 300), ...(msg ? { message: msg } : {}) }));
+  record(kind, path, hash, shape.slice(0, 300), msg);
+}
+
+// ---------------------------------------------------------------------------
+// Contadores (em memoria, POR INSTANCIA, desde o inicio do processo) — para decidir quando ligar o `strict`
+// sem depender de garimpar log. Nao guardam valores: so o "formato" da consulta (literais viram '?').
+// ---------------------------------------------------------------------------
+
+type Shape = { kind: string; path: string; hash: string; shape: string; count: number; lastAt: string; message?: string };
+type StatsState = {
+  shapes: Map<string, Shape>;
+  totals: Map<string, number>; // path -> consultas traduzidas para Postgres
+  kinds: Map<string, number>;  // kind -> ocorrencias
+  startedAt: string;
+};
+// Singleton do PROCESSO: cada rota do Next pode ter sua propria copia deste modulo, e a rota que consulta
+// (onde se conta) nao e a que exibe (configuracoes). globalThis garante um unico contador.
+const G = globalThis as unknown as { __cwContractStats?: StatsState };
+const state: StatsState = (G.__cwContractStats ??= { shapes: new Map(), totals: new Map(), kinds: new Map(), startedAt: new Date().toISOString() });
+const { shapes, totals, kinds } = state;
+const MAX_SHAPES = 500;
+
+function record(kind: string, path: string, hash: string, shape: string, message?: string) {
+  kinds.set(kind, (kinds.get(kind) ?? 0) + 1);
+  const key = `${kind}|${path}|${hash}`;
+  const cur = shapes.get(key);
+  if (cur) { cur.count++; cur.lastAt = new Date().toISOString(); return; }
+  if (shapes.size >= MAX_SHAPES) {
+    // descarta o menos frequente
+    let worst: string | null = null;
+    for (const [k, v] of shapes) if (worst === null || v.count < shapes.get(worst)!.count) worst = k;
+    if (worst) shapes.delete(worst);
+  }
+  shapes.set(key, { kind, path, hash, shape, count: 1, lastAt: new Date().toISOString(), ...(message ? { message } : {}) });
+}
+
+function countTranslated(path: string) {
+  totals.set(path, (totals.get(path) ?? 0) + 1);
+}
+
+export function getContractStats() {
+  return {
+    since: state.startedAt,
+    scope: "instancia",
+    translated: Object.fromEntries(totals),
+    byKind: Object.fromEntries(kinds),
+    top: [...shapes.values()].sort((a, b) => b.count - a.count).slice(0, 30),
+  };
+}
+
+export function resetContractStats() {
+  shapes.clear();
+  totals.clear();
+  kinds.clear();
 }

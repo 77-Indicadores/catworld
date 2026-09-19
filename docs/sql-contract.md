@@ -124,3 +124,11 @@ Igual nos quatro caminhos (`columns, rows, rowCount, truncated, executionTimeMs`
    `setval`, `set_config`… (`UNSAFE_SQL`). É a 1ª barreira, **não** a única.
 2. Postgres: transação `READ ONLY` + papel sem privilégios de servidor. Fonte live/extract: `default_transaction_read_only = on`.
 3. SQL Server: principal com grants de leitura.
+
+## Contadores (para decidir quando ligar o `strict`)
+
+`GET /api/v1/settings/sql-contract` (e a tela Configurações > Contrato de SQL) mostram, **desta instância e desde o último
+início do processo**: quantas consultas foram traduzidas por caminho (`storage-pg`, `live-pg`, `derived`…), quantas de cada tipo
+(`shadow-diff`, `shadow-reject`, `fallback-reject`, `fallback-exec`) e as 30 consultas mais frequentes por **formato** (literais
+viram `'?'`; nenhum valor é guardado). Um formato que aparece muito em `fallback-reject` é o que o modo estrito passaria a rejeitar.
+Com mais de uma instância, cada uma conta separado. O estado é um singleton do processo (`globalThis`), compartilhado entre rotas.

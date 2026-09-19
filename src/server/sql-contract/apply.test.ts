@@ -144,3 +144,45 @@ describe("runWithContract (modo fallback)", () => {
     expect(exec).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("contadores (getContractStats)", () => {
+  // O estado e um singleton do processo (globalThis): zera antes de cada teste
+  beforeEach(async () => { (await fresh()).resetContractStats(); });
+
+  it("conta traducoes por caminho e agrupa o mesmo formato de consulta", async () => {
+    const { contractTranslate, getContractStats } = await fresh();
+    await contractTranslate("SELECT a::text FROM t WHERE c = 'um'", "postgres", "live-pg", "passthrough");
+    await contractTranslate("SELECT a::text FROM t WHERE c = 'outro valor'", "postgres", "live-pg", "passthrough"); // mesmo formato
+    await contractTranslate("SELECT 1 FROM t", "postgres", "storage-pg", "regex");
+    const st = getContractStats();
+    expect(st.translated).toEqual({ "live-pg": 2, "storage-pg": 1 });
+    expect(st.byKind["fallback-reject"]).toBe(2);
+    expect(st.top).toHaveLength(1);
+    expect(st.top[0]).toMatchObject({ kind: "fallback-reject", path: "live-pg", count: 2 });
+  });
+
+  it("nao guarda valores: literais viram '?'", async () => {
+    const { contractTranslate, getContractStats } = await fresh();
+    await contractTranslate("SELECT a::text FROM t WHERE cpf = '123.456.789-00'", "postgres", "live-pg", "passthrough");
+    expect(JSON.stringify(getContractStats())).not.toContain("123.456");
+    expect(getContractStats().top[0]!.shape).toContain("'?'");
+  });
+
+  it("conta a execucao que caiu no caminho antigo (fallback-exec) e o reset zera tudo", async () => {
+    const { runWithContract, getContractStats, resetContractStats } = await fresh();
+    await runWithContract("SELECT IIF(a>1,1,0) FROM t", "postgres", "storage-pg", "passthrough", async (t: { sql: string }) => {
+      if (t.sql.includes("CASE WHEN")) throw new PgError("falha do SQL novo", "42883");
+      return "ok";
+    });
+    expect(getContractStats().byKind["fallback-exec"]).toBe(1);
+    resetContractStats();
+    expect(getContractStats().top).toEqual([]);
+    expect(getContractStats().translated).toEqual({});
+  });
+
+  it("mssql nao entra na contagem", async () => {
+    const { contractTranslate, getContractStats } = await fresh();
+    await contractTranslate("SELECT 1", "mssql", "x", "regex");
+    expect(getContractStats().translated).toEqual({});
+  });
+});
