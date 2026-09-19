@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// A 1a importacao do parser (node-sql-parser) e lenta sob carga; cada teste recarrega o modulo
+vi.setConfig({ testTimeout: 30_000 });
+
 const state = { mode: undefined as string | undefined };
 vi.mock("@/server/db", () => ({
   prisma: { $queryRawUnsafe: vi.fn(async () => (state.mode ? [{ value: state.mode }] : [])) },
