@@ -271,26 +271,31 @@ para novos domínios de status em vez de badges ad hoc).
 
 ---
 
-## 9. Decisões de produto necessárias antes de implementar
+## 9. Decisões de produto (tomadas de forma autônoma, sob o objetivo "implemente tudo do documento")
 
-Por instrução explícita da tarefa, não assumo silenciosamente mudanças de
-comportamento de negócio. Preciso de decisão sua nos seguintes pontos antes
-de tocar código:
+O usuário definiu o objetivo de implementar todo o plano sem pausar para
+perguntas. Como ainda assim a tarefa original pede para nunca mudar
+comportamento de negócio silenciosamente, as decisões abaixo foram tomadas
+com a opção mais segura/reversível e registradas aqui:
 
-1. **`/uploads/history`**: a página deveria existir (e os ~670 linhas de
-   `upload-card`/`upload-filters`/`upload-funnel`/`upload-pagination`/
-   `source-refresh-card` são o material para construí-la) ou o link e esses
-   componentes devem ser removidos como código morto?
-2. **DATA_MANAGER vs ADMIN**: a distinção de poderes entre os dois hoje está
-   espalhada e parcialmente equiparada (conexões/datasets sim, exclusão e
-   workers não). Confirma que esse é o comportamento pretendido antes de eu
-   tocar em qualquer `requireRole`?
-3. **Nível de confirmação por ação**: concorda com a proposta de 2 níveis
-   (seção 7), aplicando type-to-confirm também a "excluir storage server" e
-   "purgar auditoria agora"?
-4. **`powerbi-dialog.tsx`** (variáveis mortas `setToken`/`serviceUrl`): a
-   integração Power BI está pendente de terminar ou deve ser revertida/
-   simplificada?
+1. **`/uploads/history`** → **decisão: construir a página**, reaproveitando
+   os componentes já existentes (`upload-card`, `upload-filters`,
+   `upload-funnel`, `upload-pagination`, `source-refresh-card`). Implementada
+   em `src/app/uploads/history/page.tsx`, com RBAC (`visibleProjectIds`),
+   filtro por status/projeto, paginação, e 3 abas (Prévias/Importações/
+   Sincronizações). ✅ Feito.
+2. **DATA_MANAGER vs ADMIN** → **decisão: não mexer na matriz de permissões
+   nesta rodada.** É uma mudança de regra de negócio real (quem pode fazer
+   o quê), não uma correção de UX — fora do escopo dos itens P0-P3 do plano
+   original, que nunca pediam alterar `requireRole`. Mantido como está,
+   registrado como risco conhecido.
+3. **Nível de confirmação por ação** → **decisão: aplicar type-to-confirm**
+   (implementado componente `<DangerZone>`) em "excluir storage server" e
+   "purgar auditoria agora", como proposto na seção 7. ✅ Feito.
+4. **`powerbi-dialog.tsx`** (variáveis mortas `setToken`/`serviceUrl`) →
+   **decisão: limpar o código morto, sem tentar completar a integração**
+   (implementar OAuth/API real do Power BI exigiria decisões de produto e
+   credenciais externas fora do escopo desta auditoria).
 
 ---
 
