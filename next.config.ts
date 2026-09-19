@@ -13,8 +13,9 @@ const nextConfig: NextConfig = {
   output: "standalone",
   experimental: {
     // Default is 10 MB — data files routinely exceed this.
-    // Set to 500 MB; override via CATWORLD_UPLOAD_MAX_BYTES env if needed.
-    proxyClientMaxBodySize: Number(process.env.CATWORLD_UPLOAD_MAX_BYTES ?? 500 * 1024 * 1024),
+    // Valor fixo de build (nao acompanha o banco): teto alto de seguranca, igual a UPLOAD_HARD_CEILING_BYTES em
+    // server/worker/config.ts. O limite REAL de upload fica em Configuracoes > Worker e e aplicado pela rota.
+    proxyClientMaxBodySize: 2 * 1024 * 1024 * 1024,
   },
 };
 

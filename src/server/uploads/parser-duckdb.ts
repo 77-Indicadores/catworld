@@ -8,17 +8,17 @@
  * NOT used for streams — DuckDB requires a seekable file, not a ReadableStream.
  */
 import type { ParsedColumn } from "./parser";
+import { getDuckdbMemoryLimit } from "@/server/worker/runtime-limits";
 
 // One DuckDB instance per concurrent import — avoids a singleton bottleneck when
 // multiple workers run simultaneously. Each instance gets its own thread pool so
 // parallel imports don't serialize on the same DuckDB process.
 // memory_limit: teto de seguranca por instancia — sem isso, uma unica instancia
 // (ex: parseando um CSV de centenas de MB) pode tentar usar uma fatia grande da
-// RAM do host sem limite algum. Configuravel via CATWORLD_DUCKDB_MEMORY_LIMIT.
+// RAM do host sem limite algum. Vem do perfil do worker (Configuracoes > Worker), padrao 1GB.
 async function getInstance(): Promise<import("@duckdb/node-api").DuckDBInstance> {
   const { DuckDBInstance } = await import("@duckdb/node-api");
-  const { env } = await import("@/server/env");
-  return DuckDBInstance.create(":memory:", { threads: "2", memory_limit: env().CATWORLD_DUCKDB_MEMORY_LIMIT });
+  return DuckDBInstance.create(":memory:", { threads: "2", memory_limit: getDuckdbMemoryLimit() });
 }
 
 export async function* rowsFromCsvDuckDB(

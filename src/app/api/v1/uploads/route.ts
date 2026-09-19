@@ -5,7 +5,7 @@ import { z } from "zod";
 import { resolveActor } from "@/server/auth/actor";
 import { assertDatasetAccess, hasAnyWriteGrant } from "@/server/auth/permissions";
 import { prisma } from "@/server/db";
-import { env } from "@/server/env";
+import { getUploadLimits } from "@/server/worker/config";
 import { ApiError, handleApiError, ok } from "@/server/http";
 import { uploadVisibilityWhere } from "@/server/uploads/access";
 import { uploadTarget } from "@/server/storage";
@@ -56,7 +56,8 @@ export async function POST(r: NextRequest) {
       typeOverrides: z.record(z.string(), z.string()).optional(),
     }).parse(await r.json());
 
-    if (input.sizeBytes > env().CATWORLD_UPLOAD_MAX_BYTES) {
+    const limits = await getUploadLimits();
+    if (input.sizeBytes > limits.maxBytes) {
       throw new ApiError(413, "FILE_TOO_LARGE", "Arquivo excede o limite configurado");
     }
     const ext = extname(input.filename).toLowerCase();
@@ -67,8 +68,8 @@ export async function POST(r: NextRequest) {
     // quanto no import — um arquivo grande pode estourar a memoria do worker sozinho,
     // mesmo com o limite de concorrencia de heavy jobs. CSV nao tem essa restricao
     // (100% streamed via DuckDB/csv-parse).
-    if ((ext === ".xlsx" || ext === ".xls") && input.sizeBytes > env().CATWORLD_XLSX_MAX_BYTES) {
-      const maxMb = Math.round(env().CATWORLD_XLSX_MAX_BYTES / (1024 * 1024));
+    if ((ext === ".xlsx" || ext === ".xls") && input.sizeBytes > limits.xlsxMaxBytes) {
+      const maxMb = Math.round(limits.xlsxMaxBytes / (1024 * 1024));
       throw new ApiError(413, "XLSX_TOO_LARGE", `Arquivos XLSX/XLS acima de ${maxMb}MB nao sao suportados (lidos inteiros em memoria) — exporte como CSV.`);
     }
 

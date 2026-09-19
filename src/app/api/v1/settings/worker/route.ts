@@ -1,43 +1,60 @@
 /**
- * GET  /api/v1/settings/worker  — retorna configurações de performance do worker
- * PATCH /api/v1/settings/worker — salva configurações
+ * GET  /api/v1/settings/worker  — configurações globais do worker e limites de upload (fonte única: o banco)
+ * PATCH /api/v1/settings/worker — salva
+ *
+ * Config POR PROCESSO (tipos de job, concorrência, poll, memória) mora nos perfis: /api/v1/worker-profiles.
  */
 import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/server/db";
 import { resolveActor, requireRole } from "@/server/auth/actor";
 import { handleApiError, ok } from "@/server/http";
-import { WORKER_CONFIG_DEFAULTS, invalidateWorkerConfigCache, pickInt } from "@/server/worker/config";
-import { env } from "@/server/env";
+import {
+  SUPERVISOR_DEFAULTS,
+  UPLOAD_HARD_CEILING_BYTES,
+  UPLOAD_LIMIT_DEFAULTS,
+  WORKER_CONFIG_DEFAULTS,
+  invalidateWorkerConfigCache,
+  pickInt,
+} from "@/server/worker/config";
 
-const KEYS = [
-  "worker.max_heavy_jobs",
-  "worker.max_syncs_per_storage",
-  "worker.import_batch_delay_ms",
-] as const;
+const MB = 1024 * 1024;
 
-const patchSchema = z.object({
-  max_heavy_jobs:        z.number().int().min(1).max(20).optional(),
-  max_syncs_per_storage: z.number().int().min(1).max(20).optional(),
-  import_batch_delay_ms: z.number().int().min(0).max(5000).optional(),
-});
+/** campo da API -> chave em cw_system_settings, padrão e faixa. */
+const FIELDS = {
+  max_heavy_jobs:        { key: "worker.max_heavy_jobs",        def: WORKER_CONFIG_DEFAULTS.max_heavy_jobs,        min: 1,    max: 20 },
+  max_syncs_per_storage: { key: "worker.max_syncs_per_storage", def: WORKER_CONFIG_DEFAULTS.max_syncs_per_storage, min: 1,    max: 20 },
+  import_batch_delay_ms: { key: "worker.import_batch_delay_ms", def: WORKER_CONFIG_DEFAULTS.import_batch_delay_ms, min: 0,   max: 5000 },
+  upload_max_bytes:      { key: "upload.max_bytes",             def: UPLOAD_LIMIT_DEFAULTS.max_bytes,              min: MB,   max: UPLOAD_HARD_CEILING_BYTES },
+  upload_xlsx_max_bytes: { key: "upload.xlsx_max_bytes",        def: UPLOAD_LIMIT_DEFAULTS.xlsx_max_bytes,         min: MB,   max: UPLOAD_HARD_CEILING_BYTES },
+  stop_timeout_ms:       { key: "worker.stop_timeout_ms",       def: SUPERVISOR_DEFAULTS.stop_timeout_ms,          min: 1000, max: 3_600_000 },
+  backoff_max_ms:        { key: "worker.backoff_max_ms",        def: SUPERVISOR_DEFAULTS.backoff_max_ms,           min: 1000, max: 600_000 },
+} as const;
+type Field = keyof typeof FIELDS;
 
-type Row = { key: string; value: string };
+const patchSchema = z.object(
+  Object.fromEntries(Object.entries(FIELDS).map(([name, f]) => [name, z.number().int().min(f.min).max(f.max).optional()])) as Record<Field, z.ZodOptional<z.ZodNumber>>,
+);
 
 async function getSettings() {
-  const rows = await prisma.$queryRawUnsafe<Row[]>(
+  const rows = await prisma.$queryRawUnsafe<{ key: string; value: string }[]>(
     `SELECT key, value FROM cw_system_settings WHERE key = ANY($1::text[])`,
-    KEYS,
+    Object.values(FIELDS).map((f) => f.key),
   );
-  const map = Object.fromEntries(rows.map((r) => [r.key.replace("worker.", ""), r.value]));
-  const e = env();
+  const byKey = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+  const values = Object.fromEntries(
+    (Object.entries(FIELDS) as [Field, (typeof FIELDS)[Field]][]).map(([name, f]) => [name, pickInt(byKey[f.key], f.def, f.min, f.max)]),
+  ) as Record<Field, number>;
   return {
-    max_heavy_jobs:        pickInt(map["max_heavy_jobs"], e.CATWORLD_MAX_HEAVY_JOBS, 1, 20),
-    max_syncs_per_storage: pickInt(map["max_syncs_per_storage"], e.CATWORLD_MAX_SYNCS_PER_STORAGE, 1, 20),
-    import_batch_delay_ms: pickInt(map["import_batch_delay_ms"], e.CATWORLD_IMPORT_BATCH_DELAY_MS, 0, 5000),
-    // Concorrência vem só do env (requer restart)
-    concurrency: e.CATWORLD_WORKER_CONCURRENCY,
-    defaults: WORKER_CONFIG_DEFAULTS,
+    ...values,
+    defaults: {
+      ...WORKER_CONFIG_DEFAULTS,
+      upload_max_bytes: UPLOAD_LIMIT_DEFAULTS.max_bytes,
+      upload_xlsx_max_bytes: UPLOAD_LIMIT_DEFAULTS.xlsx_max_bytes,
+      stop_timeout_ms: SUPERVISOR_DEFAULTS.stop_timeout_ms,
+      backoff_max_ms: SUPERVISOR_DEFAULTS.backoff_max_ms,
+    },
+    ranges: Object.fromEntries((Object.entries(FIELDS) as [Field, (typeof FIELDS)[Field]][]).map(([name, f]) => [name, { min: f.min, max: f.max }])),
   };
 }
 
@@ -57,18 +74,13 @@ export async function PATCH(r: NextRequest) {
     requireRole(actor, ["ADMIN"]);
     const body = patchSchema.parse(await r.json());
 
-    const updates: [string, number][] = [
-      ...(body.max_heavy_jobs        !== undefined ? [["worker.max_heavy_jobs",        body.max_heavy_jobs]        as [string, number]] : []),
-      ...(body.max_syncs_per_storage !== undefined ? [["worker.max_syncs_per_storage", body.max_syncs_per_storage] as [string, number]] : []),
-      ...(body.import_batch_delay_ms !== undefined ? [["worker.import_batch_delay_ms", body.import_batch_delay_ms] as [string, number]] : []),
-    ];
-
-    for (const [key, value] of updates) {
+    for (const [name, value] of Object.entries(body) as [Field, number | undefined][]) {
+      if (value === undefined) continue;
       await prisma.$executeRawUnsafe(
         `INSERT INTO cw_system_settings (key, value, updated_at)
          VALUES ($1, $2, NOW())
          ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()`,
-        key,
+        FIELDS[name].key,
         String(value),
       );
     }

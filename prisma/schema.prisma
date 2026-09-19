@@ -390,6 +390,53 @@ model StorageServer {
   @@map("cw_storage_servers")
 }
 
+// Perfis de worker (ver docs/worker-architecture.md): o supervisor sobe um processo por perfil habilitado.
+model WorkerProfile {
+  id                String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name              String          @unique @db.VarChar(64)
+  jobTypes          String[]        @map("job_types")
+  concurrency       Int             @default(1)
+  pollMs            Int             @default(2000) @map("poll_ms")
+  duckdbMemoryLimit String          @default("1GB") @map("duckdb_memory_limit") @db.VarChar(16)
+  enabled           Boolean         @default(true)
+  revision          Int             @default(1)
+  createdAt         DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime        @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+  commands          SystemCommand[]
+
+  @@map("cw_worker_profiles")
+}
+
+model SystemCommand {
+  id            String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  action        String         @db.VarChar(24)
+  mode          String         @default("SAFE") @db.VarChar(12)
+  profileId     String?        @map("profile_id") @db.Uuid
+  status        String         @default("PENDING") @db.VarChar(12)
+  timeoutMs     Int            @default(600000) @map("timeout_ms")
+  requestedBy   String         @map("requested_by") @db.VarChar(255)
+  requestedById String?        @map("requested_by_id") @db.Uuid
+  requestedAt   DateTime       @default(now()) @map("requested_at") @db.Timestamptz(3)
+  startedAt     DateTime?      @map("started_at") @db.Timestamptz(3)
+  finishedAt    DateTime?      @map("finished_at") @db.Timestamptz(3)
+  resultJson    String?        @map("result_json")
+  profile       WorkerProfile? @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@index([status, requestedAt])
+  @@map("cw_system_commands")
+}
+
+model SupervisorState {
+  instanceId   String   @id @map("instance_id") @db.VarChar(120)
+  hostname     String?  @db.VarChar(255)
+  pid          Int?
+  startedAt    DateTime @default(now()) @map("started_at") @db.Timestamptz(3)
+  heartbeatAt  DateTime @default(now()) @map("heartbeat_at") @db.Timestamptz(3)
+  childrenJson String?  @map("children_json")
+
+  @@map("cw_supervisor_state")
+}
+
 model SystemSetting {
   key       String   @id @db.VarChar(120)
   value     String   @db.Text
