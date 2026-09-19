@@ -11,7 +11,7 @@ function respond(body: unknown) {
 beforeEach(() => {
   fetchMock = vi.fn((url: string, init?: RequestInit) => {
     if (init?.method === "PATCH") return respond({ data: { mode: JSON.parse(String(init.body)).mode }, error: null });
-    return respond({ data: { mode: "shadow", modes: ["off", "shadow", "strict"] }, error: null });
+    return respond({ data: { mode: "fallback", modes: ["off", "shadow", "fallback", "strict"] }, error: null });
   });
   vi.stubGlobal("fetch", fetchMock);
 });
@@ -20,10 +20,11 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 describe("tela Contrato de SQL", () => {
   it("carrega o modo atual e mostra as tres opcoes", async () => {
     render(<SqlContractSettingsPage />);
-    expect(await screen.findByText("Observar (padrão)")).toBeTruthy();
+    expect(await screen.findByText("Fallback (padrão)")).toBeTruthy();
+    expect(screen.getByText("Observar")).toBeTruthy();
     expect(screen.getByText("Desligado")).toBeTruthy();
     expect(screen.getByText("Estrito")).toBeTruthy();
-    // modo atual = shadow: nada a salvar ainda
+    // modo atual = fallback: nada a salvar ainda
     expect((screen.getByRole("button", { name: "Salvar" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
@@ -49,7 +50,7 @@ describe("tela Contrato de SQL", () => {
     fetchMock.mockImplementation((url: string, init?: RequestInit) =>
       init?.method === "PATCH"
         ? respond({ data: null, error: { message: "Sem permissão" } })
-        : respond({ data: { mode: "shadow", modes: [] }, error: null }),
+        : respond({ data: { mode: "fallback", modes: [] }, error: null }),
     );
     render(<SqlContractSettingsPage />);
     fireEvent.click(await screen.findByText("Desligado"));

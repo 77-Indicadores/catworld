@@ -10,7 +10,7 @@ import { Query, type PoolClient } from "pg";
 import { validateReadOnlySql } from "@/server/security/sql-safety";
 import { ApiError } from "@/server/http";
 import { MAX_RESULT_BYTES, approxRowBytes } from "@/server/query/protection";
-import { contractTranslate } from "@/server/sql-contract/apply";
+import { contractTranslate, getContractMode, runWithContract } from "@/server/sql-contract/apply";
 import type { PgStorageConnection } from "./pg-storage";
 import { mssqlKind, normalizeRows, pgKind, type ColumnKind } from "@/server/sql-contract/result";
 
@@ -34,8 +34,7 @@ export async function executeReadOnlyPg(
   const validated = validateReadOnlySql(sql);
   if (!validated.safe) throw new ApiError(400, "UNSAFE_SQL", validated.reason);
 
-  const { sql: translated, topLimit } = await contractTranslate(validated.statement, "postgres", "storage-pg", "regex");
-
+  return runWithContract(validated.statement, "postgres", "storage-pg", "regex", async ({ sql: translated, topLimit }) => {
   // Qualifica tabelas sem schema usando information_schema
   let statement = translated;
   if (schemas.length > 0) {
@@ -131,6 +130,7 @@ export async function executeReadOnlyPg(
   } finally {
     client?.release();
   }
+  });
 }
 
 /** Streaming NDJSON sem limite de linhas — executa query completa e emite linha a linha. */
@@ -150,7 +150,8 @@ export async function executeReadOnlyPgStream(
     statement = await qualifyTablesForPg(conn, statement, schemas);
   }
   // TOP N do usuario vale tambem no stream (antes era descartado e devolvia tudo)
-  if (topLimit !== null) statement = `${statement} LIMIT ${topLimit}`;
+  const contractMode = await getContractMode();
+  if (topLimit !== null && (contractMode === "fallback" || contractMode === "strict")) statement = `${statement} LIMIT ${topLimit}`;
 
   const timeoutMs = Math.min(Math.max(timeout, 1), 300) * 1000;
   const encoder = new TextEncoder();

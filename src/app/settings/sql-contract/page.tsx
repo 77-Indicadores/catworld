@@ -1,9 +1,9 @@
 "use client";
 import { useEffect, useState } from "react";
-import { CheckCircle2, Eye, ShieldCheck, Undo2 } from "lucide-react";
+import { CheckCircle2, Eye, LifeBuoy, ShieldCheck, Undo2 } from "lucide-react";
 import { PageHeader, Panel } from "@/components/ui/primitives";
 
-type Mode = "off" | "shadow" | "strict";
+type Mode = "off" | "shadow" | "fallback" | "strict";
 
 const MODES: { id: Mode; label: string; icon: React.ElementType; description: string; detail: string }[] = [
   {
@@ -15,10 +15,17 @@ const MODES: { id: Mode; label: string; icon: React.ElementType; description: st
   },
   {
     id: "shadow",
-    label: "Observar (padrão)",
+    label: "Observar",
     icon: Eye,
     description: "Responde como antes e registra o que mudaria.",
     detail: "Nada muda para quem já usa. O motor novo roda em paralelo e loga (tag sql-contract) o que ele rejeitaria ou traduziria diferente, sem gravar valores.",
+  },
+  {
+    id: "fallback",
+    label: "Fallback (padrão)",
+    icon: LifeBuoy,
+    description: "Motor novo, com rede de segurança do antigo.",
+    detail: "Usa o motor novo. Se ele rejeitar a consulta (ex.: ::, ILIKE) ou o banco falhar ao executá-la, refaz pelo caminho antigo; se o antigo também falhar, devolve o erro antigo. Nada que funcionava deixa de funcionar, e T-SQL que antes falhava passa a funcionar.",
   },
   {
     id: "strict",
@@ -87,7 +94,7 @@ export default function SqlContractSettingsPage() {
       <Panel>
         <div className="p-5 space-y-4">
           <h2 className="font-semibold text-sm text-base-content/70 uppercase tracking-wide">Modo</h2>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
             {MODES.map((m) => {
               const Icon = m.icon;
               const active = mode === m.id;
@@ -110,7 +117,7 @@ export default function SqlContractSettingsPage() {
           {mode && <p className="text-xs text-base-content/60 leading-relaxed">{MODES.find((m) => m.id === mode)?.detail}</p>}
           {mode === "strict" && saved !== "strict" && (
             <div className="alert alert-warning alert-soft text-sm">
-              O modo estrito pode rejeitar consultas que hoje funcionam. Ative depois de revisar os logs do modo Observar.
+              O modo estrito pode rejeitar consultas que hoje funcionam. Prefira o Fallback; ative o Estrito depois de revisar os logs (tag sql-contract).
             </div>
           )}
           <div className="flex justify-end">

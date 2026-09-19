@@ -7,7 +7,7 @@ import { canAccess } from "@/server/auth/permissions";
 import { ApiError, handleApiError, ok } from "@/server/http";
 import { executePostgresReadOnly, quotedPgTable } from "@/server/connections/postgres";
 import { executeMssqlReadOnly, quotedMssqlTable } from "@/server/connections/mssql";
-import { contractTranslate } from "@/server/sql-contract/apply";
+import { runWithContract } from "@/server/sql-contract/apply";
 import { SqlContractError } from "@/server/sql-contract/translate";
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -21,16 +21,21 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const tableRef = isMssql ? quotedMssqlTable(source.sourceSchema!, source.sourceTable!) : quotedPgTable(source.sourceSchema!, source.sourceTable!);
     // Contrato de SQL: o usuario escreve T-SQL; origem Postgres recebe a traducao.
     // O SQL nativo da propria fonte (sourceSql / SELECT *) ja esta no dialeto da origem.
-    const translated = input.sql ? await contractTranslate(input.sql, isMssql ? "mssql" : "postgres", isMssql ? "live-mssql" : "live-pg", "passthrough") : null;
-    const query = translated
-      ? qualifySourceReference(translated.sql, source, isMssql)
-      : source.sourceKind === "table" ? `SELECT * FROM ${tableRef}` : source.sourceSql!;
-    const limit = translated?.topLimit != null ? Math.min(translated.topLimit, 10000) : input.limit;
-    const result = isMssql
-      ? await executeMssqlReadOnly(source.connection, query, input.timeout, limit, input.offset, input.normalize)
-      : await executePostgresReadOnly(source.connection, query, input.timeout, limit, input.offset, input.normalize);
-    // TOP n pedido pelo usuario nao e truncamento (o corte e intencional)
-    return ok(translated?.topLimit != null ? { ...result, truncated: false } : result);
+    const execute = async (translated: { sql: string; topLimit: number | null } | null) => {
+      const query = translated
+        ? qualifySourceReference(translated.sql, source, isMssql)
+        : source.sourceKind === "table" ? `SELECT * FROM ${tableRef}` : source.sourceSql!;
+      const limit = translated?.topLimit != null ? Math.min(translated.topLimit, 10000) : input.limit;
+      const result = isMssql
+        ? await executeMssqlReadOnly(source.connection, query, input.timeout, limit, input.offset, input.normalize)
+        : await executePostgresReadOnly(source.connection, query, input.timeout, limit, input.offset, input.normalize);
+      // TOP n pedido pelo usuario nao e truncamento (o corte e intencional)
+      return translated?.topLimit != null ? { ...result, truncated: false } : result;
+    };
+    const result = input.sql
+      ? await runWithContract(input.sql, isMssql ? "mssql" : "postgres", isMssql ? "live-mssql" : "live-pg", "passthrough", execute)
+      : await execute(null);
+    return ok(result);
   } catch (e) {
     // Compatibilidade: todo erro com "code" continua virando QUERY_FAILED (comportamento anterior);
     // so o erro novo do contrato de SQL mantem o proprio codigo.

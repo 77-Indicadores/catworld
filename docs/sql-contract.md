@@ -1,13 +1,22 @@
 # A linguagem SQL do Catworld (contrato)
 
-> **Estado de adocao:** o contrato tem um modo em `cw_system_settings` (`key = 'sql_contract.mode'`):
-> `off` = comportamento anterior; `shadow` (**padrao**) = responde como antes e loga (`tag: "sql-contract"`,
-> `shadow-diff` / `shadow-reject`, sem literais) o que o motor novo rejeitaria ou traduziria diferente;
-> `strict` = motor novo, com `UNSUPPORTED_CONSTRUCT`. Enquanto estiver em `shadow`, nada muda para quem ja usa.
-> Ligue `strict` so depois de revisar os logs. O formato de resultado normalizado e opt-in por requisicao
-> (`"normalize": true` em `/queries` e `/dataset-sources/:id/query`, tambem no stream; o SDK expoe `normalize=True`).
-> O CSV de export aceita `dateFormat=iso` (query string em `/tables/:id/export`, campo `dateFormat` em `/queries/export`).
-> O modo pode ser trocado em Configuracoes > Contrato de SQL.
+> **Modos** (`cw_system_settings`, chave `sql_contract.mode`; Configuracoes > Contrato de SQL):
+>
+> | Modo | Comportamento |
+> |---|---|
+> | `off` | Anterior ao contrato (regex no storage PG, SQL direto no live). |
+> | `shadow` | Igual ao `off`, mas o motor novo roda em paralelo e loga (`tag: "sql-contract"`, `shadow-diff` / `shadow-reject`, sem literais) o que faria diferente. |
+> | `fallback` (**padrao**) | Motor novo com rede de seguranca: se ele **rejeita** a consulta (`::`, `ILIKE`...) usa o caminho antigo; se o **banco falha** ao executar o SQL novo, refaz com o antigo e, se o antigo tambem falhar, devolve o erro antigo. Loga `fallback-reject` / `fallback-exec`. |
+> | `strict` | So o motor novo; fora do contrato = `UNSUPPORTED_CONSTRUCT`. |
+>
+> No `fallback`, o que ja funcionava continua funcionando (inclusive SQL em estilo Postgres) e T-SQL que antes falhava passa a funcionar.
+> Mudam de resultado apenas correcoes deliberadas: `TOP n` dentro de CTE/subquery passa a valer, `TOP n` no stream passa a valer
+> (em `off`/`shadow` volta ao comportamento antigo), `truncated` passa a ser `true` quando ha mais linhas, e `DATEDIFF` conta
+> fronteiras como no SQL Server (o antigo usava intervalos completos). Criar derivada com SQL que nao seja `SELECT` agora da 400.
+>
+> O formato de resultado normalizado e opt-in por requisicao (`"normalize": true` em `/queries` e
+> `/dataset-sources/:id/query`, tambem no stream; o SDK expoe `normalize=True`). O CSV de export aceita `dateFormat=iso`
+> (query string em `/tables/:id/export`, campo `dateFormat` em `/queries/export`).
 
 **Voce escreve T-SQL. Sempre.** Em qualquer caminho — consulta no storage, live, derivada, SDK —
 a linguagem e a mesma. O Catworld a traduz para o backend de destino.
