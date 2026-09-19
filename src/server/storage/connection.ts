@@ -108,7 +108,7 @@ export interface StorageConnection {
 
 const connCache = new Map<string, StorageConnection>();
 
-async function getDefaultStorageServerId(): Promise<string> {
+export async function getDefaultStorageServerId(): Promise<string> {
   const server = await prisma.storageServer.findFirstOrThrow({
     where: { isDefault: true },
     select: { id: true },

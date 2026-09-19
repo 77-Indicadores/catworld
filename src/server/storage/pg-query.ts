@@ -11,10 +11,32 @@ import { validateReadOnlySql } from "@/server/security/sql-safety";
 import { ApiError, publicQueryErrorMessage } from "@/server/http";
 import { MAX_RESULT_BYTES, approxRowBytes } from "@/server/query/protection";
 import { contractTranslate, getContractMode, runWithContract } from "@/server/sql-contract/apply";
-import type { PgStorageConnection } from "./pg-storage";
+import { pgQuote, type PgStorageConnection } from "./pg-storage";
 import { mssqlKind, normalizeRows, pgKind, type ColumnKind } from "@/server/sql-contract/result";
 
 const DEFAULT_LIMIT = 10_000;
+
+/**
+ * Abre a transacao da consulta: SOMENTE LEITURA (bloqueia SELECT INTO, nextval, lo_import… no proprio
+ * banco), timeout e search_path locais e, para nao-admin, `SET LOCAL ROLE` no papel do ator (so enxerga
+ * os schemas dos datasets a que tem acesso — ver pg-roles.ts).
+ */
+async function beginReadOnly(
+  client: PoolClient,
+  o: { timeoutMs: number; role: string | null; schemas: string[] },
+): Promise<void> {
+  await client.query("BEGIN READ ONLY");
+  await client.query(`SET LOCAL statement_timeout = ${Math.floor(o.timeoutMs)}`);
+  if (o.role) await client.query(`SET LOCAL ROLE ${pgQuote(o.role)}`);
+  if (o.schemas.length > 0) {
+    await client.query(`SET LOCAL search_path TO ${o.schemas.map(pgQuote).join(", ")}, public`);
+  }
+}
+
+async function endTx(client: PoolClient | null): Promise<void> {
+  if (!client) return;
+  try { await client.query("ROLLBACK"); } catch { /* conexao ja quebrada: o pool descarta */ }
+}
 
 export async function executeReadOnlyPg(
   conn: PgStorageConnection,
@@ -24,6 +46,7 @@ export async function executeReadOnlyPg(
   schemas: string[] = [],
   offset = 0,
   normalize = false,
+  role: string | null = null,
 ): Promise<{
   columns: string[];
   rows: Record<string, unknown>[];
@@ -61,13 +84,8 @@ export async function executeReadOnlyPg(
   let client: PoolClient | null = null;
   try {
     client = await conn._pool.connect();
-    await client.query(`SET statement_timeout = ${timeoutMs}`);
-
-    // Define search_path para permitir referências sem schema
-    if (schemas.length > 0) {
-      const searchPath = schemas.map((s) => `"${s.replace(/"/g, '""')}"`).join(", ");
-      await client.query(`SET search_path TO ${searchPath}, public`);
-    }
+    // Transacao SOMENTE LEITURA + papel do ator; SET LOCAL nao vaza para a proxima consulta do pool.
+    await beginReadOnly(client, { timeoutMs, role, schemas });
 
     // O LIMIT acima protege contra número de linhas, mas não contra colunas
     // muito largas (TEXT/JSONB sem teto de tamanho) — um resultado "dentro do
@@ -128,6 +146,7 @@ export async function executeReadOnlyPg(
       executionTimeMs: Date.now() - started,
     };
   } finally {
+    await endTx(client);
     client?.release();
   }
   });
@@ -140,6 +159,7 @@ export async function executeReadOnlyPgStream(
   timeout = 60,
   schemas: string[] = [],
   normalize = false,
+  role: string | null = null,
 ): Promise<ReadableStream<Uint8Array>> {
   const validated = validateReadOnlySql(sql);
   if (!validated.safe) throw new ApiError(400, "UNSAFE_SQL", validated.reason);
@@ -189,11 +209,7 @@ export async function executeReadOnlyPgStream(
       let client: PoolClient | null = null;
       try {
         client = await conn._pool.connect();
-        await client.query(`SET statement_timeout = ${timeoutMs}`);
-        if (schemas.length > 0) {
-          const searchPath = schemas.map((s) => `"${s.replace(/"/g, '""')}"`).join(", ");
-          await client.query(`SET search_path TO ${searchPath}, public`);
-        }
+        await beginReadOnly(client, { timeoutMs, role, schemas });
         const result = await client.query(statement);
         const columns = result.fields.map((f) => f.name);
         const streamKinds: Record<string, ColumnKind> = normalize
@@ -212,6 +228,7 @@ export async function executeReadOnlyPgStream(
         const msg = publicQueryErrorMessage(err instanceof Error ? err.message : String(err));
         safeEnqueue(encoder.encode(JSON.stringify({ __error__: true, message: msg }) + "\n"));
       } finally {
+        await endTx(client);
         client?.release();
         safeClose();
       }

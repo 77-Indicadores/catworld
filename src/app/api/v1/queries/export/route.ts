@@ -4,7 +4,8 @@ import { z } from "zod";
 import { resolveActor } from "@/server/auth/actor";
 import { syncActorGrants } from "@/server/auth/sync-grants";
 import { runStorageQuery } from "@/server/sql-contract/run";
-import { ApiError, handleApiError } from "@/server/http";
+import { resolveQueryScope } from "@/server/auth/permissions";
+import { ApiError, handleApiError, publicQueryErrorMessage } from "@/server/http";
 import { prisma } from "@/server/db";
 
 export async function POST(r: NextRequest) {
@@ -19,26 +20,16 @@ export async function POST(r: NextRequest) {
       projectId: z.string().uuid().optional(),
     }).parse(await r.json());
 
-    let schemas: string[] = [];
-    let storageServerId: string | null = null;
-    let syncScope: { datasetIds?: string[]; projectIds?: string[] } | undefined;
-    if (input.datasetId) {
-      const dataset = await prisma.dataset.findUnique({ where: { id: input.datasetId, active: true } });
-      if (!dataset) throw new ApiError(404, "NOT_FOUND", "Dataset nao encontrado");
-      schemas = [dataset.schemaName];
-      storageServerId = dataset.storageServerId;
-      syncScope = { datasetIds: [dataset.id] };
-    } else if (input.projectId) {
-      const datasets = await prisma.dataset.findMany({ where: { projectId: input.projectId, active: true } });
-      if (!datasets.length) throw new ApiError(404, "NOT_FOUND", "Nenhum dataset encontrado para este projeto");
-      schemas = datasets.map((d) => d.schemaName);
-      storageServerId = datasets[0]?.storageServerId ?? null;
-      syncScope = { projectIds: [input.projectId] };
-    }
+    // Acesso: antes esta rota nao conferia nada (no Postgres qualquer ator lia qualquer schema).
+    const scope = await resolveQueryScope(actor, { datasetId: input.datasetId, projectId: input.projectId });
+    const schemas = scope.datasets.map((d) => d.schemaName);
+    const storageServerId = scope.datasets[0]?.storageServerId ?? null;
+    const syncScope: { datasetIds?: string[]; projectIds?: string[] } | undefined =
+      input.datasetId ? { datasetIds: [input.datasetId] } : input.projectId ? { projectIds: [input.projectId] } : undefined;
 
     await syncActorGrants(actor, syncScope);
 
-    const result = await runStorageQuery({ principal: actor.principal, sql: input.sql, timeout: 120, limit: 10000, schemas, storageServerId, normalize: input.dateFormat === "iso" });
+    const result = await runStorageQuery({ actor, accessible: scope.accessible, sql: input.sql, timeout: 120, limit: 10000, schemas, storageServerId, normalize: input.dateFormat === "iso" });
 
     if (input.format === "csv") {
       const lines = [result.columns.map((c) => csv(c)).join(","), ...result.rows.map(row => result.columns.map(c => csv(row[c], input.dateFormat === "iso")).join(","))];
@@ -53,6 +44,10 @@ export async function POST(r: NextRequest) {
     const buffer = await workbook.xlsx.writeBuffer();
     return new Response(buffer, { headers: { "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "content-disposition": "attachment; filename=query.xlsx" } });
   } catch (e) {
+    // Erro do banco (sintaxe, permissao, coluna...) e erro da CONSULTA do usuario: 400, como em /queries.
+    if (!(e instanceof ApiError) && e instanceof Error && "code" in e) {
+      return handleApiError(new ApiError(400, "QUERY_FAILED", publicQueryErrorMessage(e.message)));
+    }
     return handleApiError(e);
   }
 }

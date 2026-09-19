@@ -42,6 +42,8 @@ export async function withPg<T>(connection: PgConnection, fn: (client: Client) =
   try {
     const client = new Client(config(connection, tunnel));
     await client.connect();
+    // Toda leitura de fonte externa e somente leitura, mesmo que a conta da fonte tenha permissao de escrita.
+    await client.query("SET default_transaction_read_only = on");
     try {
       return await fn(client);
     } finally {
@@ -153,6 +155,7 @@ export async function* streamPostgresRows(connection: PgConnection, query: strin
   const tunnel = await resolveEffectiveTarget(connection, 5432);
   const client = new Client(config(connection, tunnel));
   await client.connect();
+  await client.query("SET default_transaction_read_only = on");
   try {
     let offset = 0;
     while (true) {

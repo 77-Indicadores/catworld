@@ -8,7 +8,8 @@ import { ApiError, handleApiError, ok, publicQueryErrorMessage } from "@/server/
 import { audit } from "@/server/audit";
 import { prisma } from "@/server/db";
 import { getStorageConnection } from "@/server/storage/connection";
-import { runStorageQuery, type QueryResult } from "@/server/sql-contract/run";
+import { pgRoleForActor, runStorageQuery, type QueryResult } from "@/server/sql-contract/run";
+import { resolveQueryScope } from "@/server/auth/permissions";
 import {
   acquireQuerySlot,
   releaseQuerySlot,
@@ -37,30 +38,12 @@ export async function POST(request: NextRequest) {
       normalize: z.boolean().default(false),
     }).parse(await request.json());
 
-    let schemas: string[] = [];
-    let storageServerId: string | null = null;
-    let syncScope: { datasetIds?: string[]; projectIds?: string[] } | undefined;
-
-    if (input.datasetId) {
-      const dataset = await prisma.dataset.findUnique({
-        where: { id: input.datasetId, active: true },
-        select: { schemaName: true, storageServerId: true, id: true },
-      });
-      if (!dataset) throw new ApiError(404, "NOT_FOUND", "Dataset nao encontrado");
-      schemas = [dataset.schemaName];
-      storageServerId = dataset.storageServerId;
-      syncScope = { datasetIds: [dataset.id] };
-    } else if (input.projectId) {
-      const datasets = await prisma.dataset.findMany({
-        where: { projectId: input.projectId, active: true },
-        select: { schemaName: true, storageServerId: true },
-      });
-      if (!datasets.length) throw new ApiError(404, "NOT_FOUND", "Nenhum dataset encontrado para este projeto");
-      schemas = datasets.map((d) => d.schemaName);
-      // Para projectId, todos os datasets devem estar no mesmo storage; usa o primeiro
-      storageServerId = datasets[0]?.storageServerId ?? null;
-      syncScope = { projectIds: [input.projectId] };
-    }
+    // Acesso: antes esta rota nao conferia nada (no Postgres qualquer ator lia qualquer schema).
+    const scope = await resolveQueryScope(actor, { datasetId: input.datasetId, projectId: input.projectId });
+    const schemas = scope.datasets.map((d) => d.schemaName);
+    const storageServerId = scope.datasets[0]?.storageServerId ?? null;
+    const syncScope: { datasetIds?: string[]; projectIds?: string[] } | undefined =
+      input.datasetId ? { datasetIds: [input.datasetId] } : input.projectId ? { projectIds: [input.projectId] } : undefined;
 
     await syncActorGrants(actor, syncScope);
 
@@ -74,7 +57,7 @@ export async function POST(request: NextRequest) {
         if (conn.provider === "postgres") {
           const { executeReadOnlyPgStream } = await import("@/server/storage/pg-query");
           const { PgStorageConnection } = await import("@/server/storage/pg-storage");
-          ndjsonStream = await executeReadOnlyPgStream(conn as InstanceType<typeof PgStorageConnection>, input.sql, streamTimeout, schemas, input.normalize);
+          ndjsonStream = await executeReadOnlyPgStream(conn as InstanceType<typeof PgStorageConnection>, input.sql, streamTimeout, schemas, input.normalize, await pgRoleForActor(conn, actor, scope.accessible, storageServerId));
         } else {
           ndjsonStream = await executeReadOnlyStream(actor.principal, input.sql, streamTimeout, schemas, storageServerId, input.normalize);
         }
@@ -104,7 +87,7 @@ export async function POST(request: NextRequest) {
     try {
       // Roteia pelo provider do storage do dataset (contrato de SQL unico)
       result = await runStorageQuery({
-        principal: actor.principal, sql: input.sql, timeout: input.timeout,
+        actor, accessible: scope.accessible, sql: input.sql, timeout: input.timeout,
         limit: input.limit, offset: input.offset, schemas, storageServerId, normalize: input.normalize,
       });
     } finally {

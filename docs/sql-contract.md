@@ -90,3 +90,25 @@ Igual nos quatro caminhos (`columns, rows, rowCount, truncated, executionTimeMs`
 
 `src/server/sql-contract/`: `translate.ts` (T-SQL -> Postgres), `result.ts` (tipos do resultado),
 `run.ts` (entrada unica para o storage). Testes: `translate.test.ts`, `result.test.ts`.
+
+## Acesso e somente leitura
+
+**Quem pode consultar o quê** (`/queries`, `/queries/export`, stream):
+- `datasetId`: exige acesso READ ao dataset (403 sem grant). `projectId`: só os datasets do projeto a que o ator tem acesso.
+- Sem escopo: o SQL usa nomes qualificados; admin sem restrição, os demais só o que os grants alcançam (403 se nada).
+
+**Storage Postgres** — isolamento por papel (`storage/pg-roles.ts`), equivalente aos principais do SQL Server:
+- Cada ator não-admin tem um papel `cw_u_…`/`cw_t_…` (NOLOGIN) com USAGE + SELECT **só** nos schemas dos seus datasets; a
+  consulta roda em `BEGIN READ ONLY` + `SET LOCAL ROLE`. Qualificar o nome de outro schema dá `permission denied`.
+- Concessão/revogação sincronizada com cache de 60 s; tabelas criadas depois (troca de staging) já nascem legíveis.
+- **Requisito:** a conta do storage precisa de `CREATEROLE` (ou ser superusuário; o app avisa no log se for). Sem isso, falha
+  fechada com 503 `STORAGE_ROLE_SETUP_FAILED`. Válvula de escape: `PATCH /settings/sql-contract { "pgIsolation": "off" }`
+  (loga aviso) — só até dar `CREATEROLE` à conta.
+- `SET LOCAL` (timeout, search_path, papel) não vaza para a próxima consulta do pool.
+
+**Somente leitura** (defesa em camadas):
+1. Lista de palavras/funções bloqueadas (`sql-safety.ts`): comandos de escrita, `INTO`, `OPENROWSET/OPENQUERY/OPENDATASOURCE`,
+   `WAITFOR`, `pg_read_file`, `pg_sleep`, `pg_terminate_backend`, `pg_ls_*`, `pg_advisory*`, `dblink*`, `lo_*`, `nextval`,
+   `setval`, `set_config`… (`UNSAFE_SQL`). É a 1ª barreira, **não** a única.
+2. Postgres: transação `READ ONLY` + papel sem privilégios de servidor. Fonte live/extract: `default_transaction_read_only = on`.
+3. SQL Server: principal com grants de leitura.
