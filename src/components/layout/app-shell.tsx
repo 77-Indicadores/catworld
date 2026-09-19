@@ -11,6 +11,7 @@ import {
 
 type StorageStatus = { name: string; status: string | null; latencyMs: number | null } | null;
 import { ROLE_LABEL } from "@/lib/labels";
+import { apiRequest } from "@/lib/api-client";
 export type ShellUser = { name: string; email: string; role: string } | null;
 
 /** `roles` ausente = todos os papéis. Espelha o que as rotas exigem (Configurações e seus filhos: só ADMIN). */
@@ -56,12 +57,12 @@ export function AppShell({ children, user, signOutAction }: { children: React.Re
 
   useEffect(() => {
     if (!user) return;
-    fetch("/api/v1/storage-servers")
-      .then(r => (r.ok ? r.json() : null))
-      .then((j: { data?: { name: string; lastStatus: string | null; lastLatencyMs: number | null; isDefault: boolean }[] } | null) => {
-        const def = j?.data?.find(s => s.isDefault) ?? j?.data?.[0];
+    apiRequest<{ name: string; lastStatus: string | null; lastLatencyMs: number | null; isDefault: boolean }[]>("/api/v1/storage-servers")
+      .then(({ data }) => {
+        const def = data?.find(s => s.isDefault) ?? data?.[0];
         if (def) setStorageStatus({ name: def.name, status: def.lastStatus, latencyMs: def.lastLatencyMs });
       })
+      // Widget de status silencioso: falha aqui não deve gerar toast/ruído em toda navegação.
       .catch(() => undefined);
   }, [user]);
 

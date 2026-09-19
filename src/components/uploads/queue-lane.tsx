@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Archive, CircleX, Eye, Loader2, RefreshCw, Upload as UploadIcon, X, Zap } from "lucide-react";
 import { fmtBytes, fmtRelative } from "@/lib/fmt";
 import { formatInt } from "@/lib/present";
+import { useApiAction } from "@/components/ui/feedback";
 
 export type QueueItem = {
   id: string;
@@ -41,6 +42,7 @@ function workerSlot(lockedBy: string | null) {
 
 function JobRow({ item, position }: { item: QueueItem; position?: number }) {
   const router = useRouter();
+  const runAction = useApiAction();
   const [busy, setBusy] = useState<"cancel" | "retry" | null>(null);
 
   const isRunning = item.status === "RUNNING";
@@ -51,16 +53,14 @@ function JobRow({ item, position }: { item: QueueItem; position?: number }) {
   async function cancel() {
     if (!item.cancelPath) return;
     setBusy("cancel");
-    await fetch(item.cancelPath, { method: "POST" });
-    router.refresh();
+    if (await runAction(item.cancelPath, { method: "POST" })) router.refresh();
     setBusy(null);
   }
 
   async function retry() {
     if (!item.retryPath) return;
     setBusy("retry");
-    await fetch(item.retryPath, { method: "POST" });
-    router.refresh();
+    if (await runAction(item.retryPath, { method: "POST" })) router.refresh();
     setBusy(null);
   }
 

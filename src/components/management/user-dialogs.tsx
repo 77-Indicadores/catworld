@@ -2,7 +2,7 @@
 import { useState } from "react";
 import { Pencil, UserPlus } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { apiErrorText } from "@/lib/api-client";
+import { apiRequest, errorMessage } from "@/lib/api-client";
 import { useDialog, ModalBackdrop } from "@/components/ui/modal";
 
 const roles = ["ADMIN", "DATA_MANAGER", "ANALYST", "VIEWER"];
@@ -14,15 +14,19 @@ export function CreateUserDialog() {
   async function submit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setError("");
-    const f = new FormData(e.currentTarget);
-    const response = await fetch("/api/v1/users", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: f.get("name"), email: f.get("email"), password: f.get("password"), role: f.get("role") }),
-    });
-    const body = await response.json();
-    if (!response.ok) { setError(apiErrorText(body, "Falha ao criar usuário")); return; }
-    e.currentTarget.reset();
+    const form = e.currentTarget;
+    const f = new FormData(form);
+    try {
+      await apiRequest("/api/v1/users", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: f.get("name"), email: f.get("email"), password: f.get("password"), role: f.get("role") }),
+      });
+    } catch (err) {
+      setError(errorMessage(err));
+      return;
+    }
+    form.reset();
     close();
     router.refresh();
   }
@@ -59,13 +63,16 @@ export function EditUserDialog({ id, name, role, active }: { id: string; name: s
     setError("");
     const f = new FormData(e.currentTarget);
     const password = String(f.get("password") ?? "");
-    const response = await fetch(`/api/v1/users/${id}`, {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: f.get("name"), role: f.get("role"), active: f.get("active") === "on", ...(password ? { password } : {}) }),
-    });
-    const body = await response.json();
-    if (!response.ok) { setError(apiErrorText(body, "Falha ao salvar")); return; }
+    try {
+      await apiRequest(`/api/v1/users/${id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: f.get("name"), role: f.get("role"), active: f.get("active") === "on", ...(password ? { password } : {}) }),
+      });
+    } catch (err) {
+      setError(errorMessage(err));
+      return;
+    }
     close();
     router.refresh();
   }

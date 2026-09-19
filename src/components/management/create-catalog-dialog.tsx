@@ -3,6 +3,7 @@ import { useState } from "react";
 import { Plus } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useDialog, ModalBackdrop } from "@/components/ui/modal";
+import { apiRequest, errorMessage } from "@/lib/api-client";
 
 export function CreateCatalogDialog({ kind, projectId }: { kind: "project" | "dataset"; projectId?: string }) {
   const { ref, open, close } = useDialog();
@@ -12,12 +13,15 @@ export function CreateCatalogDialog({ kind, projectId }: { kind: "project" | "da
   async function submit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const f = new FormData(e.currentTarget);
-    const response = await fetch(
-      kind === "project" ? "/api/v1/projects" : `/api/v1/projects/${projectId}/datasets`,
-      { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: f.get("name"), description: f.get("description") }) },
-    );
-    const body = await response.json();
-    if (!response.ok) { setError(body.error?.message ?? "Falha ao criar"); return; }
+    try {
+      await apiRequest(
+        kind === "project" ? "/api/v1/projects" : `/api/v1/projects/${projectId}/datasets`,
+        { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: f.get("name"), description: f.get("description") }) },
+      );
+    } catch (err) {
+      setError(errorMessage(err));
+      return;
+    }
     close();
     router.refresh();
   }

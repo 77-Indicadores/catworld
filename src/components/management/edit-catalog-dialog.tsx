@@ -1,31 +1,36 @@
 "use client";
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { Pencil } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { apiErrorText } from "@/lib/api-client";
+import { apiRequest, errorMessage } from "@/lib/api-client";
 import { DangerZone } from "@/components/ui/danger-zone";
+import { useDialog, ModalBackdrop } from "@/components/ui/modal";
 
 type Props = { kind: "project" | "dataset"; id: string; name: string; description: string | null; active: boolean };
 
 export function EditCatalogDialog({ kind, id, name, description, active }: Props) {
-  const ref = useRef<HTMLDialogElement>(null), router = useRouter();
+  const { ref, open, close: closeDialog } = useDialog();
+  const router = useRouter();
   const [error, setError] = useState("");
   const [deleting, setDeleting] = useState(false);
   const apiBase = kind === "project" ? "projects" : "datasets";
 
-  function close() { ref.current?.close(); setError(""); }
+  function close() { closeDialog(); setError(""); }
 
   async function submit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setError("");
     const f = new FormData(e.currentTarget);
-    const response = await fetch(`/api/v1/${apiBase}/${id}`, {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: f.get("name"), description: f.get("description") || null, active: f.get("active") === "on" }),
-    });
-    const body = await response.json();
-    if (!response.ok) { setError(apiErrorText(body, "Falha ao salvar")); return; }
+    try {
+      await apiRequest(`/api/v1/${apiBase}/${id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: f.get("name"), description: f.get("description") || null, active: f.get("active") === "on" }),
+      });
+    } catch (err) {
+      setError(errorMessage(err));
+      return;
+    }
     close();
     router.refresh();
   }
@@ -33,20 +38,25 @@ export function EditCatalogDialog({ kind, id, name, description, active }: Props
   async function destroy() {
     setError("");
     setDeleting(true);
-    const response = await fetch(`/api/v1/${apiBase}/${id}`, {
-      method: "DELETE",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ confirmName: name }),
-    });
+    try {
+      await apiRequest(`/api/v1/${apiBase}/${id}`, {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ confirmName: name }),
+      });
+    } catch (err) {
+      setDeleting(false);
+      setError(errorMessage(err));
+      return;
+    }
     setDeleting(false);
-    if (!response.ok) { const body = await response.json(); setError(apiErrorText(body, "Falha ao excluir")); return; }
     close();
     router.refresh();
   }
 
   return (
     <>
-      <button onClick={() => ref.current?.showModal()} className="btn btn-ghost btn-sm btn-square" aria-label="Editar"><Pencil size={15} /></button>
+      <button onClick={open} className="btn btn-ghost btn-sm btn-square" aria-label="Editar"><Pencil size={15} /></button>
       <dialog ref={ref} className="modal">
         <div className="modal-box">
           <form onSubmit={submit}>
@@ -71,7 +81,7 @@ export function EditCatalogDialog({ kind, id, name, description, active }: Props
           />
           {error && <div className="alert alert-error alert-soft mt-4">{error}</div>}
         </div>
-        <form method="dialog" className="modal-backdrop"><button onClick={close}>fechar</button></form>
+        <ModalBackdrop onClose={close} />
       </dialog>
     </>
   );

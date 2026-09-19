@@ -1,28 +1,30 @@
 "use client";
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { ShieldCheck, Trash2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useApiAction, useFeedback } from "@/components/ui/feedback";
-import { apiErrorText } from "@/lib/api-client";
+import { apiRequest, errorMessage } from "@/lib/api-client";
+import { useDialog, ModalBackdrop } from "@/components/ui/modal";
 
 type Grant = { id: string; scopeType: string; permission: string; project: { name: string } | null; dataset: { name: string; project: { name: string } } | null };
 type Project = { id: string; name: string; datasets: { id: string; name: string }[] };
 
 export function ManageGrantsDialog({ userId, userName }: { userId: string; userName: string }) {
   const { confirm: askConfirm } = useFeedback(); const runAction = useApiAction();
-  const ref = useRef<HTMLDialogElement>(null), router = useRouter();
+  const { ref, open: openDialog, close } = useDialog();
+  const router = useRouter();
   const [grants, setGrants] = useState<Grant[]>([]), [projects, setProjects] = useState<Project[]>([]), [error, setError] = useState("");
   const [scopeType, setScopeType] = useState("GLOBAL");
 
   async function load() {
     const [g, p] = await Promise.all([
-      fetch(`/api/v1/users/${userId}/grants`).then((r) => r.json()),
-      fetch("/api/v1/projects").then((r) => r.json()),
+      apiRequest<Grant[]>(`/api/v1/users/${userId}/grants`),
+      apiRequest<Project[]>("/api/v1/projects"),
     ]);
     setGrants(g.data ?? []);
     setProjects(p.data ?? []);
   }
-  function open() { ref.current?.showModal(); void load(); }
+  function open() { openDialog(); void load(); }
   async function revoke(id: string) {
     if (!await askConfirm({ title: "Revogar acesso", message: "A pessoa perde o acesso imediatamente.", confirmLabel: "Revogar", danger: true })) return;
     if (await runAction(`/api/v1/users/${userId}/grants/${id}`, { method: "DELETE" }, "Acesso revogado.")) {
@@ -36,17 +38,21 @@ export function ManageGrantsDialog({ userId, userName }: { userId: string; userN
     const f = new FormData(e.currentTarget);
     if (scopeType === "PROJECT" && !f.get("projectId")) { setError("Selecione um projeto"); return; }
     if (scopeType === "DATASET" && !f.get("datasetId")) { setError("Selecione um dataset"); return; }
-    const response = await fetch(`/api/v1/users/${userId}/grants`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        scopeType,
-        projectId: scopeType === "PROJECT" ? String(f.get("projectId") ?? "") || undefined : undefined,
-        datasetId: scopeType === "DATASET" ? String(f.get("datasetId") ?? "") || undefined : undefined,
-        permission: f.get("permission"),
-      }),
-    });
-    if (!response.ok) { const body = await response.json(); setError(apiErrorText(body, "Falha ao conceder acesso")); return; }
+    try {
+      await apiRequest(`/api/v1/users/${userId}/grants`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          scopeType,
+          projectId: scopeType === "PROJECT" ? String(f.get("projectId") ?? "") || undefined : undefined,
+          datasetId: scopeType === "DATASET" ? String(f.get("datasetId") ?? "") || undefined : undefined,
+          permission: f.get("permission"),
+        }),
+      });
+    } catch (err) {
+      setError(errorMessage(err));
+      return;
+    }
     e.currentTarget.reset();
     setScopeType("GLOBAL");
     await load();
@@ -75,9 +81,9 @@ export function ManageGrantsDialog({ userId, userName }: { userId: string; userN
             <button className="btn btn-primary btn-sm sm:col-span-2">Conceder acesso</button>
           </form>
           {error && <div className="alert alert-error alert-soft mt-3">{error}</div>}
-          <div className="modal-action"><button type="button" onClick={() => ref.current?.close()} className="btn btn-ghost btn-sm">Fechar</button></div>
+          <div className="modal-action"><button type="button" onClick={close} className="btn btn-ghost btn-sm">Fechar</button></div>
         </div>
-        <form method="dialog" className="modal-backdrop"><button>fechar</button></form>
+        <ModalBackdrop onClose={close} />
       </dialog>
     </>
   );

@@ -3,24 +3,24 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { AlertTriangle, Loader2, RefreshCw, X } from "lucide-react";
+import { useApiAction } from "@/components/ui/feedback";
 
 export function FailedActions({ count }: { count: number }) {
   const router = useRouter();
+  const runAction = useApiAction();
   const [busy, setBusy] = useState<"retry" | "dismiss" | null>(null);
 
   if (count === 0) return null;
 
   async function retryAll() {
     setBusy("retry");
-    await fetch("/api/v1/uploads/retry-failed", { method: "POST" });
-    router.refresh();
+    if (await runAction("/api/v1/uploads/retry-failed", { method: "POST" })) router.refresh();
     setBusy(null);
   }
 
   async function dismissAll() {
     setBusy("dismiss");
-    await fetch("/api/v1/uploads/dismiss-failed", { method: "POST" });
-    router.refresh();
+    if (await runAction("/api/v1/uploads/dismiss-failed", { method: "POST" })) router.refresh();
     setBusy(null);
   }
 

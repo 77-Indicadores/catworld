@@ -1,11 +1,12 @@
 "use client";
 
-import { useRef, useState, useTransition } from "react";
+import { useState, useTransition } from "react";
 import { CheckCircle2, CircleX, Clock3, Database, Pencil, Plus, RefreshCw, Star, Trash2, Wifi } from "lucide-react";
 import { useApiAction } from "@/components/ui/feedback";
 import { DangerZone } from "@/components/ui/danger-zone";
 import { PageHeader, Panel } from "@/components/ui/primitives";
-import { apiErrorText } from "@/lib/api-client";
+import { useDialog, ModalBackdrop } from "@/components/ui/modal";
+import { apiRequest, errorMessage } from "@/lib/api-client";
 import { maskConnectionString } from "@/lib/mask-url";
 
 type Server = {
@@ -36,8 +37,8 @@ function maskedUrl(url: string | null) {
 
 export function StorageServerManager({ initialServers }: { initialServers: Server[] }) {
   const runAction = useApiAction();
-  const modalRef = useRef<HTMLDialogElement>(null);
-  const deleteRef = useRef<HTMLDialogElement>(null);
+  const { ref: modalRef, open: showModal, close: closeModalDialog } = useDialog();
+  const { ref: deleteRef, open: showDeleteModal, close: closeDeleteDialog } = useDialog();
   const [servers, setServers] = useState(initialServers);
   const [editing, setEditing] = useState<Server | null>(null);
   const [deleting, setDeleting] = useState<Server | null>(null);
@@ -60,7 +61,7 @@ export function StorageServerManager({ initialServers }: { initialServers: Serve
     setFormDefault(false);
     setFormProvider("sqlserver");
     setError(null);
-    modalRef.current?.showModal();
+    showModal();
   }
 
   function openEdit(s: Server) {
@@ -70,29 +71,28 @@ export function StorageServerManager({ initialServers }: { initialServers: Serve
     setFormDefault(s.isDefault);
     setFormProvider((s.provider as "sqlserver" | "postgres") ?? "sqlserver");
     setError(null);
-    modalRef.current?.showModal();
+    showModal();
   }
 
   function closeModal() {
-    modalRef.current?.close();
+    closeModalDialog();
     setEditing(null);
     setError(null);
   }
 
   function openDelete(s: Server) {
     setDeleting(s);
-    deleteRef.current?.showModal();
+    showDeleteModal();
   }
 
   function closeDelete() {
-    deleteRef.current?.close();
+    closeDeleteDialog();
     setDeleting(null);
   }
 
   async function reload() {
-    const res = await fetch("/api/v1/storage-servers");
-    const json = await res.json() as { data: Server[] };
-    setServers(json.data ?? []);
+    const { data } = await apiRequest<Server[]>("/api/v1/storage-servers");
+    setServers(data ?? []);
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -101,16 +101,14 @@ export function StorageServerManager({ initialServers }: { initialServers: Serve
     const body = { name: formName.trim(), url: formUrl.trim(), isDefault: formDefault, provider: formProvider };
     startTransition(async () => {
       try {
-        const res = await fetch(
+        await apiRequest(
           editing ? `/api/v1/storage-servers/${editing.id}` : "/api/v1/storage-servers",
           { method: editing ? "PATCH" : "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
         );
-        const json = await res.json() as { error?: { message: string } };
-        if (!res.ok) { setError(apiErrorText(json, "Erro desconhecido")); return; }
         closeModal();
         await reload();
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Erro de rede");
+        setError(errorMessage(err));
       }
     });
   }
@@ -132,16 +130,11 @@ export function StorageServerManager({ initialServers }: { initialServers: Serve
   async function handleTest(s: Server) {
     setTesting(s.id);
     try {
-      const res = await fetch(`/api/v1/storage-servers/${s.id}/test`, { method: "POST" });
-      const json = await res.json() as { data?: { healthy: boolean; latencyMs: number; database: string }; error?: { message: string } };
-      if (!res.ok || !json.data) {
-        setTestResults((p) => ({ ...p, [s.id]: { error: apiErrorText(json, "Falha na conexão") } }));
-      } else {
-        setTestResults((p) => ({ ...p, [s.id]: json.data! }));
-      }
+      const { data } = await apiRequest<{ healthy: boolean; latencyMs: number; database: string }>(`/api/v1/storage-servers/${s.id}/test`, { method: "POST" });
+      setTestResults((p) => ({ ...p, [s.id]: data }));
       await reload();
     } catch (err) {
-      setTestResults((p) => ({ ...p, [s.id]: { error: err instanceof Error ? err.message : "Erro de rede" } }));
+      setTestResults((p) => ({ ...p, [s.id]: { error: errorMessage(err) } }));
     } finally {
       setTesting(null);
     }
@@ -320,7 +313,7 @@ export function StorageServerManager({ initialServers }: { initialServers: Serve
             </div>
           </form>
         </div>
-        <form method="dialog" className="modal-backdrop"><button aria-label="Fechar" onClick={closeModal}>fechar</button></form>
+        <ModalBackdrop onClose={closeModal} />
       </dialog>
 
       <dialog ref={deleteRef} className="modal">
@@ -345,7 +338,7 @@ export function StorageServerManager({ initialServers }: { initialServers: Serve
             <button type="button" className="btn btn-sm btn-ghost" onClick={closeDelete}>Cancelar</button>
           </div>
         </div>
-        <form method="dialog" className="modal-backdrop"><button aria-label="Fechar" onClick={closeDelete}>fechar</button></form>
+        <ModalBackdrop onClose={closeDelete} />
       </dialog>
     </div>
   );
