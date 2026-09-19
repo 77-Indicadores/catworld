@@ -27,9 +27,9 @@ export type QueueItem = {
 type LaneType = "preview" | "import" | "sync";
 
 const LANE_CONFIG: Record<LaneType, { label: string; icon: React.ElementType; accent: string }> = {
-  preview: { label: "Preview",  icon: Eye,        accent: "text-info" },
-  import:  { label: "Import",   icon: UploadIcon,  accent: "text-accent" },
-  sync:    { label: "Sync",     icon: Zap,         accent: "text-secondary" },
+  preview: { label: "Prévia",  icon: Eye,        accent: "text-info" },
+  import:  { label: "Importação",   icon: UploadIcon,  accent: "text-accent" },
+  sync:    { label: "Sincronização",     icon: Zap,         accent: "text-secondary" },
 };
 
 function workerSlot(lockedBy: string | null) {
@@ -174,7 +174,7 @@ export function QueueLane({
             <span className="badge badge-error badge-sm">{failed.length}</span>
           )}
           {total === 0 && (
-            <span className="text-xs text-base-content/25">vazia</span>
+            <span className="text-xs text-base-content/50">vazia</span>
           )}
         </div>
       </div>

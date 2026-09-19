@@ -78,8 +78,8 @@ const groups: SettingGroup[] = [
       {
         href: "/settings/worker",
         icon: Gauge,
-        label: "Performance do Worker",
-        description: "Controle paralelismo e intensidade dos imports e syncs de fonte.",
+        label: "Workers",
+        description: "Quais workers rodam, o que cada um processa, limites de upload e reinício pela tela.",
       },
       {
         href: "/settings/sql-contract",
