@@ -61,3 +61,52 @@ export const AUDIT_EVENT_LABELS: Record<string, string> = {
   WORKER_COMMAND_FAILED: "Comando de worker falhou",
   WORKER_COMMAND_CANCELLED: "Comando de worker cancelado",
 };
+
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+
+/** Extrai os ids (uuid) citados nos eventos: no recurso (rota ou id direto) e no token que agiu. */
+export function auditReferencedIds(events: { resourceId: string | null; tokenId: string | null }[]): string[] {
+  const ids = new Set<string>();
+  for (const e of events) {
+    for (const m of e.resourceId?.match(UUID_RE) ?? []) ids.add(m.toLowerCase());
+    if (e.tokenId) ids.add(e.tokenId.toLowerCase());
+  }
+  return [...ids];
+}
+
+/**
+ * Nome legivel de cada id citado nos eventos (projeto, dataset, tabela, fonte, derivada, upload, token, usuario),
+ * resolvido em lote (uma consulta por tipo, nunca uma por linha). Id sem correspondencia (apagado) fica de fora.
+ */
+export async function resolveAuditNames(events: { resourceId: string | null; tokenId: string | null }[]): Promise<Map<string, string>> {
+  const ids = auditReferencedIds(events);
+  const names = new Map<string, string>();
+  if (ids.length === 0) return names;
+  const where = { id: { in: ids } };
+  const add = (rows: { id: string; label: string }[]) => { for (const r of rows) names.set(r.id.toLowerCase(), r.label); };
+  const [projects, datasets, tables, sources, derived, uploads, tokens, users] = await Promise.all([
+    prisma.project.findMany({ where, select: { id: true, name: true } }),
+    prisma.dataset.findMany({ where, select: { id: true, name: true } }),
+    prisma.datasetTable.findMany({ where, select: { id: true, name: true } }),
+    prisma.datasetSource.findMany({ where, select: { id: true, name: true } }),
+    prisma.derivedTable.findMany({ where, select: { id: true, name: true } }),
+    prisma.upload.findMany({ where, select: { id: true, originalFilename: true } }),
+    prisma.apiToken.findMany({ where, select: { id: true, name: true } }),
+    prisma.user.findMany({ where, select: { id: true, name: true } }),
+  ]);
+  add(projects.map((r) => ({ id: r.id, label: r.name })));
+  add(datasets.map((r) => ({ id: r.id, label: r.name })));
+  add(tables.map((r) => ({ id: r.id, label: r.name })));
+  add(sources.map((r) => ({ id: r.id, label: r.name })));
+  add(derived.map((r) => ({ id: r.id, label: r.name })));
+  add(uploads.map((r) => ({ id: r.id, label: r.originalFilename })));
+  add(tokens.map((r) => ({ id: r.id, label: r.name })));
+  add(users.map((r) => ({ id: r.id, label: r.name })));
+  return names;
+}
+
+/** Recurso do evento com os ids trocados por nomes: `/api/v1/datasets/<uuid>` vira `/api/v1/datasets/Vendas`. */
+export function displayResource(resourceId: string | null, resourceType: string | null, names: Map<string, string>): string {
+  if (!resourceId) return resourceType ?? "—";
+  return resourceId.replace(UUID_RE, (m) => names.get(m.toLowerCase()) ?? m);
+}

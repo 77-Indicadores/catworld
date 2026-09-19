@@ -3,7 +3,7 @@ import { ScrollText, ShieldAlert } from "lucide-react";
 import { EmptyState, PageHeader, Panel, StatusBadge } from "@/components/ui/primitives";
 import { resolveActor } from "@/server/auth/actor";
 import { auditPageRead } from "@/server/audit-request";
-import { AUDIT_EVENT_LABELS, auditFilterSchema, queryAuditEvents } from "@/server/audit-query";
+import { AUDIT_EVENT_LABELS, auditFilterSchema, displayResource, queryAuditEvents, resolveAuditNames } from "@/server/audit-query";
 import { Time } from "@/components/ui/time";
 
 export const dynamic = "force-dynamic";
@@ -56,6 +56,8 @@ export default async function AuditPage({ searchParams }: { searchParams: Promis
   const parsed = auditFilterSchema.safeParse({ ...raw, until: untilDate });
   const filtersOk = parsed.success;
   const result = parsed.success ? await queryAuditEvents(parsed.data) : { data: [], nextCursor: null };
+
+  const names = await resolveAuditNames(result.data);
 
   const keep: Record<string, string> = {};
   for (const [k, v] of Object.entries(raw)) if (v && k !== "cursor") keep[k] = v;
@@ -138,7 +140,7 @@ export default async function AuditPage({ searchParams }: { searchParams: Promis
                   const who = e.user ? (
                     <Link className="link" href={`/audit?userId=${e.userId}`} title={e.user.email}>{e.user.name}</Link>
                   ) : e.tokenId ? (
-                    <Link className="link font-mono text-xs" href={`/audit?tokenId=${e.tokenId}`}>token …{e.tokenId.slice(0, 8)}</Link>
+                    <Link className="link text-xs" href={`/audit?tokenId=${e.tokenId}`}>token {names.get(e.tokenId.toLowerCase()) ?? `…${e.tokenId.slice(0, 8)}`}</Link>
                   ) : (
                     <span className="text-base-content/65">Sistema</span>
                   );
@@ -150,7 +152,7 @@ export default async function AuditPage({ searchParams }: { searchParams: Promis
                         <div className="font-mono text-[11px] text-base-content/65">{e.eventType}</div>
                       </td>
                       <td>{who}</td>
-                      <td className="max-w-64 break-all font-mono text-xs">{e.resourceId ?? e.resourceType ?? "—"}</td>
+                      <td className="max-w-64 break-all font-mono text-xs" title={e.resourceId ?? undefined}>{displayResource(e.resourceId, e.resourceType, names)}</td>
                       <td><StatusBadge status={e.success ? "healthy" : "error"} label={e.success ? "Sucesso" : "Falha"} /></td>
                       <td className="whitespace-nowrap font-mono text-xs">{e.ipAddress ?? "—"}</td>
                       <td className="text-xs">
