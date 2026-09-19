@@ -520,13 +520,7 @@ export function ProjectWorkspace({ project, publicOrigin, storageServers }: { pr
             )}
 
             {activeTab?.kind === "table" && activeDataset && activeTable && (
-              <TablePanel
-                key={activeTable.id}
-                datasetId={activeDataset.id}
-                table={activeTable}
-                onChanged={() => router.refresh()}
-                compact
-              />
+              <TablePanel key={activeTable.id} table={activeTable} />
             )}
 
             {activeTab?.kind === "query" && (
