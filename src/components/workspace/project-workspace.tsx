@@ -1,7 +1,8 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Cable, Check, ChevronRight, Copy, Database, DatabaseZap, RefreshCw, Search, Server, Table2, Terminal, Trash2, TriangleAlert, X } from "lucide-react";
-import { useRouter } from "next/navigation";
+import Link from "next/link";
+import { Cable, Check, ChevronRight, Copy, Database, DatabaseZap, FolderKanban, RefreshCw, Search, Server, Table2, Terminal, Trash2, TriangleAlert, X } from "lucide-react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { CreateCatalogDialog } from "@/components/management/create-catalog-dialog";
 import { EditCatalogDialog } from "@/components/management/edit-catalog-dialog";
 import { TablePanel } from "./table-panel";
@@ -255,6 +256,8 @@ function datasetFreshness(d: Dataset) {
 
 export function ProjectWorkspace({ project, publicOrigin, storageServers }: { project: Project; publicOrigin: string; storageServers: StorageServerOption[] }) {
   const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -273,6 +276,42 @@ export function ProjectWorkspace({ project, publicOrigin, storageServers }: { pr
     const id = window.setInterval(() => { if (!document.hidden) router.refresh(); }, 3000);
     return () => window.clearInterval(id);
   }, [hasActiveRefresh, router]);
+
+  // Restaura a aba a partir da URL (?tab=dataset-x|table-x|query) — permite compartilhar link e
+  // sobreviver a um refresh do navegador, que antes sempre voltava pro estado vazio.
+  const restoredFromUrl = useRef(false);
+  useEffect(() => {
+    if (restoredFromUrl.current) return;
+    restoredFromUrl.current = true;
+    const tabParam = searchParams.get("tab");
+    if (!tabParam) return;
+    if (tabParam === "query") { openQuery(); return; }
+    if (tabParam.startsWith("dataset-")) {
+      const datasetId = tabParam.slice("dataset-".length);
+      const dataset = project.datasets.find(d => d.id === datasetId);
+      if (dataset) openDataset(dataset);
+      return;
+    }
+    if (tabParam.startsWith("table-")) {
+      const tableId = tabParam.slice("table-".length);
+      for (const dataset of project.datasets) {
+        const table = dataset.tables.find(t => t.id === tableId);
+        if (table) { openTable(dataset, table); return; }
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Mantém a URL em sincronia com a aba ativa — dá pra copiar o link e voltar direto pra ela.
+  useEffect(() => {
+    if (!restoredFromUrl.current) return;
+    const params = new URLSearchParams(searchParams.toString());
+    if (activeTabId) params.set("tab", activeTabId); else params.delete("tab");
+    const next = params.toString();
+    if (next === searchParams.toString()) return;
+    router.replace(next ? `${pathname}?${next}` : pathname, { scroll: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTabId]);
 
   function openDataset(dataset: Dataset) {
     const tabId = `dataset-${dataset.id}`;
@@ -330,7 +369,18 @@ export function ProjectWorkspace({ project, publicOrigin, storageServers }: { pr
   }, [project.datasets, filter]);
 
   return (
-    <div className="flex overflow-hidden" style={{ height: "calc(100vh - 4rem)" }}>
+    <div className="flex flex-col overflow-hidden" style={{ height: "calc(100vh - 4rem)" }}>
+
+      {/* Breadcrumb: "onde estou" — antes só aparecia (pequeno) no rodapé da sidebar */}
+      <div className="flex shrink-0 items-center gap-1.5 border-b border-base-300 bg-base-100 px-4 py-2 text-sm">
+        <Link href="/projects" className="flex items-center gap-1.5 text-base-content/65 hover:text-primary">
+          <FolderKanban size={13} />Projetos
+        </Link>
+        <ChevronRight size={13} className="text-base-content/65" />
+        <span className="font-medium">{project.name}</span>
+      </div>
+
+      <div className="flex min-h-0 flex-1 overflow-hidden">
 
       {/* ── LEFT: Project directory ─────────────────────────────── */}
       <div className="flex w-[240px] shrink-0 flex-col border-r border-base-300 bg-base-100">
@@ -500,6 +550,7 @@ export function ProjectWorkspace({ project, publicOrigin, storageServers }: { pr
             </div>
           )}
         </div>
+      </div>
       </div>
     </div>
   );
