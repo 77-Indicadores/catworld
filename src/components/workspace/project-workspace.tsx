@@ -2,7 +2,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Cable, Check, ChevronRight, Copy, Database, DatabaseZap, RefreshCw, Search, Server, Table2, Terminal, Trash2, TriangleAlert, X } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { StatusBadge } from "@/components/ui/primitives";
 import { CreateCatalogDialog } from "@/components/management/create-catalog-dialog";
 import { EditCatalogDialog } from "@/components/management/edit-catalog-dialog";
 import { TablePanel } from "./table-panel";
@@ -10,9 +9,9 @@ import { QueryPanel } from "./query-panel";
 import { DatasetPanel } from "./dataset-panel";
 import { apiErrorText } from "@/lib/api-client";
 import type { StorageServerOption, WorkspaceDataset as Dataset, WorkspaceProject as Project, WorkspaceTable as Table } from "@/lib/workspace/types";
-import { Time } from "@/components/ui/time";
-import { formatInt } from "@/lib/present";
-import { sourceFreshness } from "@/lib/workspace/present";
+import { FreshnessBlock } from "./table-detail/freshness-block";
+import { OriginBlock } from "./table-detail/origin-block";
+import { UsageBlock } from "./table-detail/usage-block";
 
 
 type Tab =
@@ -37,7 +36,7 @@ function CopyId({ label, id, className }: { label: string; id: string; className
   );
 }
 
-function MetadataPanel({ table, dataset, onChanged }: { table: Table; dataset: Dataset; onChanged: () => void }) {
+function MetadataPanel({ table, dataset, projectSlug, publicOrigin, onChanged }: { table: Table; dataset: Dataset; projectSlug: string; publicOrigin: string; onChanged: () => void }) {
   const [refreshing, setRefreshing] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
@@ -51,7 +50,7 @@ function MetadataPanel({ table, dataset, onChanged }: { table: Table; dataset: D
     setNotice("Atualização enfileirada."); onChanged();
   }
 
-  const fmtRows = formatInt(table.rowCount);
+  const derived = dataset.derivedTables.find(d => d.targetTable?.id === table.id) ?? null;
 
   return (
     <div className="flex h-full flex-col overflow-y-auto text-sm">
@@ -59,44 +58,17 @@ function MetadataPanel({ table, dataset, onChanged }: { table: Table; dataset: D
       <div className="border-b border-base-300 p-4">
         <p className="text-[10px] font-semibold uppercase tracking-widest text-base-content/40">Sobre esta tabela</p>
         <h3 className="mt-1.5 font-semibold leading-tight">{table.name}</h3>
-        <p className="mt-0.5 font-mono text-[11px] text-base-content/40">{table.sqlName}</p>
+        <p className="mt-0.5 font-mono text-[11px] text-base-content/70">{dataset.schemaName}.{table.sqlName}</p>
       </div>
 
-      {/* Stats */}
-      <div className="space-y-2.5 border-b border-base-300 p-4 text-xs">
-        <div className="flex justify-between gap-2">
-          <span className="text-base-content/50">Dataset</span>
-          <span className="truncate font-medium text-right">{dataset.name}</span>
-        </div>
-        <div className="flex justify-between gap-2">
-          <span className="text-base-content/50">Linhas</span>
-          <span className="font-medium font-variant-numeric tabular-nums">{fmtRows}</span>
-        </div>
-        <div className="flex justify-between gap-2">
-          <span className="text-base-content/50">Colunas</span>
-          <span className="font-medium">{table.columns.length}</span>
-        </div>
-        {table.lastDataAt && (
-          <div className="flex justify-between gap-2">
-            <span className="text-base-content/50">Atualizado</span>
-            <span className="font-medium text-right"><Time iso={table.lastDataAt} relative /></span>
-          </div>
-        )}
-        {table.source && (
-          <div className="flex justify-between gap-2">
-            <span className="text-base-content/50">Modo</span>
-            <div className="flex items-center gap-1">
-              {table.source.mode === "live" ? <Cable size={11} /> : <DatabaseZap size={11} />}
-              <span className="font-medium">{table.source.mode === "live" ? "Live" : "Extract"}</span>
-            </div>
-          </div>
-        )}
-        {table.source && (
-          <div className="flex justify-between gap-2">
-            <span className="text-base-content/50">Status</span>
-            <StatusBadge status={sourceFreshness(table.source).tone} label={sourceFreshness(table.source).label} />
-          </div>
-        )}
+      {/* Frescor · Origem · Como usar */}
+      <FreshnessBlock table={table} derived={derived} />
+      <OriginBlock table={table} datasetName={dataset.name} derived={derived} />
+      <UsageBlock table={table} dataset={dataset} projectSlug={projectSlug} publicOrigin={publicOrigin} />
+
+      <div className="flex justify-between gap-3 border-b border-base-300 px-4 py-3 text-xs">
+        <span className="text-base-content/70">Colunas</span>
+        <span className="font-medium">{table.columns.length}</span>
       </div>
 
       {/* IDs */}
@@ -504,11 +476,13 @@ export function ProjectWorkspace({ project, publicOrigin, storageServers }: { pr
 
           {/* Right metadata panel — only for table tabs */}
           {activeTab?.kind === "table" && activeTable && activeDataset && (
-            <div className="w-[260px] shrink-0 border-l border-base-300">
+            <div className="w-[340px] shrink-0 border-l border-base-300">
               <MetadataPanel
                 key={activeTable.id}
                 table={activeTable}
                 dataset={activeDataset}
+                projectSlug={project.slug}
+                publicOrigin={publicOrigin}
                 onChanged={() => router.refresh()}
               />
             </div>
