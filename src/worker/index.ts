@@ -240,7 +240,7 @@ async function runMetadataCleanup() {
          SET finished_at=NOW(), duration_ms=$2,
              deleted_jobs=$3, deleted_audit=$4, deleted_uploads=$5,
              deleted_files=$6, deleted_orphans=$7, deleted_versions=$8
-         WHERE id=$1`,
+         WHERE id=$1::uuid`,
         runId,
         durationMs,
         Number(deletedJobs),
@@ -259,7 +259,7 @@ async function runMetadataCleanup() {
     const msg = e instanceof Error ? e.message : String(e);
     if (runId) {
       await prisma.$executeRawUnsafe(
-        `UPDATE cw_cleanup_runs SET finished_at=NOW(), duration_ms=$2, error=$3 WHERE id=$1`,
+        `UPDATE cw_cleanup_runs SET finished_at=NOW(), duration_ms=$2, error=$3 WHERE id=$1::uuid`,
         runId, Date.now() - t0, msg,
       ).catch(() => {});
     }
