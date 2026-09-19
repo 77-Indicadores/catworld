@@ -217,7 +217,7 @@ export default function SqlContractSettingsPage() {
         <div className="p-5 space-y-2 text-sm text-base-content/70">
           <h2 className="font-semibold text-sm text-base-content/70 uppercase tracking-wide">Formato do resultado</h2>
           <p>Formato padrão para requisições que <strong>não</strong> enviam <code>normalize</code>:</p>
-          <div className="flex flex-wrap gap-2" role="group" aria-label="Formato padrão do resultado">
+          <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Formato padrão do resultado">
             <button
               type="button" disabled={fmtSaving} onClick={() => saveFormat("legacy")}
               className={`btn btn-sm ${resultFormat === "legacy" ? "btn-primary" : "btn-ghost border border-base-300"}`}
@@ -230,6 +230,9 @@ export default function SqlContractSettingsPage() {
             >
               Normalizado (recomendado)
             </button>
+            {fmtSaving
+              ? <span className="loading loading-spinner loading-xs text-base-content/65" />
+              : <span className="text-xs text-base-content/65">Aplicado imediatamente ao clicar — diferente do Modo acima, que exige Salvar.</span>}
           </div>
           <p className="text-xs text-base-content/65">
             Legado: tipos como o driver entrega (varia por backend); as respostas avisam em <code>meta.warnings</code>. Normalizado: datas
