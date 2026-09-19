@@ -607,15 +607,16 @@ async function loop(concurrencyId: number) {
 async function releaseSelf() {
   const workerId = env().CATWORLD_WORKER_ID;
   const concurrency = env().CATWORLD_WORKER_CONCURRENCY;
-  // Match worker-N-1@hostname, worker-N-2@hostname, etc. — LIKE handles the @hostname suffix.
-  const likeConditions = Array.from(
-    { length: concurrency },
-    (_, i) => `locked_by LIKE '${workerId}-${i + 1}@%' OR locked_by='${workerId}-${i + 1}'`,
-  ).join(" OR ");
+  // Match worker-N-1@hostname, worker-N-2@hostname, etc. Parametrizado; '_' e '%' do id nao viram curinga do LIKE.
+  const escaped = workerId.replace(/[\\%_]/g, (c) => `\\${c}`);
+  const labels = Array.from({ length: concurrency }, (_, i) => `${workerId}-${i + 1}`);
+  const likes = labels.map((_, i) => `${escaped}-${i + 1}@%`);
   const released = await prisma.$executeRawUnsafe(
     `UPDATE cw_jobs
      SET status='QUEUED', locked_at=NULL, locked_by=NULL, heartbeat_at=NULL, available_at=NOW()
-     WHERE status='RUNNING' AND (${likeConditions})`,
+     WHERE status='RUNNING' AND (locked_by LIKE ANY($1::text[]) OR locked_by = ANY($2::text[]))`,
+    likes,
+    labels,
   );
   if (released > 0) console.log(`[worker] startup: ${released} job(s) do worker anterior liberados`);
 }
@@ -626,6 +627,9 @@ async function main() {
   await releaseSelf();
   const rawTypes = env().CATWORLD_WORKER_JOB_TYPES;
   const allowedTypes = rawTypes ? rawTypes.split(",").map(t => t.trim()).filter(Boolean) : null;
+  const KNOWN_TYPES = ["PREVIEW_UPLOAD", "IMPORT_UPLOAD", "SOURCE_REFRESH", "DERIVED_REFRESH", "METADATA_CLEANUP"];
+  const unknown = (allowedTypes ?? []).filter((t) => !KNOWN_TYPES.includes(t));
+  if (unknown.length) console.warn(`[worker] CATWORLD_WORKER_JOB_TYPES contem tipo(s) desconhecido(s): ${unknown.join(", ")} (validos: ${KNOWN_TYPES.join(", ")})`);
   const handlesSourceRefresh = !allowedTypes || allowedTypes.includes("SOURCE_REFRESH");
   const handlesDerivedRefresh = !allowedTypes || allowedTypes.includes("DERIVED_REFRESH");
   const handlesCleanup = !allowedTypes || allowedTypes.includes("METADATA_CLEANUP");

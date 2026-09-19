@@ -26,6 +26,13 @@ export const WORKER_CONFIG_DEFAULTS = {
   import_batch_delay_ms:  200,
 } as const;
 
+/** Inteiro dentro de [min,max]; qualquer outra coisa devolve o fallback. */
+export function pickInt(raw: string | undefined, fallback: number, min: number, max: number): number {
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= min && n <= max ? n : fallback;
+}
+
 let _cache: { value: WorkerConfig; expiresAt: number } | null = null;
 const CACHE_TTL_MS = 10_000; // relê a cada 10s no máximo
 
@@ -43,13 +50,14 @@ export async function getWorkerConfig(): Promise<WorkerConfig> {
     // banco indisponível — usa env como fallback
   }
 
-  const map = Object.fromEntries(rows.map((r) => [r.key.replace("worker.", ""), Number(r.value)]));
+  const map = Object.fromEntries(rows.map((r) => [r.key.replace("worker.", ""), r.value]));
   const e = env();
 
+  // Valor invalido no banco (texto, NaN, fora da faixa da API) nao pode virar NaN/0 e travar o worker: cai no env.
   const value: WorkerConfig = {
-    maxHeavyJobs:        map["max_heavy_jobs"]        ?? e.CATWORLD_MAX_HEAVY_JOBS,
-    maxSyncsPerStorage:  map["max_syncs_per_storage"] ?? e.CATWORLD_MAX_SYNCS_PER_STORAGE,
-    importBatchDelayMs:  map["import_batch_delay_ms"] ?? e.CATWORLD_IMPORT_BATCH_DELAY_MS,
+    maxHeavyJobs:        pickInt(map["max_heavy_jobs"], e.CATWORLD_MAX_HEAVY_JOBS, 1, 20),
+    maxSyncsPerStorage:  pickInt(map["max_syncs_per_storage"], e.CATWORLD_MAX_SYNCS_PER_STORAGE, 1, 20),
+    importBatchDelayMs:  pickInt(map["import_batch_delay_ms"], e.CATWORLD_IMPORT_BATCH_DELAY_MS, 0, 5000),
   };
 
   _cache = { value, expiresAt: now + CACHE_TTL_MS };

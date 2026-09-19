@@ -7,7 +7,7 @@ import { z } from "zod";
 import { prisma } from "@/server/db";
 import { resolveActor, requireRole } from "@/server/auth/actor";
 import { handleApiError, ok } from "@/server/http";
-import { WORKER_CONFIG_DEFAULTS, invalidateWorkerConfigCache } from "@/server/worker/config";
+import { WORKER_CONFIG_DEFAULTS, invalidateWorkerConfigCache, pickInt } from "@/server/worker/config";
 import { env } from "@/server/env";
 
 const KEYS = [
@@ -29,12 +29,12 @@ async function getSettings() {
     `SELECT key, value FROM cw_system_settings WHERE key = ANY($1::text[])`,
     KEYS,
   );
-  const map = Object.fromEntries(rows.map((r) => [r.key.replace("worker.", ""), Number(r.value)]));
+  const map = Object.fromEntries(rows.map((r) => [r.key.replace("worker.", ""), r.value]));
   const e = env();
   return {
-    max_heavy_jobs:        map["max_heavy_jobs"]        ?? e.CATWORLD_MAX_HEAVY_JOBS,
-    max_syncs_per_storage: map["max_syncs_per_storage"] ?? e.CATWORLD_MAX_SYNCS_PER_STORAGE,
-    import_batch_delay_ms: map["import_batch_delay_ms"] ?? e.CATWORLD_IMPORT_BATCH_DELAY_MS,
+    max_heavy_jobs:        pickInt(map["max_heavy_jobs"], e.CATWORLD_MAX_HEAVY_JOBS, 1, 20),
+    max_syncs_per_storage: pickInt(map["max_syncs_per_storage"], e.CATWORLD_MAX_SYNCS_PER_STORAGE, 1, 20),
+    import_batch_delay_ms: pickInt(map["import_batch_delay_ms"], e.CATWORLD_IMPORT_BATCH_DELAY_MS, 0, 5000),
     // Concorrência vem só do env (requer restart)
     concurrency: e.CATWORLD_WORKER_CONCURRENCY,
     defaults: WORKER_CONFIG_DEFAULTS,
