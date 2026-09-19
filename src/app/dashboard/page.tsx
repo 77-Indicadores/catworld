@@ -2,6 +2,7 @@ import Link from "next/link";
 import { ChevronRight, Database, FolderKanban, Timer } from "lucide-react";
 import { prisma } from "@/server/db";
 import { PageHeader, Panel, StatCard } from "@/components/ui/primitives";
+import { presentLongDate } from "@/lib/present";
 export const dynamic = "force-dynamic";
 
 type JobStatsRow = {
@@ -56,7 +57,7 @@ export default async function DashboardPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        eyebrow={new Intl.DateTimeFormat("pt-BR", { dateStyle: "long" }).format(new Date())}
+        eyebrow={presentLongDate()}
         title="Visão geral"
         description="Saúde, atividade e volume da sua plataforma de dados."
         actions={<Link href="/projects" className="btn btn-primary btn-sm"><FolderKanban size={16} />Ver projetos</Link>}

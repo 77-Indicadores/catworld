@@ -15,24 +15,8 @@ const PATTERN = /toLocaleString|toLocaleDateString|toLocaleTimeString|\.toFixed\
 const ALLOWED_DIRS = ["lib/present/"];
 const ALLOWED_FILES = new Set(["lib/fmt.ts", "lib/fmt-cell.ts"]);
 
-const LEGACY = new Set([
-  "app/audit/page.tsx",
-  "app/dashboard/page.tsx",
-  "app/settings/retention/page.tsx",
-  "app/settings/sql-contract/page.tsx",
-  "app/tokens/page.tsx",
-  "app/uploads/page.tsx",
-  "components/settings/workers-section.tsx",
-  "components/uploads/queue-lane.tsx",
-  "components/uploads/source-refresh-card.tsx",
-  "components/uploads/upload-card.tsx",
-  "components/uploads/upload-filters.tsx",
-  "components/uploads/upload-funnel.tsx",
-  "components/workspace/cron-field.tsx",
-  "components/workspace/dataset-panel.tsx",
-  "components/workspace/project-workspace.tsx",
-  "components/workspace/table-panel.tsx",
-]);
+const LEGACY = new Set<string>([]); // esvaziada na fase 3: tudo passa por src/lib/present
+
 
 function files(dir: string): string[] {
   return readdirSync(dir).flatMap((n) => {

@@ -6,6 +6,8 @@ import { UploadFlow } from "./upload-flow";
 import { fmtCellStr } from "@/lib/fmt-cell";
 import { apiErrorText } from "@/lib/api-client";
 import type { WorkspaceSource as Source, WorkspaceTable as Table } from "@/lib/workspace/types";
+import { Time } from "@/components/ui/time";
+import { formatInt } from "@/lib/present";
 
 function sourceStatus(status: string | null): "healthy" | "warning" | "error" | "inactive" {
   if (status === "completed" || status === "ready") return "healthy";
@@ -139,8 +141,8 @@ export function TablePanel({ datasetId, table, onChanged, compact }: { datasetId
       <div className="flex items-start justify-between gap-3 border-b border-base-300 p-5">
         <div>
           <h2 className="font-semibold">{table.name}</h2>
-          <p className="text-xs text-base-content/45">{table.source?.mode === "live" ? "Dados consultados na origem" : `${Number(table.rowCount).toLocaleString("pt-BR")} linhas`} · {table.columns.length} colunas{table.lastDataAt ? ` · atualizado ${new Date(table.lastDataAt).toLocaleString("pt-BR")}` : ""}</p>
-          {table.source && <div className="mt-3 rounded-box border border-base-300 bg-base-200/40 p-3 text-xs"><div className="flex flex-wrap items-center gap-2"><span className="badge badge-outline gap-1">{table.source.mode === "live" ? <Cable size={12} /> : <DatabaseZap size={12} />}{sourceMode(table.source)}</span><StatusBadge status={sourceStatus(table.source.lastStatus)} label={table.source.lastStatus ?? "Pronta"} /><span className="text-base-content/60">{table.source.connection.name}</span></div><div className="mt-2 text-base-content/60">Origem: {table.source.sourceKind === "table" ? `${table.source.sourceSchema}.${table.source.sourceTable}` : "consulta personalizada"}{table.source.nextRefreshAt ? ` · próxima ${new Date(table.source.nextRefreshAt).toLocaleString("pt-BR")}` : ""}</div></div>}
+          <p className="text-xs text-base-content/45">{table.source?.mode === "live" ? "Dados consultados na origem" : `${formatInt(table.rowCount)} linhas`} · {table.columns.length} colunas{table.lastDataAt ? <> · atualizado <Time iso={table.lastDataAt} /></> : null}</p>
+          {table.source && <div className="mt-3 rounded-box border border-base-300 bg-base-200/40 p-3 text-xs"><div className="flex flex-wrap items-center gap-2"><span className="badge badge-outline gap-1">{table.source.mode === "live" ? <Cable size={12} /> : <DatabaseZap size={12} />}{sourceMode(table.source)}</span><StatusBadge status={sourceStatus(table.source.lastStatus)} label={table.source.lastStatus ?? "Pronta"} /><span className="text-base-content/60">{table.source.connection.name}</span></div><div className="mt-2 text-base-content/60">Origem: {table.source.sourceKind === "table" ? `${table.source.sourceSchema}.${table.source.sourceTable}` : "consulta personalizada"}{table.source.nextRefreshAt ? <> · próxima <Time iso={table.source.nextRefreshAt} /></> : null}</div></div>}
         </div>
         <div className="flex flex-wrap justify-end gap-2"><ExportMenu tableId={table.id} tab={tab} />{table.source?.mode === "extract" ? <button onClick={refreshSource} disabled={refreshing} className="btn btn-outline btn-sm"><RefreshCw size={14} className={refreshing ? "animate-spin" : ""} />{refreshing ? "Enfileirando..." : "Atualizar agora"}</button> : <UpdateDataDialog datasetId={datasetId} table={table} onComplete={onChanged} />}<DeleteTableDialog id={table.id} name={table.name} onDeleted={onChanged} /></div>
       </div>

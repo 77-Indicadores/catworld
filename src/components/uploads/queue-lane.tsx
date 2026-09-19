@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Archive, CircleX, Eye, Loader2, RefreshCw, Upload as UploadIcon, X, Zap } from "lucide-react";
 import { fmtBytes, fmtRelative } from "@/lib/fmt";
+import { formatInt } from "@/lib/present";
 
 export type QueueItem = {
   id: string;
@@ -199,7 +200,7 @@ export function QueueLane({
             className="flex items-center gap-1.5 text-[11px] text-base-content/35 hover:text-base-content/60"
           >
             <Archive size={11} />
-            {completedCount.toLocaleString("pt-BR")} concluídos
+            {formatInt(completedCount)} concluídos
           </a>
         </div>
       )}

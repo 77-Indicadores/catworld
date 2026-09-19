@@ -6,6 +6,7 @@ import { useApiAction, useFeedback } from "@/components/ui/feedback";
 import { apiRequest, errorMessage, warningsOf } from "@/lib/api-client";
 import { COMMAND_ACTION_LABEL, COMMAND_STATUS_LABEL, JOB_TYPE_LABEL, WORKER_STATE_LABEL } from "@/lib/labels";
 import type { Status } from "@/lib/types";
+import { Time } from "@/components/ui/time";
 
 type Runtime = { state: string; pid: number | null; restarts: number; lastExitCode: number | null; restartPending: boolean } | null;
 type Profile = {
@@ -175,7 +176,7 @@ export function WorkersSection() {
                 <li key={c.id} className="flex flex-wrap items-center gap-x-3 gap-y-1">
                   <span className="font-medium">{COMMAND_ACTION_LABEL[c.action] ?? c.action}{c.mode === "IMMEDIATE" ? " (agora)" : ""}</span>
                   <span className={OPEN.has(c.status) ? "text-warning" : c.status === "FAILED" ? "text-error" : "text-base-content/70"}>{COMMAND_STATUS_LABEL[c.status] ?? c.status}</span>
-                  <span className="text-base-content/60">{c.requestedBy} · {new Date(c.requestedAt).toLocaleString("pt-BR")}</span>
+                  <span className="text-base-content/60">{c.requestedBy} · <Time iso={c.requestedAt} /></span>
                   {c.status === "FAILED" && c.resultJson && <span className="text-error">{safeError(c.resultJson)}</span>}
                 </li>
               ))}

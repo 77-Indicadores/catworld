@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { CheckCircle2, Eye, LifeBuoy, ShieldCheck, Undo2 } from "lucide-react";
 import { PageHeader, Panel } from "@/components/ui/primitives";
+import { Time } from "@/components/ui/time";
 
 type Mode = "off" | "shadow" | "fallback" | "strict";
 
@@ -169,7 +170,7 @@ export default function SqlContractSettingsPage() {
         <div className="p-5 space-y-3">
           <h2 className="font-semibold text-sm text-base-content/70 uppercase tracking-wide">Uso do contrato</h2>
           <p className="text-xs text-base-content/55">
-            Contadores desta instância desde {stats ? new Date(stats.since).toLocaleString("pt-BR") : "—"} (zeram ao reiniciar). Guardam só o
+            Contadores desta instância desde {stats ? <Time iso={stats.since} /> : "—"} (zeram ao reiniciar). Guardam só o
             formato da consulta, sem valores.
           </p>
           {stats && Object.keys(stats.translated).length > 0 && (

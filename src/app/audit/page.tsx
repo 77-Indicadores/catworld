@@ -4,6 +4,7 @@ import { EmptyState, PageHeader, Panel, StatusBadge } from "@/components/ui/prim
 import { resolveActor } from "@/server/auth/actor";
 import { auditPageRead } from "@/server/audit-request";
 import { AUDIT_EVENT_LABELS, auditFilterSchema, queryAuditEvents } from "@/server/audit-query";
+import { Time } from "@/components/ui/time";
 
 export const dynamic = "force-dynamic";
 
@@ -143,7 +144,7 @@ export default async function AuditPage({ searchParams }: { searchParams: Promis
                   );
                   return (
                     <tr key={e.id}>
-                      <td className="whitespace-nowrap text-xs">{e.createdAt.toLocaleString("pt-BR")}</td>
+                      <td className="whitespace-nowrap text-xs"><Time iso={e.createdAt.toISOString()} /></td>
                       <td>
                         <div className="text-sm">{AUDIT_EVENT_LABELS[e.eventType] ?? e.eventType}</div>
                         <div className="font-mono text-[11px] text-base-content/60">{e.eventType}</div>

@@ -13,6 +13,8 @@ import { useApiAction, useFeedback } from "@/components/ui/feedback";
 import { apiErrorText } from "@/lib/api-client";
 import { CronPreview } from "./cron-field";
 import type { StorageServerOption, WorkspaceDataset as Dataset, WorkspaceDerived as DerivedTable, WorkspaceSource as Source, WorkspaceTable as Table } from "@/lib/workspace/types";
+import { Time } from "@/components/ui/time";
+import { presentCount } from "@/lib/present";
 
 // A group is either:
 //   - Multiple table sources that share a sourceGroupId (batch import)
@@ -76,11 +78,7 @@ function refreshText(cron: string | null) {
 }
 
 function fmtRows(n: string | null) {
-  const v = Number(n);
-  if (!n || isNaN(v)) return null;
-  if (v >= 1_000_000) return `${(v / 1e6).toFixed(1)}M`;
-  if (v >= 1_000) return `${(v / 1e3).toFixed(0)}K`;
-  return v.toLocaleString("pt-BR");
+  return presentCount(n)?.exact ?? null;
 }
 
 function SectionHeader({ label, action }: { label: string; action?: React.ReactNode }) {
@@ -158,7 +156,7 @@ function BatchGroupRow({ groupId, datasetId, sources, tables, onSelectTable, onC
             {rep.nextRefreshAt && rep.mode === "extract" && rep.refreshCron && (
               new Date(rep.nextRefreshAt) < new Date()
                 ? <span className="text-warning"> · próx. sync atrasado</span>
-                : <span> · próx. {new Date(rep.nextRefreshAt).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" })}</span>
+                : <span> · próx. <Time iso={rep.nextRefreshAt} /></span>
             )}
             {" · " + groupSummary}
           </p>
@@ -177,7 +175,7 @@ function BatchGroupRow({ groupId, datasetId, sources, tables, onSelectTable, onC
               <span className="flex-1 truncate font-mono">{t.name}</span>
               {t.source && <StatusBadge status={sourceBadge(t.source).status} label={sourceBadge(t.source).label} />}
               {t.lastDataAt && (
-                <span className="shrink-0 text-base-content/30">{new Date(t.lastDataAt).toLocaleDateString("pt-BR")}</span>
+                <span className="shrink-0 text-base-content/60"><Time iso={t.lastDataAt} /></span>
               )}
             </button>
             <button
@@ -708,7 +706,7 @@ function DerivedRow({ dt, schemaName, onSelectTable, onChanged }: {
             {dt.nextRefreshAt && dt.refreshCron && (
               new Date(dt.nextRefreshAt) < new Date()
                 ? <span className="text-warning"> · próx. sync atrasado</span>
-                : <span> · próx. {new Date(dt.nextRefreshAt).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" })}</span>
+                : <span> · próx. <Time iso={dt.nextRefreshAt} /></span>
             )}
           </p>
         </div>
@@ -849,7 +847,7 @@ export function DatasetPanel({ dataset, projectSlug, publicOrigin, storageServer
                 <Database size={13} className="shrink-0 text-primary" />
                 <span className="flex-1 truncate font-medium">{t.name}</span>
                 {t.lastDataAt && (
-                  <span className="shrink-0 text-base-content/35">{new Date(t.lastDataAt).toLocaleDateString("pt-BR")}</span>
+                  <span className="shrink-0 text-base-content/60"><Time iso={t.lastDataAt} /></span>
                 )}
               </button>
               <button onClick={() => deleteTable(t.id, t.name)} className="btn btn-ghost btn-xs text-error/50 hover:text-error" title="Excluir tabela">

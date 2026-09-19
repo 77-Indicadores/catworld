@@ -5,6 +5,7 @@ import { UploadPoller } from "@/components/uploads/upload-poller";
 import { QueueLane, type QueueItem } from "@/components/uploads/queue-lane";
 import { FailedActions } from "@/components/uploads/failed-actions";
 import { fmtBytes } from "@/lib/fmt";
+import { formatInt } from "@/lib/present";
 
 export const dynamic = "force-dynamic";
 
@@ -23,10 +24,7 @@ function extractSourceId(payloadJson: string | null): string | null {
 
 function fmtRows(n: bigint | null) {
   if (n == null) return null;
-  const v = Number(n);
-  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M linhas`;
-  if (v >= 1_000)     return `${(v / 1_000).toFixed(0)}K linhas`;
-  return `${v.toLocaleString("pt-BR")} linhas`;
+  return `${formatInt(n)} linhas`;
 }
 
 export default async function UploadsPage() {

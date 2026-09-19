@@ -2,6 +2,8 @@
 
 import { CheckCircle2, CircleX, Clock3, DatabaseZap, ExternalLink, Loader2 } from "lucide-react";
 import { fmtRelative, fmtDuration } from "@/lib/fmt";
+import { Time } from "@/components/ui/time";
+import { presentCount } from "@/lib/present";
 
 export type SourceRefreshWithSource = {
   id: string;
@@ -36,11 +38,8 @@ const STATUS_CONFIG: Record<string, { cls: string; icon: React.ElementType; labe
 
 function fmtRows(n: string | null) {
   if (!n) return null;
-  const v = Number(n);
-  if (isNaN(v)) return null;
-  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M linhas`;
-  if (v >= 1_000) return `${(v / 1_000).toFixed(0)}K linhas`;
-  return `${v.toLocaleString("pt-BR")} linhas`;
+  const c = presentCount(n);
+  return c ? `${c.exact} linhas` : null;
 }
 
 export function SourceRefreshCard({ job }: { job: SourceRefreshWithSource }) {
@@ -56,7 +55,7 @@ export function SourceRefreshCard({ job }: { job: SourceRefreshWithSource }) {
     : "—";
   const datasetHref = src ? `/projects/${src.dataset.project.slug}` : null;
   const rowsLabel = src ? fmtRows(src.lastRowCount) : null;
-  const lastRefreshedLabel = src?.lastRefreshedAt ? new Date(src.lastRefreshedAt).toLocaleString("pt-BR") : null;
+  const lastRefreshedIso = src?.lastRefreshedAt ?? null;
 
   const workerSlot = job.lockedBy
     ? job.lockedBy.replace(/^.+-(\d+)$/, "slot $1")
@@ -78,10 +77,10 @@ export function SourceRefreshCard({ job }: { job: SourceRefreshWithSource }) {
           <span>{destination}</span>
           <span>·</span>
           <span>atualização de fonte</span>
-          {lastRefreshedLabel && (
+          {lastRefreshedIso && (
             <>
               <span>·</span>
-              <span title="Última atualização bem-sucedida">✓ {lastRefreshedLabel}</span>
+              <span title="Última atualização bem-sucedida">✓ <Time iso={lastRefreshedIso} /></span>
             </>
           )}
           {rowsLabel && (

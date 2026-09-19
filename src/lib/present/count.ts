@@ -32,6 +32,11 @@ export function toBigInt(input: string | number | bigint | null | undefined): bi
   }
 }
 
+/** Inteiro em pt-BR (`1.487.197`); nulo/inválido = "0". Para contagens simples (jobs, itens) e linhas em painéis. */
+export function formatInt(input: string | number | bigint | null | undefined): string {
+  return presentCount(input)?.exact ?? "0";
+}
+
 export function presentCount(input: string | number | bigint | null | undefined, unit = "linhas"): CountPresentation | null {
   const v = toBigInt(input);
   if (v === null) return null;

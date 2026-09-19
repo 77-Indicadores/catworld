@@ -6,6 +6,7 @@ import { CheckCircle2, CircleAlert, CircleX, Clock3, Loader2, RefreshCw, X } fro
 import type { Upload, Dataset, Project } from "@prisma/client";
 import { fmtBytes, fmtRelative, fmtDuration } from "@/lib/fmt";
 import { useApiAction, useFeedback } from "@/components/ui/feedback";
+import { formatInt } from "@/lib/present";
 
 type JobSummary = { lockedBy: string | null; status: string; weight: number; attempts: number; maxAttempts: number };
 type UploadWithDataset = Upload & { dataset: (Dataset & { project: Project }) | null; jobs: JobSummary[] };
@@ -115,7 +116,7 @@ export function UploadCard({ upload, importSummary }: { upload: UploadWithDatase
           {upload.rowCount != null && (
             <>
               <span>·</span>
-              <span title="Total de linhas na tabela após o import">{Number(upload.rowCount).toLocaleString("pt-BR")} linhas</span>
+              <span title="Total de linhas na tabela após o import">{formatInt(upload.rowCount)} linhas</span>
             </>
           )}
           {(() => {
@@ -128,10 +129,10 @@ export function UploadCard({ upload, importSummary }: { upload: UploadWithDatase
             return (
               <>
                 {inserted > 0 && (
-                  <><span>·</span><span title="Linhas novas inseridas nesta operação">+{inserted.toLocaleString("pt-BR")} novas</span></>
+                  <><span>·</span><span title="Linhas novas inseridas nesta operação">+{formatInt(inserted)} novas</span></>
                 )}
                 {removed > 0 && (
-                  <><span>·</span><span title="Linhas removidas nesta operação">−{removed.toLocaleString("pt-BR")} removidas</span></>
+                  <><span>·</span><span title="Linhas removidas nesta operação">−{formatInt(removed)} removidas</span></>
                 )}
                 {inserted === 0 && removed === 0 && upload.mode === "replace" && (
                   <><span>·</span><span className="text-base-content/40" title="Dados idênticos ao import anterior — nenhuma linha alterada">sem alterações</span></>

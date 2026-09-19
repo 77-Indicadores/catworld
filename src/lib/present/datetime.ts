@@ -74,6 +74,11 @@ export function presentDateTime(input: string | Date | number | null | undefined
   };
 }
 
+/** Data por extenso ("19 de setembro de 2026"), para títulos; usa o fuso do ambiente onde renderiza. */
+export function presentLongDate(input: Date = new Date(), timeZone?: string): string {
+  return new Intl.DateTimeFormat("pt-BR", { dateStyle: "long", ...(timeZone ? { timeZone } : {}) }).format(input);
+}
+
 /** Horário de um cron: sempre UTC, dito explicitamente (o cron do sistema roda em UTC). */
 export function presentUtc(input: string | Date | null | undefined): string | null {
   if (input === null || input === undefined || input === "") return null;

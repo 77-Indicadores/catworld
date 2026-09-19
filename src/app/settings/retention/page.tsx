@@ -4,6 +4,8 @@ import { CheckCircle2, Trash2, RefreshCw, Clock, AlertCircle } from "lucide-reac
 import { PageHeader, Panel } from "@/components/ui/primitives";
 import { useFeedback } from "@/components/ui/feedback";
 import { apiErrorText, apiRequest, errorMessage } from "@/lib/api-client";
+import { Time } from "@/components/ui/time";
+import { fmtDuration } from "@/lib/fmt";
 
 type Settings = {
   jobs_days: number;
@@ -74,16 +76,6 @@ function NumberField({
   );
 }
 
-function fmtDate(iso: string) {
-  return new Date(iso).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" });
-}
-
-function fmtDuration(ms: number | null) {
-  if (!ms) return "—";
-  if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
-}
-
 function RunRow({ run }: { run: CleanupRun }) {
   const failed = !!run.error;
   const running = !run.finished_at && !run.error;
@@ -92,7 +84,7 @@ function RunRow({ run }: { run: CleanupRun }) {
   return (
     <tr className="text-xs">
       <td className="py-2 pr-4 whitespace-nowrap text-base-content/70">
-        {fmtDate(run.started_at)}
+        <Time iso={run.started_at} />
       </td>
       <td className="py-2 pr-4">
         {running ? (
@@ -105,7 +97,7 @@ function RunRow({ run }: { run: CleanupRun }) {
           <span className="badge badge-sm badge-success badge-soft">ok</span>
         )}
       </td>
-      <td className="py-2 pr-4 text-base-content/60">{fmtDuration(run.duration_ms)}</td>
+      <td className="py-2 pr-4 text-base-content/60">{run.duration_ms ? fmtDuration(run.duration_ms) : "—"}</td>
       <td className="py-2 pr-4 tabular-nums">
         {failed ? (
           <span className="text-error text-xs truncate max-w-[200px] block" title={run.error ?? ""}>

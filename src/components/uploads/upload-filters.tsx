@@ -3,6 +3,7 @@
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { useCallback, useRef, useEffect } from "react";
 import { Clock3, Loader2, CheckCircle2, CircleX, ChevronDown } from "lucide-react";
+import { formatInt } from "@/lib/present";
 
 interface Project { id: string; name: string }
 
@@ -122,7 +123,7 @@ export function UploadFilters({ projects, selectedStatuses, selectedProjectIds, 
             {g.icon}
             {g.label}
             <span className="badge badge-sm font-mono tabular-nums">
-              {g.count.toLocaleString("pt-BR")}
+              {formatInt(g.count)}
             </span>
           </button>
         );

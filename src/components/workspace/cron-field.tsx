@@ -1,5 +1,6 @@
 "use client";
 import { Cron } from "croner";
+import { presentUtc } from "@/lib/present";
 
 const PRESETS: { label: string; cron: string }[] = [
   { label: "A cada hora", cron: "0 * * * *" },
@@ -17,7 +18,7 @@ export function isValidCron(expr: string): boolean {
   }
 }
 
-const fmt = (d: Date) => d.toLocaleString("pt-BR", { timeZone: "UTC", dateStyle: "short", timeStyle: "short" }) + " UTC";
+const fmt = (d: Date) => presentUtc(d) ?? "—";
 
 /**
  * Próximas execuções de um cron (sempre em UTC) e, se `onPick` vier, atalhos comuns. Expressão inválida é avisada

@@ -10,6 +10,8 @@ import { QueryPanel } from "./query-panel";
 import { DatasetPanel } from "./dataset-panel";
 import { apiErrorText } from "@/lib/api-client";
 import type { StorageServerOption, WorkspaceColumn as Column, WorkspaceDataset as Dataset, WorkspaceDerived as DerivedTable, WorkspaceProject as Project, WorkspaceSource as TableSource, WorkspaceTable as Table } from "@/lib/workspace/types";
+import { Time } from "@/components/ui/time";
+import { formatInt } from "@/lib/present";
 
 
 type Tab =
@@ -58,8 +60,7 @@ function MetadataPanel({ table, dataset, onChanged }: { table: Table; dataset: D
     setNotice("Atualização enfileirada."); onChanged();
   }
 
-  const rows = Number(table.rowCount);
-  const fmtRows = rows > 1_000_000 ? `${(rows / 1e6).toFixed(1)}M` : rows > 1_000 ? `${(rows / 1e3).toFixed(1)}K` : rows.toLocaleString("pt-BR");
+  const fmtRows = formatInt(table.rowCount);
 
   return (
     <div className="flex h-full flex-col overflow-y-auto text-sm">
@@ -87,7 +88,7 @@ function MetadataPanel({ table, dataset, onChanged }: { table: Table; dataset: D
         {table.lastDataAt && (
           <div className="flex justify-between gap-2">
             <span className="text-base-content/50">Atualizado</span>
-            <span className="font-medium text-right">{new Date(table.lastDataAt).toLocaleDateString("pt-BR")}</span>
+            <span className="font-medium text-right"><Time iso={table.lastDataAt} relative /></span>
           </div>
         )}
         {table.source && (

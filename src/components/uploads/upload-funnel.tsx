@@ -1,4 +1,5 @@
 import { Clock3, Loader2, CheckCircle2, CircleX } from "lucide-react";
+import { formatInt } from "@/lib/present";
 
 const WAITING   = new Set(["PENDING_UPLOAD", "QUEUED_PREVIEW", "AWAITING_CONFIRMATION"]);
 const ACTIVE    = new Set(["PREVIEWING", "QUEUED_IMPORT", "IMPORTING", "RETRYING"]);
@@ -27,7 +28,7 @@ function Stage({ icon, label, count, color, width, isLast }: StageProps) {
           {icon}
           <span className="text-sm font-medium">{label}</span>
         </div>
-        <span className="text-xl font-bold">{count.toLocaleString("pt-BR")}</span>
+        <span className="text-xl font-bold">{formatInt(count)}</span>
       </div>
       {!isLast && (
         <div className="hidden text-base-content/30 sm:block">▶</div>
