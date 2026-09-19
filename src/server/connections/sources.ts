@@ -9,6 +9,16 @@ import { ApiError } from "@/server/http";
 import { queryColumns, quotedPgTable, streamPostgresRows, tableColumns, type SourceColumn } from "./postgres";
 import { queryColumnsMssql, quotedMssqlTable, streamMssqlRows, tableColumnsMssql } from "./mssql";
 
+/** Cron invalido virava "sem agendamento" em silêncio (a fonte nunca atualizava); agora e 400. Vazio/null = sem agendamento. */
+export function assertValidCron(expr: string | null | undefined, field = "refreshCron"): void {
+  if (!expr?.trim()) return;
+  try {
+    new Cron(expr, { timezone: "UTC" });
+  } catch {
+    throw new ApiError(400, "INVALID_CRON", `Expressao cron invalida em ${field}: "${expr}"`);
+  }
+}
+
 export function nextRefreshFromCron(cronExpr: string | null | undefined, from = new Date()): Date | null {
   if (!cronExpr) return null;
   try {

@@ -4,7 +4,7 @@ import { prisma } from "@/server/db";
 import { resolveActor } from "@/server/auth/actor";
 import { canAccess } from "@/server/auth/permissions";
 import { ApiError, handleApiError, ok } from "@/server/http";
-import { nextRefreshFromCron } from "@/server/connections/sources";
+import { assertValidCron, nextRefreshFromCron } from "@/server/connections/sources";
 import { deleteDatasetSource } from "@/server/data/catalog";
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -54,6 +54,8 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     const { source } = await authorise(request, id);
     const input = patchSchema.parse(await request.json());
 
+    assertValidCron(input.refreshCron, "refreshCron");
+    assertValidCron(input.reconciliationCron, "reconciliationCron");
     const effectiveCron = input.mode === "live" ? null : input.refreshCron;
     const nextAt = effectiveCron !== undefined
       ? (effectiveCron ? nextRefreshFromCron(effectiveCron) : null)

@@ -2,7 +2,7 @@ import type { NextRequest } from "next/server";
 import { validateReadOnlySql } from "@/server/security/sql-safety";
 import { prisma } from "@/server/db";
 import { sqlIdentifier } from "@/server/security/naming";
-import { nextRefreshFromCron } from "@/server/connections/sources";
+import { assertValidCron, nextRefreshFromCron } from "@/server/connections/sources";
 import { queueDerivedRefresh } from "@/server/connections/derived";
 import { resolveActor } from "@/server/auth/actor";
 import { assertDatasetAccess } from "@/server/auth/permissions";
@@ -55,6 +55,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     const owner = await prisma.dataset.findUnique({ where: { id: datasetId }, select: { schemaName: true } });
     await assertSqlSchemasAllowed(actor, body.querySql, owner?.schemaName ?? "");
 
+    assertValidCron(body.refreshCron, "refreshCron");
     const sqlName = body.sqlName?.trim()
       ? sqlIdentifier(body.sqlName.trim())
       : sqlIdentifier(body.name.trim());

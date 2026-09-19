@@ -1,7 +1,7 @@
 import type { NextRequest } from "next/server";
 import { validateReadOnlySql } from "@/server/security/sql-safety";
 import { prisma } from "@/server/db";
-import { nextRefreshFromCron } from "@/server/connections/sources";
+import { assertValidCron, nextRefreshFromCron } from "@/server/connections/sources";
 import { resolveActor } from "@/server/auth/actor";
 import { assertDatasetAccess } from "@/server/auth/permissions";
 import { ApiError, handleApiError, ok } from "@/server/http";
@@ -52,6 +52,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       await assertSqlSchemasAllowed(actor, body.querySql, owner?.schemaName ?? "");
     }
 
+    if ("refreshCron" in body) assertValidCron(body.refreshCron, "refreshCron");
     const refreshCron = "refreshCron" in body ? body.refreshCron : dt.refreshCron;
     const nextRefreshAt = nextRefreshFromCron(refreshCron);
 

@@ -4,7 +4,7 @@ import { prisma } from "@/server/db";
 import { resolveActor } from "@/server/auth/actor";
 import { assertCanUseConnection, assertDatasetAccess } from "@/server/auth/permissions";
 import { ApiError, handleApiError, ok } from "@/server/http";
-import { createDatasetSource, createDatasetSources } from "@/server/connections/sources";
+import { assertValidCron, createDatasetSource, createDatasetSources } from "@/server/connections/sources";
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -48,6 +48,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       sourceGroupId: z.string().uuid().optional(),
     }).parse(await request.json());
     await assertCanUseConnection(actor, input.connectionId, ds);
+    assertValidCron(input.refreshCron, "refreshCron");
+    assertValidCron(input.reconciliationCron, "reconciliationCron");
     if (input.sourceKind === "table" && input.sourceTables?.length) {
       return ok(await createDatasetSources({
         datasetId,
