@@ -4,6 +4,7 @@ import { useState, useTransition } from "react";
 import { CheckCircle2, CircleX, Clock3, Database, Pencil, Plus, RefreshCw, Star, Trash2, Wifi } from "lucide-react";
 import { useApiAction, useFeedback } from "@/components/ui/feedback";
 import { apiErrorText } from "@/lib/api-client";
+import { maskConnectionString } from "@/lib/mask-url";
 
 type Server = {
   id: string;
@@ -28,12 +29,7 @@ function statusBadge(s: Server) {
 }
 
 function maskedUrl(url: string | null) {
-  if (!url) return "—";
-  try {
-    return url.replace(/password=[^;]+/i, "password=••••••••");
-  } catch {
-    return url;
-  }
+  return maskConnectionString(url);
 }
 
 export function StorageServerManager({ initialServers }: { initialServers: Server[] }) {

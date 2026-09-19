@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import { CheckCircle2, RefreshCw, Zap } from "lucide-react";
 import { PageHeader, Panel } from "@/components/ui/primitives";
-import { apiErrorText } from "@/lib/api-client";
+import { apiErrorText, apiRequest, errorMessage } from "@/lib/api-client";
 
 type Settings = {
   max_heavy_jobs: number;
@@ -83,12 +83,23 @@ function SliderField({
           <div className="text-xs text-base-content/55 mt-0.5">{description}</div>
         </div>
         <div className="flex items-center gap-1.5 shrink-0 ml-6">
-          <span className="font-mono text-sm font-semibold w-10 text-right">{value}</span>
-          <span className="text-xs text-base-content/50">{unit}</span>
+          <input
+            type="number"
+            aria-label={`${label} (${unit})`}
+            className="input input-bordered input-xs w-20 text-right font-mono font-semibold"
+            min={min}
+            max={max}
+            step={step}
+            value={value}
+            onChange={(e) => { const n = Number(e.target.value); if (Number.isFinite(n)) onChange(Math.min(max, Math.max(min, Math.round(n)))); }}
+          />
+          <span className="text-xs text-base-content/60">{unit}</span>
         </div>
       </div>
       <input
         type="range"
+        aria-label={label}
+        aria-valuetext={`${value} ${unit}`}
         className="range range-primary range-sm w-full"
         min={min}
         max={max}
@@ -112,9 +123,9 @@ export default function WorkerPage() {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    fetch("/api/v1/settings/worker")
-      .then((r) => r.json())
-      .then((b) => setSettings(b.data));
+    apiRequest<Settings>("/api/v1/settings/worker")
+      .then((r) => setSettings(r.data))
+      .catch((e) => setError(errorMessage(e)));
   }, []);
 
   function set<K extends keyof Settings>(k: K, v: Settings[K]) {
@@ -149,6 +160,15 @@ export default function WorkerPage() {
     } else {
       setSaved(true);
     }
+  }
+
+  if (!settings && error) {
+    return (
+      <div className="space-y-6">
+        <PageHeader eyebrow="Configurações" title="Performance do Worker" />
+        <div role="alert" className="alert alert-error alert-soft">{error}</div>
+      </div>
+    );
   }
 
   if (!settings) {
@@ -221,9 +241,9 @@ export default function WorkerPage() {
               description="Imports e syncs de fonte (peso 2). Inclui uploads e SOURCE_REFRESH."
               value={settings.max_heavy_jobs}
               onChange={(v) => set("max_heavy_jobs", v)}
-              min={1} max={8}
+              min={1} max={20}
               unit="jobs"
-              marks={[1, 2, 4, 6, 8]}
+              marks={[1, 5, 10, 15, 20]}
             />
             <div className="divider my-0" />
             <SliderField
@@ -231,9 +251,9 @@ export default function WorkerPage() {
               description="Máximo de SOURCE_REFRESH simultâneos por servidor de armazenamento."
               value={settings.max_syncs_per_storage}
               onChange={(v) => set("max_syncs_per_storage", v)}
-              min={1} max={8}
+              min={1} max={20}
               unit="syncs"
-              marks={[1, 2, 4, 6, 8]}
+              marks={[1, 5, 10, 15, 20]}
             />
             <div className="divider my-0" />
             <SliderField
@@ -241,9 +261,9 @@ export default function WorkerPage() {
               description="Intervalo entre cada lote de 50.000 linhas. 0 ms = velocidade máxima. Aumentar reduz consumo de DTU/CPU no banco."
               value={settings.import_batch_delay_ms}
               onChange={(v) => set("import_batch_delay_ms", v)}
-              min={0} max={1000} step={50}
+              min={0} max={5000} step={50}
               unit="ms"
-              marks={[0, 250, 500, 750, 1000]}
+              marks={[0, 1000, 2500, 5000]}
             />
           </div>
         </Panel>

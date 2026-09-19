@@ -3,7 +3,7 @@ import { useEffect, useState, useCallback } from "react";
 import { CheckCircle2, Trash2, RefreshCw, Clock, AlertCircle } from "lucide-react";
 import { PageHeader, Panel } from "@/components/ui/primitives";
 import { useFeedback } from "@/components/ui/feedback";
-import { apiErrorText } from "@/lib/api-client";
+import { apiErrorText, apiRequest, errorMessage } from "@/lib/api-client";
 
 type Settings = {
   jobs_days: number;
@@ -45,6 +45,7 @@ function NumberField({
   max?: number;
   unit?: string;
 }) {
+  const valid = Number.isInteger(value) && value >= min && value <= max;
   return (
     <div className="flex items-start justify-between gap-6">
       <div className="flex-1">
@@ -52,15 +53,22 @@ function NumberField({
         <div className="text-xs text-base-content/55 mt-0.5">{description}</div>
       </div>
       <div className="flex items-center gap-2 shrink-0">
-        <input
-          type="number"
-          className="input input-sm w-24 text-right"
-          min={min}
-          max={max}
-          value={value}
-          onChange={(e) => onChange(name, Number(e.target.value))}
-        />
-        <span className="text-sm text-base-content/60 w-10">{unit}</span>
+        <div className="text-right">
+          <input
+            type="number"
+            aria-label={`${label} (${unit})`}
+            aria-invalid={!valid}
+            aria-describedby={valid ? undefined : `${name}-hint`}
+            className={`input input-sm w-24 text-right ${valid ? "" : "input-error"}`}
+            min={min}
+            max={max}
+            required
+            value={Number.isFinite(value) ? value : ""}
+            onChange={(e) => onChange(name, e.target.value === "" ? NaN : Number(e.target.value))}
+          />
+          {!valid && <p id={`${name}-hint`} className="mt-1 text-xs text-error">Informe um número inteiro entre {min} e {max}.</p>}
+        </div>
+        <span className="w-14 pt-1.5 text-sm text-base-content/60">{unit}</span>
       </div>
     </div>
   );
@@ -138,9 +146,9 @@ export default function RetentionPage() {
   }, []);
 
   useEffect(() => {
-    fetch("/api/v1/settings/retention")
-      .then((r) => r.json())
-      .then((b) => setSettings(b.data));
+    apiRequest<Settings>("/api/v1/settings/retention")
+      .then((r) => setSettings(r.data))
+      .catch((e) => setError(errorMessage(e)));
     loadHistory();
   }, [loadHistory]);
 
@@ -152,6 +160,9 @@ export default function RetentionPage() {
   async function save(e: React.FormEvent) {
     e.preventDefault();
     if (!settings) return;
+    const bad = (["jobs_days", "audit_events_days", "uploads_days"] as const).some((k) => !Number.isInteger(settings[k]) || settings[k] < 1 || settings[k] > 3650)
+      || !Number.isInteger(settings.dataset_versions_keep) || settings.dataset_versions_keep < 1 || settings.dataset_versions_keep > 1000;
+    if (bad) { setError("Revise os campos destacados: use números inteiros dentro da faixa indicada."); return; }
     setSaving(true); setError(""); setSaved(false);
     const r = await fetch("/api/v1/settings/retention", {
       method: "PATCH",
@@ -190,7 +201,7 @@ export default function RetentionPage() {
     return (
       <div className="space-y-6">
         <PageHeader eyebrow="Configurações" title="Retenção de metadados" description="Controla por quanto tempo dados internos são mantidos no banco." />
-        <div className="rounded-box border border-base-300 bg-base-100 p-10 text-center"><span className="loading loading-spinner" /></div>
+        {error ? <div role="alert" className="alert alert-error alert-soft">{error}</div> : <div className="rounded-box border border-base-300 bg-base-100 p-10 text-center"><span className="loading loading-spinner" /></div>}
       </div>
     );
   }
@@ -230,7 +241,7 @@ export default function RetentionPage() {
             <div className="divider my-0" />
             <NumberField
               label="Eventos de auditoria (cw_audit_events)"
-              description="Remove todos os eventos de auditoria mais antigos que N dias. ~2.500 registros/dia."
+              description="Remove os eventos de auditoria mais antigos que N dias (padrão: 30). Depois de apagados não podem ser recuperados: aumente o prazo se precisar de histórico para conformidade."
               name="audit_events_days"
               value={settings.audit_events_days}
               onChange={set}
