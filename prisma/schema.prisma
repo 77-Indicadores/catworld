@@ -236,6 +236,8 @@ model Upload {
   fileHash         String?       @map("file_hash") @db.VarChar(32)
   deltaJson        String?       @map("delta_json") @db.Text
   errorMessage     String?       @map("error_message") @db.Text
+  /// Quem enviou (e-mail do usuario ou token:<nome>); nulo em uploads anteriores a este campo.
+  createdBy        String?       @map("created_by") @db.VarChar(255)
   createdAt        DateTime      @default(now()) @map("created_at") @db.Timestamp(3)
   updatedAt        DateTime      @updatedAt @map("updated_at") @db.Timestamp(3)
   dataset          Dataset?      @relation(fields: [datasetId], references: [id], onDelete: NoAction, onUpdate: NoAction)
@@ -359,8 +361,11 @@ model JobMetric {
   durationMs    Int?     @map("duration_ms")
   errorMessage  String?  @map("error_message") @db.Text
   workerLabel   String?  @map("worker_label") @db.VarChar(120)
+  /// Tabela que a execucao alimentou (historico por tabela); nulo antes deste campo.
+  tableId       String?  @map("table_id") @db.Uuid
   createdAt     DateTime @default(now()) @map("created_at") @db.Timestamp(3)
 
+  @@index([tableId, createdAt])
   @@index([createdAt])
   @@index([jobType, createdAt])
   @@map("cw_job_metrics")

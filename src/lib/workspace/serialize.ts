@@ -39,11 +39,11 @@ export async function loadLastUploads(tableIds: string[]): Promise<Map<string, W
   });
   const ids = versions.map((v) => v.uploadId!).filter(Boolean);
   if (ids.length === 0) return out;
-  const uploads = await prisma.upload.findMany({ where: { id: { in: ids } }, select: { id: true, originalFilename: true, mode: true, sizeBytes: true, createdAt: true } });
+  const uploads = await prisma.upload.findMany({ where: { id: { in: ids } }, select: { id: true, originalFilename: true, mode: true, sizeBytes: true, createdAt: true, createdBy: true } });
   const byId = new Map(uploads.map((u) => [u.id, u]));
   for (const v of versions) {
     const u = byId.get(v.uploadId!);
-    if (u) out.set(v.tableId, { id: u.id, filename: u.originalFilename, mode: u.mode, sizeBytes: String(u.sizeBytes), createdAt: u.createdAt.toISOString(), createdBy: null });
+    if (u) out.set(v.tableId, { id: u.id, filename: u.originalFilename, mode: u.mode, sizeBytes: String(u.sizeBytes), createdAt: u.createdAt.toISOString(), createdBy: u.createdBy });
   }
   return out;
 }

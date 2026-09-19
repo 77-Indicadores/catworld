@@ -10,6 +10,7 @@ import { audit } from "@/server/audit";
 import { ApiError, handleApiError, ok } from "@/server/http";
 import { commandCreateSchema, commandsConflict, isOpen, needsProfile, type CommandAction, type CommandStatus } from "@/server/worker/commands";
 import { getSupervisorStatus } from "@/server/worker/status";
+import { actorLabel } from "@/server/auth/actor-label";
 
 export async function GET(r: NextRequest) {
   try {
@@ -43,8 +44,7 @@ export async function POST(r: NextRequest) {
     const clash = open.find((c) => commandsConflict({ action: c.action as CommandAction, profileId: c.profileId }, { action: input.action, profileId: input.profileId ?? null }));
     if (clash) throw new ApiError(409, "COMMAND_IN_PROGRESS", "Já existe um comando em andamento para este worker. Espere terminar ou cancele o pendente.");
 
-    const user = actor.type === "user" ? await prisma.user.findUnique({ where: { id: actor.id }, select: { email: true } }) : null;
-    const requestedBy = user?.email ?? `${actor.type}:${actor.id}`;
+    const requestedBy = await actorLabel(actor);
     const created = await prisma.systemCommand.create({
       data: {
         action: input.action,

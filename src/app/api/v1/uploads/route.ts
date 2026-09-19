@@ -6,6 +6,7 @@ import { resolveActor } from "@/server/auth/actor";
 import { assertDatasetAccess, hasAnyWriteGrant } from "@/server/auth/permissions";
 import { prisma } from "@/server/db";
 import { getUploadLimits } from "@/server/worker/config";
+import { actorLabel } from "@/server/auth/actor-label";
 import { ApiError, handleApiError, ok } from "@/server/http";
 import { uploadVisibilityWhere } from "@/server/uploads/access";
 import { uploadTarget } from "@/server/storage";
@@ -94,6 +95,7 @@ export async function POST(r: NextRequest) {
         mappingJson: input.mappingJson ?? null,
         typeOverridesJson: input.typeOverrides ? JSON.stringify(input.typeOverrides) : null,
         rowCount: input.rowCount != null ? BigInt(input.rowCount) : null,
+        createdBy: await actorLabel(actor),
       },
     });
 

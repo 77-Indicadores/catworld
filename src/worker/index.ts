@@ -15,7 +15,7 @@ import { enqueueDueSourceRefreshes, enqueueDueReconciliations, refreshDatasetSou
 import { enqueueDueDerivedRefreshes, refreshDerivedTable } from "@/server/connections/derived";
 import { pickInt } from "@/server/worker/config";
 import { auditJob } from "@/server/audit-request";
-import { startHeartbeat, currentRssMb, recordJobMetric, writeWorkerLiveness, readWorkerLiveness, clearWorkerLiveness } from "./metrics";
+import { startHeartbeat, currentRssMb, recordJobMetric, resolveJobTableId, writeWorkerLiveness, readWorkerLiveness, clearWorkerLiveness } from "./metrics";
 import { setDuckdbMemoryLimit } from "@/server/worker/runtime-limits";
 import { WorkerState, identityConflict, isPidAlive, listProfileNames, loadProfile, parseProfileArg, type WorkerProfileRow } from "./runtime";
 
@@ -614,14 +614,14 @@ async function loop(concurrencyId: number) {
       await recordJobMetric({
         jobId: job.id, jobType: job.type, status: "COMPLETED", weight: job.weight,
         fileSizeBytes, rssBeforeMb: rssBefore, rssAfterMb: currentRssMb(),
-        durationMs: Date.now() - t0, workerLabel,
+        durationMs: Date.now() - t0, workerLabel, tableId: await resolveJobTableId(job),
       });
       await auditJob({ jobId: job.id, jobType: job.type, success: true, workerLabel, durationMs: Date.now() - t0, attempts: job.attempts, ...jobResource(job) });
     } catch (e) {
       await recordJobMetric({
         jobId: job.id, jobType: job.type, status: "FAILED", weight: job.weight,
         fileSizeBytes, rssBeforeMb: rssBefore, rssAfterMb: currentRssMb(),
-        durationMs: Date.now() - t0, workerLabel,
+        durationMs: Date.now() - t0, workerLabel, tableId: await resolveJobTableId(job),
         errorMessage: e instanceof Error ? e.message : String(e),
       });
       await auditJob({

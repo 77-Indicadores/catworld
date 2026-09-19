@@ -46,6 +46,8 @@ export type JobMetricInput = {
   durationMs: number;
   errorMessage?: string | null;
   workerLabel: string;
+  /** Tabela que o job alimentou (historico por tabela). */
+  tableId?: string | null;
 };
 
 /**
@@ -89,6 +91,31 @@ export async function clearWorkerLiveness(workerId: string, host: string, pid: n
   }
 }
 
+/**
+ * Tabela que o job alimentou: upload -> tabela do upload; SOURCE_REFRESH -> tabela de destino da fonte;
+ * DERIVED_REFRESH -> tabela de destino da derivada. Melhor esforco: nunca lanca (historico nao pode derrubar o job).
+ */
+export async function resolveJobTableId(job: { upload_id: string | null; payload_json: string | null }): Promise<string | null> {
+  try {
+    if (job.upload_id) {
+      const u = await prisma.upload.findUnique({ where: { id: job.upload_id }, select: { tableId: true } });
+      return u?.tableId ?? null;
+    }
+    const p = job.payload_json ? (JSON.parse(job.payload_json) as { datasetSourceId?: string; derivedTableId?: string }) : {};
+    if (p.datasetSourceId) {
+      const s = await prisma.datasetSource.findUnique({ where: { id: p.datasetSourceId }, select: { targetTableId: true } });
+      return s?.targetTableId ?? null;
+    }
+    if (p.derivedTableId) {
+      const d = await prisma.derivedTable.findUnique({ where: { id: p.derivedTableId }, select: { targetTableId: true } });
+      return d?.targetTableId ?? null;
+    }
+  } catch {
+    // sem vinculo: a execucao fica sem tabela (aparece so no historico geral)
+  }
+  return null;
+}
+
 /** Nunca lança — auditoria não pode derrubar o processamento do job. */
 export async function recordJobMetric(m: JobMetricInput): Promise<void> {
   try {
@@ -104,6 +131,7 @@ export async function recordJobMetric(m: JobMetricInput): Promise<void> {
         durationMs: m.durationMs,
         errorMessage: m.errorMessage ?? null,
         workerLabel: m.workerLabel,
+        tableId: m.tableId ?? null,
       },
     });
   } catch (e) {

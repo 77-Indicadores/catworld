@@ -12,6 +12,7 @@ import type { StorageServerOption, WorkspaceDataset as Dataset, WorkspaceProject
 import { FreshnessBlock } from "./table-detail/freshness-block";
 import { OriginBlock } from "./table-detail/origin-block";
 import { UsageBlock } from "./table-detail/usage-block";
+import { HistoryBlock } from "./table-detail/history-block";
 
 
 type Tab =
@@ -65,6 +66,7 @@ function MetadataPanel({ table, dataset, projectSlug, publicOrigin, onChanged }:
       <FreshnessBlock table={table} derived={derived} />
       <OriginBlock table={table} datasetName={dataset.name} derived={derived} />
       <UsageBlock table={table} dataset={dataset} projectSlug={projectSlug} publicOrigin={publicOrigin} />
+      <HistoryBlock tableId={table.id} />
 
       <div className="flex justify-between gap-3 border-b border-base-300 px-4 py-3 text-xs">
         <span className="text-base-content/70">Colunas</span>

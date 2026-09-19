@@ -60,8 +60,9 @@ async function main() {
     }
   }
   // Perdeu a conexão do lock = perdeu a liderança: sai e o Docker reinicia (evita dois supervisores).
-  lock.on("error", () => { console.error("[supervisor] conexão do lock caiu; saindo"); process.exit(1); });
-  lock.on("end", () => { console.error("[supervisor] conexão do lock encerrou; saindo"); process.exit(1); });
+  let finishingRef = () => false;
+  lock.on("error", () => { if (finishingRef()) return; console.error("[supervisor] conexão do lock caiu; saindo"); process.exit(1); });
+  lock.on("end", () => { if (finishingRef()) return; console.error("[supervisor] conexão do lock encerrou; saindo"); process.exit(1); });
 
   const db = createCoreDb(instanceId);
   const orphaned = await db.failOrphanedCommands();
@@ -76,12 +77,16 @@ async function main() {
   });
 
   let stopping = false;
+  let finishing = false; // encerramento deliberado: a queda da conexão do lock não é erro
   async function finish(code: number) {
+    finishing = true;
     await db.clearLiveness().catch(() => undefined);
     await prisma.$disconnect().catch(() => undefined);
     await lock?.end().catch(() => undefined);
     process.exit(code);
   }
+
+  finishingRef = () => finishing;
 
   const shutdown = async (signal: string) => {
     if (stopping) return;

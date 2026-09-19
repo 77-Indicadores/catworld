@@ -43,6 +43,7 @@ function upload(overrides: Partial<Parameters<typeof storeUploadBody>[0]> = {}) 
     updatedCount: null,
     deltaJson: null,
     errorMessage: null,
+    createdBy: null,
     createdAt: new Date("2026-07-13T00:00:00Z"),
     updatedAt: new Date("2026-07-13T00:00:00Z"),
     ...overrides,
