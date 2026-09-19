@@ -3,6 +3,8 @@ import { useRef, useState } from "react";
 import { Pencil, Plus, Search, Table2, Trash2 } from "lucide-react";
 import { CronPreview } from "../cron-field";
 import type { WorkspaceSource as Source, WorkspaceTable as Table } from "@/lib/workspace/types";
+import { useApiAction } from "@/components/ui/feedback";
+import { apiRequest, errorMessage } from "@/lib/api-client";
 
 // ── Dialog to edit mode/cron + manage tables for a batch group ───────────
 export function GroupEditDialog({ groupId, datasetId, connectionId, connectionName, sourceSchema, mode: initMode, initRefreshCron, sources, tables, onComplete }: {
@@ -10,10 +12,12 @@ export function GroupEditDialog({ groupId, datasetId, connectionId, connectionNa
   mode: string; initRefreshCron: string;
   sources: Source[]; tables: Table[]; onComplete: () => void;
 }) {
+  const runAction = useApiAction();
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [mode, setMode] = useState(initMode);
   const [refreshCron, setRefreshCron] = useState(initRefreshCron);
   const [saving, setSaving] = useState(false);
+  const [pickerError, setPickerError] = useState("");
 
   const [showPicker, setShowPicker] = useState(false);
   const [loadingPicker, setLoadingPicker] = useState(false);
@@ -30,13 +34,17 @@ export function GroupEditDialog({ groupId, datasetId, connectionId, connectionNa
   function closeDialog() { dialogRef.current?.close(); }
 
   async function loadPicker() {
-    setShowPicker(true); setLoadingPicker(true);
+    setShowPicker(true); setLoadingPicker(true); setPickerError("");
     const qs = sourceSchema ? "?schema=" + encodeURIComponent(sourceSchema) : "";
-    const res = await fetch("/api/v1/connections/" + connectionId + "/tables" + qs);
-    const data = await res.json();
-    const existing = new Set(sources.map(s => s.sourceTable).filter(Boolean));
-    setAvailableTables((data.tables ?? []).filter((t: string) => !existing.has(t)));
-    setLoadingPicker(false);
+    try {
+      const { data } = await apiRequest<{ tables?: string[] }>("/api/v1/connections/" + connectionId + "/tables" + qs);
+      const existing = new Set(sources.map(s => s.sourceTable).filter(Boolean));
+      setAvailableTables((data.tables ?? []).filter((t) => !existing.has(t)));
+    } catch (err) {
+      setPickerError(errorMessage(err));
+    } finally {
+      setLoadingPicker(false);
+    }
   }
 
   function toggleNew(name: string) {
@@ -46,7 +54,7 @@ export function GroupEditDialog({ groupId, datasetId, connectionId, connectionNa
   async function addTables() {
     if (!selectedNew.length) return;
     setAdding(true);
-    await fetch("/api/v1/datasets/" + datasetId + "/sources", {
+    const done = await runAction("/api/v1/datasets/" + datasetId + "/sources", {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({
         connectionId, mode, sourceKind: "table", sourceSchema,
@@ -55,25 +63,28 @@ export function GroupEditDialog({ groupId, datasetId, connectionId, connectionNa
         sourceGroupId: groupId,
       }),
     });
-    setAdding(false); setShowPicker(false); setSelectedNew([]);
+    setAdding(false);
+    if (!done) return;
+    setShowPicker(false); setSelectedNew([]);
     closeDialog(); onComplete();
   }
 
   async function removeTable(sourceId: string) {
-    await fetch("/api/v1/dataset-sources/" + sourceId, { method: "DELETE" });
-    onComplete();
+    if (await runAction("/api/v1/dataset-sources/" + sourceId, { method: "DELETE" })) onComplete();
   }
 
   async function save() {
     setSaving(true);
-    await fetch("/api/v1/source-groups/" + groupId, {
+    const done = await runAction("/api/v1/source-groups/" + groupId, {
       method: "PATCH", headers: { "content-type": "application/json" },
       body: JSON.stringify({
         mode,
         refreshCron: mode === "live" ? null : (refreshCron.trim() || null),
       }),
     });
-    setSaving(false); closeDialog(); onComplete();
+    setSaving(false);
+    if (!done) return;
+    closeDialog(); onComplete();
   }
 
   const subtitle = connectionName + (sourceSchema ? " · " + sourceSchema : "");
@@ -138,7 +149,9 @@ export function GroupEditDialog({ groupId, datasetId, connectionId, connectionNa
             </button>
           ) : (
             <div className="mt-3">
-              {loadingPicker ? (
+              {pickerError ? (
+                <p className="py-2 text-xs text-error">{pickerError}</p>
+              ) : loadingPicker ? (
                 <div className="flex items-center gap-2 py-2 text-xs text-base-content/65">
                   <span className="loading loading-spinner loading-xs" />Carregando tabelas…
                 </div>

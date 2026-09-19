@@ -21,9 +21,9 @@ export function DerivedRow({ dt, schemaName, onSelectTable, onChanged }: {
 
   async function triggerRefresh() {
     setRefreshing(true);
-    await fetch(`/api/v1/derived-tables/${dt.id}/refresh`, { method: "POST" });
+    const done = await runAction(`/api/v1/derived-tables/${dt.id}/refresh`, { method: "POST" });
     setRefreshing(false);
-    onChanged();
+    if (done) onChanged();
   }
 
   async function deleteDerived() {

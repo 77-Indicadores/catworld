@@ -18,9 +18,9 @@ export function SingleSourceRow({ source: s, table: t, onSelectTable, onChanged 
 
   async function refreshSource() {
     setRefreshing(true);
-    await fetch(`/api/v1/dataset-sources/${s.id}/refresh`, { method: "POST" });
+    const done = await runAction(`/api/v1/dataset-sources/${s.id}/refresh`, { method: "POST" });
     setRefreshing(false);
-    onChanged();
+    if (done) onChanged();
   }
 
   async function deleteSource() {
@@ -29,11 +29,10 @@ export function SingleSourceRow({ source: s, table: t, onSelectTable, onChanged 
   }
 
   async function toggleActive() {
-    await fetch(`/api/v1/dataset-sources/${s.id}`, {
+    if (await runAction(`/api/v1/dataset-sources/${s.id}`, {
       method: "PATCH", headers: { "content-type": "application/json" },
       body: JSON.stringify({ active: !s.active }),
-    });
-    onChanged();
+    })) onChanged();
   }
 
   return (
