@@ -15,7 +15,9 @@ import { enqueueDueSourceRefreshes, enqueueDueReconciliations, refreshDatasetSou
 import { enqueueDueDerivedRefreshes, refreshDerivedTable } from "@/server/connections/derived";
 import { pickInt } from "@/server/worker/config";
 import { auditJob } from "@/server/audit-request";
-import { startHeartbeat, currentRssMb, recordJobMetric, writeWorkerLiveness } from "./metrics";
+import { startHeartbeat, currentRssMb, recordJobMetric, writeWorkerLiveness, readWorkerLiveness, clearWorkerLiveness } from "./metrics";
+import { setDuckdbMemoryLimit } from "@/server/worker/runtime-limits";
+import { WorkerState, identityConflict, isPidAlive, listProfileNames, loadProfile, parseProfileArg, type WorkerProfileRow } from "./runtime";
 
 // Camada 1 (auditoria): o processo do worker (tsx src/worker/index.ts) roda fora
 // do ciclo de vida do Next.js — instrumentation.ts (que inicializa o Sentry pro
@@ -25,16 +27,27 @@ Sentry.init({
   dsn: "https://43a7acb9f1f89e58168a8e79567281cb@o4511632763191296.ingest.us.sentry.io/4511667797622784",
   tracesSampleRate: 0.1,
   enableLogs: true,
-  serverName: `${env().CATWORLD_WORKER_ID}@${hostname()}`,
+  serverName: `${parseProfileArg(process.argv) ?? "worker"}@${hostname()}`,
 });
 process.on("uncaughtException", (e) => { Sentry.captureException(e); console.error("[worker] uncaughtException:", e); });
 process.on("unhandledRejection", (e) => { Sentry.captureException(e); console.error("[worker] unhandledRejection:", e); });
 
 type Claimed = { id: string; type: string; upload_id: string | null; payload_json: string | null; attempts: number; max_attempts: number; weight: number };
 
-let stopping = false;
-process.on("SIGTERM", () => { stopping = true; });
-process.on("SIGINT", () => { stopping = true; });
+// Identidade e config deste processo: o perfil (banco), escolhido por `--profile <nome>` — sem variável de ambiente.
+let profile: WorkerProfileRow;
+const state = new WorkerState();
+process.on("SIGTERM", () => { state.stopping = true; });
+process.on("SIGINT", () => { state.stopping = true; });
+// O supervisor conversa por IPC: {type:"drain"} = para de pegar job novo, termina os em andamento e sai.
+process.on("message", (m) => { if ((m as { type?: string } | null)?.type === "drain") state.draining = true; });
+process.on("disconnect", () => { state.draining = true; }); // supervisor morreu: não fica órfão
+
+/** Espera até `ms`, mas acorda logo se o worker foi mandado parar/drenar (um poll longo não atrasa o reinício). */
+async function nap(ms: number) {
+  const end = Date.now() + ms;
+  while (state.canClaim && Date.now() < end) await new Promise(r => setTimeout(r, Math.min(500, Math.max(0, end - Date.now()))));
+}
 
 async function claim(lockedBy: string, maxHeavy: number, maxSyncsPerStorage: number, allowedTypes: string[] | null): Promise<Claimed | null> {
   const typeFilter = allowedTypes && allowedTypes.length > 0
@@ -567,12 +580,10 @@ async function recoverStale() {
 }
 
 async function loop(concurrencyId: number) {
-  const workerLabel = `${env().CATWORLD_WORKER_ID}-${concurrencyId}@${hostname()}`;
-  const rawTypes = env().CATWORLD_WORKER_JOB_TYPES;
-  const allowedTypes = rawTypes ? rawTypes.split(",").map(t => t.trim()).filter(Boolean) : null;
-  if (allowedTypes) console.log(`[worker] ${workerLabel} restrito a tipos: ${allowedTypes.join(", ")}`);
-  else console.log(`[worker] ${workerLabel} iniciado`);
-  while (!stopping) {
+  const workerLabel = `${profile.name}-${concurrencyId}@${hostname()}`;
+  const allowedTypes = [...profile.jobTypes];
+  console.log(`[worker] ${workerLabel} tipos: ${allowedTypes.join(", ")}`);
+  while (state.canClaim) {
     let job: Claimed | null;
     try {
       const { getWorkerConfig } = await import("@/server/worker/config");
@@ -580,13 +591,15 @@ async function loop(concurrencyId: number) {
       job = await claim(workerLabel, maxHeavyJobs, maxSyncsPerStorage, allowedTypes);
     } catch (e) {
       console.warn("[worker] claim falhou (transiente): %s", e instanceof Error ? e.message : e);
-      await new Promise(r => setTimeout(r, env().CATWORLD_JOB_POLL_MS));
+      await nap(profile.pollMs);
       continue;
     }
     if (!job) {
-      await new Promise(r => setTimeout(r, env().CATWORLD_JOB_POLL_MS));
+      await nap(profile.pollMs);
       continue;
     }
+    state.jobStarted();
+    try {
     // Camada 1 (auditoria) — nao influencia nenhuma decisao de agendamento,
     // so grava custo real por job em cw_job_metrics.
     const rssBefore = currentRssMb();
@@ -622,12 +635,15 @@ async function loop(concurrencyId: number) {
         console.error("[worker] fail() lançou (DB indisponível?): %s", fe instanceof Error ? fe.message : fe);
       }
     }
+    } finally {
+      state.jobFinished();
+    }
   }
 }
 
 async function releaseSelf() {
-  const workerId = env().CATWORLD_WORKER_ID;
-  const concurrency = env().CATWORLD_WORKER_CONCURRENCY;
+  const workerId = profile.name;
+  const concurrency = profile.concurrency;
   // Match worker-N-1@hostname, worker-N-2@hostname, etc. Parametrizado; '_' e '%' do id nao viram curinga do LIKE.
   const escaped = workerId.replace(/[\\%_]/g, (c) => `\\${c}`);
   const labels = Array.from({ length: concurrency }, (_, i) => `${workerId}-${i + 1}`);
@@ -642,18 +658,55 @@ async function releaseSelf() {
   if (released > 0) console.log(`[worker] startup: ${released} job(s) do worker anterior liberados`);
 }
 
+/** Sai com mensagem clara (nunca sobe sem perfil): 2 = perfil ausente/inexistente, 3 = identidade em uso, 4 = desabilitado. */
+async function bootstrapProfile(): Promise<WorkerProfileRow> {
+  const name = parseProfileArg(process.argv);
+  if (!name) {
+    const names = await listProfileNames().catch(() => []);
+    console.error(`[worker] informe o perfil: --profile <nome>. Perfis cadastrados: ${names.join(", ") || "(nenhum)"}. Crie/edite em Configurações > Worker ou use o supervisor (npm run supervisor).`);
+    process.exit(2);
+  }
+  const p = await loadProfile(name).catch((e) => { console.error("[worker] falha ao ler o perfil:", e instanceof Error ? e.message : e); return null; });
+  if (!p) {
+    const names = await listProfileNames().catch(() => []);
+    console.error(`[worker] perfil "${name}" não existe. Perfis cadastrados: ${names.join(", ") || "(nenhum)"}.`);
+    process.exit(2);
+  }
+  if (!p.enabled) {
+    console.error(`[worker] perfil "${name}" está desabilitado (habilite em Configurações > Worker).`);
+    process.exit(4);
+  }
+  const live = await readWorkerLiveness(p.name).catch(() => undefined);
+  if (identityConflict(live, { host: hostname(), pid: process.pid }, Date.now(), isPidAlive)) {
+    console.error(`[worker] já existe outro processo ativo com o perfil "${p.name}" (pulsação recente). Pare o serviço antigo antes de subir este.`);
+    process.exit(3);
+  }
+  return p;
+}
+
+/** Relê o perfil: poll e memória valem na hora; tipos/concorrência só no próximo reinício; desabilitar drena. */
+async function refreshProfile() {
+  const fresh = await loadProfile(profile.name).catch(() => null);
+  if (!fresh) return; // banco fora do ar (ou perfil apagado): segue com o que tem; o supervisor decide
+  if (!fresh.enabled) { console.log("[worker] perfil desabilitado: drenando"); state.draining = true; }
+  if (fresh.pollMs !== profile.pollMs) profile.pollMs = fresh.pollMs;
+  if (fresh.duckdbMemoryLimit !== profile.duckdbMemoryLimit) {
+    profile.duckdbMemoryLimit = fresh.duckdbMemoryLimit;
+    setDuckdbMemoryLimit(fresh.duckdbMemoryLimit);
+  }
+  profile.revision = fresh.revision;
+}
+
 async function main() {
-  const concurrency = env().CATWORLD_WORKER_CONCURRENCY;
-  console.log(`Catworld worker ${env().CATWORLD_WORKER_ID} iniciado (concorrência: ${concurrency})`);
+  profile = await bootstrapProfile();
+  setDuckdbMemoryLimit(profile.duckdbMemoryLimit);
+  const concurrency = profile.concurrency;
+  console.log(`Catworld worker ${profile.name} iniciado (concorrência: ${concurrency})`);
   await releaseSelf();
-  const rawTypes = env().CATWORLD_WORKER_JOB_TYPES;
-  const allowedTypes = rawTypes ? rawTypes.split(",").map(t => t.trim()).filter(Boolean) : null;
-  const KNOWN_TYPES = ["PREVIEW_UPLOAD", "IMPORT_UPLOAD", "SOURCE_REFRESH", "DERIVED_REFRESH", "METADATA_CLEANUP"];
-  const unknown = (allowedTypes ?? []).filter((t) => !KNOWN_TYPES.includes(t));
-  if (unknown.length) console.warn(`[worker] CATWORLD_WORKER_JOB_TYPES contem tipo(s) desconhecido(s): ${unknown.join(", ")} (validos: ${KNOWN_TYPES.join(", ")})`);
-  const handlesSourceRefresh = !allowedTypes || allowedTypes.includes("SOURCE_REFRESH");
-  const handlesDerivedRefresh = !allowedTypes || allowedTypes.includes("DERIVED_REFRESH");
-  const handlesCleanup = !allowedTypes || allowedTypes.includes("METADATA_CLEANUP");
+  const allowedTypes = profile.jobTypes;
+  const handlesSourceRefresh = allowedTypes.includes("SOURCE_REFRESH");
+  const handlesDerivedRefresh = allowedTypes.includes("DERIVED_REFRESH");
+  const handlesCleanup = allowedTypes.includes("METADATA_CLEANUP");
 
   // Enqueue one METADATA_CLEANUP per day if none is queued/running.
   // Usa cw_system_settings para rastrear o último cleanup — não cw_jobs, que se auto-deleta.
@@ -678,14 +731,19 @@ async function main() {
 
   let lastRecovery = 0;
   let lastLiveness = 0;
-  const workerId = env().CATWORLD_WORKER_ID;
+  let lastProfileRefresh = 0;
+  const workerId = profile.name;
   const recoveryLoop = async () => {
-    while (!stopping) {
+    while (!state.finished) {
       // Camada 2: pulsação geral do worker — roda independente de qualquer job
       // específico, consumida pelo HEALTHCHECK do Docker (ver scripts/worker-healthcheck.mjs).
       if (Date.now() - lastLiveness > 15000) {
-        await writeWorkerLiveness(workerId);
+        await writeWorkerLiveness(workerId, hostname(), process.pid);
         lastLiveness = Date.now();
+      }
+      if (Date.now() - lastProfileRefresh > 10000) {
+        await refreshProfile();
+        lastProfileRefresh = Date.now();
       }
       if (Date.now() - lastRecovery > 60000) {
         try {
@@ -703,7 +761,9 @@ async function main() {
   };
   const workers = Array.from({ length: concurrency }, (_, i) => loop(i + 1));
   await Promise.all([recoveryLoop(), ...workers]);
+  await clearWorkerLiveness(workerId, hostname(), process.pid);
   await prisma.$disconnect();
+  process.exit(0); // com IPC aberto o processo não termina sozinho
 }
 
-void main().catch(e => { console.error(e); process.exitCode = 1; });
+void main().catch(e => { console.error(e); process.exit(1); });

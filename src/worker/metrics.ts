@@ -58,16 +58,34 @@ export type JobMetricInput = {
  * quando o worker está ocioso ou algum job individual está travado. Se o
  * processo inteiro travar de verdade (não só um job), essa pulsação também para.
  */
-export async function writeWorkerLiveness(workerId: string): Promise<void> {
+const ISO_NOW = `to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`;
+
+/** Valor: `<ISO>|<host>|<pid>` (o healthcheck lê só o horário; a identidade serve à guarda de conflito). */
+export async function writeWorkerLiveness(workerId: string, host: string, pid: number): Promise<void> {
   try {
     await prisma.$executeRawUnsafe(
       `INSERT INTO cw_system_settings (key, value, updated_at)
-       VALUES ($1, NOW()::text, NOW())
-       ON CONFLICT (key) DO UPDATE SET value = NOW()::text, updated_at = NOW()`,
+       VALUES ($1, ${ISO_NOW} || '|' || $2, NOW())
+       ON CONFLICT (key) DO UPDATE SET value = ${ISO_NOW} || '|' || $2, updated_at = NOW()`,
       `worker.liveness.${workerId}`,
+      `${host}|${pid}`,
     );
   } catch (e) {
     console.warn("[liveness] falhou: %s", e instanceof Error ? e.message : e);
+  }
+}
+
+export async function readWorkerLiveness(workerId: string): Promise<string | undefined> {
+  const rows = await prisma.$queryRawUnsafe<{ value: string }[]>(`SELECT value FROM cw_system_settings WHERE key = $1`, `worker.liveness.${workerId}`);
+  return rows[0]?.value;
+}
+
+/** Saída limpa: remove a pulsação SÓ se ainda for deste processo (não apaga a de um substituto). */
+export async function clearWorkerLiveness(workerId: string, host: string, pid: number): Promise<void> {
+  try {
+    await prisma.$executeRawUnsafe(`DELETE FROM cw_system_settings WHERE key = $1 AND value LIKE '%|' || $2`, `worker.liveness.${workerId}`, `${host}|${pid}`);
+  } catch {
+    // best effort
   }
 }
 
