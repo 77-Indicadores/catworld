@@ -29,6 +29,7 @@ beforeEach(() => {
   }));
   vi.stubGlobal("confirm", vi.fn(() => true));
   vi.stubGlobal("alert", vi.fn());
+  HTMLDialogElement.prototype.showModal = function () { this.setAttribute("open", ""); };
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
@@ -69,10 +70,12 @@ describe("Workers (Configurações)", () => {
     expect((screen.getByRole("button", { name: "Reiniciar worker-uploads" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("Reiniciar com segurança confirma e envia o comando SAFE para o perfil", async () => {
+  it("Reiniciar abre o diálogo e, com segurança (padrão), envia o comando SAFE para o perfil", async () => {
     render(<WorkersSection />);
     await screen.findByText("worker-uploads");
-    fireEvent.click(screen.getAllByText("Com segurança (espera os jobs)")[1]!); // menu do perfil (o 1º é o de "todos")
+    fireEvent.click(screen.getByRole("button", { name: "Reiniciar worker-uploads" }));
+    expect(await screen.findByText("Como reiniciar o worker \"worker-uploads\"?")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Reiniciar com segurança" }));
     await waitFor(() => expect(posted).toHaveLength(1));
     expect(posted[0]).toEqual({
       url: "/api/v1/system/commands",
@@ -80,13 +83,26 @@ describe("Workers (Configurações)", () => {
     });
   });
 
-  it("Reiniciar agora pede confirmação destrutiva; cancelar não envia nada", async () => {
-    (globalThis.confirm as unknown as ReturnType<typeof vi.fn>).mockReturnValue(false);
+  it("Reiniciar agora: escolher o modo destrutivo envia IMMEDIATE; cancelar não envia nada", async () => {
     render(<WorkersSection />);
     await screen.findByText("worker-uploads");
-    fireEvent.click(screen.getAllByText("Agora (jobs voltam para a fila)")[1]!);
+    fireEvent.click(screen.getByRole("button", { name: "Reiniciar worker-uploads" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Cancelar" }));
     await new Promise((r) => setTimeout(r, 20));
     expect(posted).toHaveLength(0);
-    expect(globalThis.confirm).toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Reiniciar worker-uploads" }));
+    fireEvent.click(await screen.findByLabelText(/^Agora/));
+    fireEvent.click(screen.getByRole("button", { name: "Reiniciar agora" }));
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect((posted[0]!.body as { mode: string }).mode).toBe("IMMEDIATE");
+  });
+
+  it("Reiniciar todos usa RESTART_ALL sem perfil", async () => {
+    render(<WorkersSection />);
+    await screen.findByText("worker-uploads");
+    fireEvent.click(screen.getByRole("button", { name: "Reiniciar todos os workers" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Reiniciar com segurança" }));
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0]!.body).toEqual({ action: "RESTART_ALL", mode: "SAFE" });
   });
 });

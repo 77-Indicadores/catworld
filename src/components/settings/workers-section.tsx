@@ -45,6 +45,7 @@ export function WorkersSection() {
   const [warnings, setWarnings] = useState<string[]>([]);
   const [error, setError] = useState("");
   const [editing, setEditing] = useState<Profile | "new" | null>(null);
+  const [restarting, setRestarting] = useState<Profile | "all" | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -72,13 +73,6 @@ export function WorkersSection() {
   }
 
   async function restart(p: Profile | null, mode: "SAFE" | "IMMEDIATE") {
-    const target = p ? `o worker "${p.name}"` : "todos os workers";
-    const ok = await confirm(mode === "SAFE"
-      ? { title: p ? "Reiniciar com segurança" : "Reiniciar todos com segurança", confirmLabel: "Reiniciar com segurança", danger: false,
-          message: `Para de pegar novos jobs em ${target}, espera os que estão rodando terminarem (até o prazo configurado abaixo) e então reinicia. Nenhum job é interrompido.` }
-      : { title: p ? "Reiniciar agora" : "Reiniciar todos agora", confirmLabel: "Reiniciar agora", danger: true,
-          message: `Interrompe ${target} agora. Os jobs em andamento voltam para a fila e recomeçam do início (uma tentativa é consumida).` });
-    if (!ok) return;
     await send(p ? { action: "RESTART_PROFILE", mode, profileId: p.id } : { action: "RESTART_ALL", mode }, "Reinício solicitado.");
   }
 
@@ -108,13 +102,7 @@ export function WorkersSection() {
         title="Workers"
         action={
           <div className="flex flex-wrap gap-2">
-            <div className="dropdown dropdown-end">
-              <button tabIndex={0} className="btn btn-sm" disabled={!supervised} aria-label="Reiniciar todos os workers"><RotateCw size={14} />Reiniciar todos</button>
-              <ul tabIndex={0} className="menu dropdown-content z-20 mt-1 w-64 rounded-box border border-base-300 bg-base-100 p-1 shadow-lg">
-                <li><button onClick={() => restart(null, "SAFE")}>Com segurança (espera os jobs)</button></li>
-                <li><button onClick={() => restart(null, "IMMEDIATE")} className="text-error">Agora (jobs voltam para a fila)</button></li>
-              </ul>
-            </div>
+            <button className="btn btn-sm" disabled={!supervised} onClick={() => setRestarting("all")} aria-label="Reiniciar todos os workers"><RotateCw size={14} />Reiniciar todos</button>
             <button className="btn btn-primary btn-sm" onClick={() => setEditing("new")}>Novo worker</button>
           </div>
         }
@@ -166,13 +154,7 @@ export function WorkersSection() {
                     <td>
                       <div className="flex justify-end gap-1">
                         <button className="btn btn-ghost btn-xs" onClick={() => setEditing(p)} aria-label={`Editar ${p.name}`}><SquarePen size={13} />Editar</button>
-                        <div className="dropdown dropdown-end">
-                          <button tabIndex={0} className="btn btn-ghost btn-xs" disabled={!supervised || !p.enabled} aria-label={`Reiniciar ${p.name}`}><RotateCw size={13} />Reiniciar</button>
-                          <ul tabIndex={0} className="menu dropdown-content z-20 mt-1 w-64 rounded-box border border-base-300 bg-base-100 p-1 shadow-lg">
-                            <li><button onClick={() => restart(p, "SAFE")}>Com segurança (espera os jobs)</button></li>
-                            <li><button onClick={() => restart(p, "IMMEDIATE")} className="text-error">Agora (jobs voltam para a fila)</button></li>
-                          </ul>
-                        </div>
+                        <button className="btn btn-ghost btn-xs" disabled={!supervised || !p.enabled} onClick={() => setRestarting(p)} aria-label={`Reiniciar ${p.name}`}><RotateCw size={13} />Reiniciar</button>
                         <button className="btn btn-ghost btn-xs" disabled={!supervised} onClick={() => toggle(p)} aria-label={`${p.enabled ? "Parar" : "Iniciar"} ${p.name}`}>
                           {p.enabled ? <><StopCircle size={13} />Parar</> : <><PlayCircle size={13} />Iniciar</>}
                         </button>
@@ -201,6 +183,18 @@ export function WorkersSection() {
           </div>
         )}
       </Panel>
+
+      {restarting && (
+        <RestartDialog
+          target={restarting === "all" ? null : restarting}
+          onClose={() => setRestarting(null)}
+          onConfirm={async (mode) => {
+            const t = restarting;
+            setRestarting(null);
+            await restart(t === "all" ? null : t, mode);
+          }}
+        />
+      )}
 
       {editing && (
         <ProfileDialog
@@ -308,6 +302,38 @@ function ProfileDialog({ profile, onClose, onSaved }: { profile: Profile | null;
           <button className="btn btn-primary btn-sm" disabled={saving}>{saving ? "Salvando…" : "Salvar"}</button>
         </div>
       </form>
+    </dialog>
+  );
+}
+
+function RestartDialog({ target, onClose, onConfirm }: { target: Profile | null; onClose: () => void; onConfirm: (mode: "SAFE" | "IMMEDIATE") => void }) {
+  const ref = useRef<HTMLDialogElement>(null);
+  const titleId = useId();
+  const [mode, setMode] = useState<"SAFE" | "IMMEDIATE">("SAFE");
+  useEffect(() => { ref.current?.showModal(); }, []);
+  const who = target ? `o worker "${target.name}"` : "todos os workers";
+  return (
+    <dialog ref={ref} className="modal" aria-labelledby={titleId} onCancel={(e) => { e.preventDefault(); onClose(); }}>
+      <div className="modal-box">
+        <h3 id={titleId} className="text-lg font-bold">{target ? `Reiniciar ${target.name}` : "Reiniciar todos os workers"}</h3>
+        <p className="mt-1 text-sm text-base-content/70">Como reiniciar {who}?</p>
+        <div className="mt-4 space-y-2" role="radiogroup" aria-label="Modo de reinício">
+          <label className={`flex cursor-pointer items-start gap-3 rounded-box border p-3 ${mode === "SAFE" ? "border-primary bg-primary/5" : "border-base-300"}`}>
+            <input type="radio" name="restart-mode" className="radio radio-sm mt-0.5" checked={mode === "SAFE"} onChange={() => setMode("SAFE")} />
+            <span className="text-sm"><span className="font-medium">Com segurança (recomendado)</span>
+              <span className="block text-xs text-base-content/70">Para de pegar jobs novos, espera os que estão rodando terminarem (até o prazo configurado nesta tela) e então reinicia. Nenhum job é interrompido.</span></span>
+          </label>
+          <label className={`flex cursor-pointer items-start gap-3 rounded-box border p-3 ${mode === "IMMEDIATE" ? "border-error bg-error/5" : "border-base-300"}`}>
+            <input type="radio" name="restart-mode" className="radio radio-sm radio-error mt-0.5" checked={mode === "IMMEDIATE"} onChange={() => setMode("IMMEDIATE")} />
+            <span className="text-sm"><span className="font-medium">Agora</span>
+              <span className="block text-xs text-base-content/70">Interrompe já. Os jobs em andamento voltam para a fila e recomeçam do início (uma tentativa é consumida).</span></span>
+          </label>
+        </div>
+        <div className="modal-action">
+          <button className="btn btn-ghost btn-sm" onClick={onClose}>Cancelar</button>
+          <button className={`btn btn-sm ${mode === "IMMEDIATE" ? "btn-error" : "btn-primary"}`} onClick={() => onConfirm(mode)}>{mode === "SAFE" ? "Reiniciar com segurança" : "Reiniciar agora"}</button>
+        </div>
+      </div>
     </dialog>
   );
 }
