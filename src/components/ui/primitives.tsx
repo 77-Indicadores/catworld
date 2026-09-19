@@ -48,9 +48,9 @@ export function StatusBadge({ status, label }: { status: Status; label?: string 
 export function EmptyState({ icon, title, description, action }: { icon: ReactNode; title: string; description: string; action?: ReactNode }) {
   return (
     <div className="flex min-h-64 flex-col items-center justify-center px-6 py-12 text-center">
-      <div className="mb-4 rounded-2xl bg-base-200 p-4 text-base-content/50">{icon}</div>
+      <div className="mb-4 rounded-2xl bg-base-200 p-4 text-base-content/65">{icon}</div>
       <h3 className="font-semibold">{title}</h3>
-      <p className="mt-1 max-w-md text-sm text-base-content/60">{description}</p>
+      <p className="mt-1 max-w-md text-sm text-base-content/65">{description}</p>
       {action && <div className="mt-5">{action}</div>}
     </div>
   );
@@ -61,9 +61,9 @@ export function StatCard({ label, value, hint, icon }: { label: string; value: s
     <div className="rounded-box border border-base-300 bg-base-100 p-5 shadow-sm">
       <div className="flex items-start justify-between">
         <div>
-          <p className="text-xs font-medium uppercase tracking-wide text-base-content/55">{label}</p>
+          <p className="text-xs font-medium uppercase tracking-wide text-base-content/65">{label}</p>
           <p className="mt-2 text-2xl font-bold">{value}</p>
-          <p className="mt-1 text-xs text-base-content/55">{hint}</p>
+          <p className="mt-1 text-xs text-base-content/65">{hint}</p>
         </div>
         <div className="rounded-xl bg-primary/10 p-2.5 text-primary">{icon}</div>
       </div>

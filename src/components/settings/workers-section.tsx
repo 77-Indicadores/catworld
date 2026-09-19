@@ -128,7 +128,7 @@ export function WorkersSection() {
         </div>
 
         <div className="overflow-x-auto">
-          <table className="table table-sm">
+          <table className="table table-sm table-stack">
             <caption className="sr-only">Workers configurados</caption>
             <thead>
               <tr>
@@ -141,19 +141,19 @@ export function WorkersSection() {
                 const badge = stateBadge(p);
                 return (
                   <tr key={p.id}>
-                    <td>
+                    <td data-label="Worker">
                       <div className="font-mono text-sm">{p.name}</div>
-                      {p.runtime?.pid && <div className="text-[11px] text-base-content/60">pid {p.runtime.pid}{p.runtime.restarts ? ` · ${p.runtime.restarts} reinício(s)` : ""}</div>}
+                      {p.runtime?.pid && <div className="text-[11px] text-base-content/65">pid {p.runtime.pid}{p.runtime.restarts ? ` · ${p.runtime.restarts} reinício(s)` : ""}</div>}
                     </td>
-                    <td className="max-w-64 text-xs">{p.jobTypes.map((t) => JOB_TYPE_LABEL[t]?.label ?? t).join(", ")}</td>
-                    <td className="text-sm">{p.concurrency}</td>
-                    <td>
+                    <td data-label="Processa" className="max-w-64 text-xs">{p.jobTypes.map((t) => JOB_TYPE_LABEL[t]?.label ?? t).join(", ")}</td>
+                    <td data-label="Paralelo" className="text-sm">{p.concurrency}</td>
+                    <td data-label="Estado">
                       <StatusBadge status={badge.status} label={badge.label} />
                       {p.runtime?.restartPending && <div className="mt-1 text-[11px] text-warning">Reinício pendente: a mudança de tipos/paralelismo só vale depois de reiniciar</div>}
                     </td>
-                    <td className="text-sm">{p.runningJobs ?? 0} / {p.queuedJobs ?? 0}</td>
-                    <td>
-                      <div className="flex justify-end gap-1">
+                    <td data-label="Jobs (rodando / na fila)" className="text-sm">{p.runningJobs ?? 0} / {p.queuedJobs ?? 0}</td>
+                    <td data-label="">
+                      <div className="flex flex-wrap justify-end gap-1">
                         <button className="btn btn-ghost btn-xs" onClick={() => setEditing(p)} aria-label={`Editar ${p.name}`}><SquarePen size={13} />Editar</button>
                         <button className="btn btn-ghost btn-xs" disabled={!supervised || !p.enabled} onClick={() => setRestarting(p)} aria-label={`Reiniciar ${p.name}`}><RotateCw size={13} />Reiniciar</button>
                         <button className="btn btn-ghost btn-xs" disabled={!supervised} onClick={() => toggle(p)} aria-label={`${p.enabled ? "Parar" : "Iniciar"} ${p.name}`}>
@@ -176,7 +176,7 @@ export function WorkersSection() {
                 <li key={c.id} className="flex flex-wrap items-center gap-x-3 gap-y-1">
                   <span className="font-medium">{COMMAND_ACTION_LABEL[c.action] ?? c.action}{c.mode === "IMMEDIATE" ? " (agora)" : ""}</span>
                   <span className={OPEN.has(c.status) ? "text-warning" : c.status === "FAILED" ? "text-error" : "text-base-content/70"}>{COMMAND_STATUS_LABEL[c.status] ?? c.status}</span>
-                  <span className="text-base-content/60">{c.requestedBy} · <Time iso={c.requestedAt} /></span>
+                  <span className="text-base-content/65">{c.requestedBy} · <Time iso={c.requestedAt} /></span>
                   {c.status === "FAILED" && c.resultJson && <span className="text-error">{safeError(c.resultJson)}</span>}
                 </li>
               ))}

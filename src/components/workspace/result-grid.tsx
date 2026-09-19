@@ -16,7 +16,7 @@ export function isNumericColumn(rows: Record<string, unknown>[], column: string)
 
 /** Célula: NULL destacado (não confundir com o texto "NULL"), números alinhados à direita. */
 export function GridCell({ value, numeric }: { value: unknown; numeric: boolean }) {
-  if (value === null || value === undefined) return <td className="whitespace-nowrap italic text-base-content/50">NULL</td>;
+  if (value === null || value === undefined) return <td className="whitespace-nowrap italic text-base-content/65">NULL</td>;
   const text = typeof value === "object" ? JSON.stringify(value) : String(fmtCell(value) ?? "");
   return <td className={`whitespace-nowrap ${numeric ? "text-right tabular-nums" : ""}`}>{text}</td>;
 }

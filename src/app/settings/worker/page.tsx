@@ -86,7 +86,7 @@ function SliderField({
       <div className="flex items-center justify-between">
         <div>
           <div className="font-medium text-sm">{label}</div>
-          <div className="text-xs text-base-content/55 mt-0.5">{description}</div>
+          <div className="text-xs text-base-content/65 mt-0.5">{description}</div>
         </div>
         <div className="flex items-center gap-1.5 shrink-0 ml-6">
           <input
@@ -99,7 +99,7 @@ function SliderField({
             value={value}
             onChange={(e) => { const n = Number(e.target.value); if (Number.isFinite(n)) onChange(Math.min(max, Math.max(min, Math.round(n)))); }}
           />
-          <span className="text-xs text-base-content/60">{unit}</span>
+          <span className="text-xs text-base-content/65">{unit}</span>
         </div>
       </div>
       <input
@@ -114,7 +114,7 @@ function SliderField({
         onChange={(e) => onChange(Number(e.target.value))}
       />
       {marks && (
-        <div className="flex justify-between text-xs text-base-content/40 px-0.5">
+        <div className="flex justify-between text-xs text-base-content/65 px-0.5">
           {marks.map((m) => <span key={m}>{m}</span>)}
         </div>
       )}
@@ -230,12 +230,12 @@ export default function WorkerPage() {
                 >
                   <span className="text-2xl leading-none">{p.emoji}</span>
                   <span className="font-semibold text-sm mt-1">{p.label}</span>
-                  <span className="text-xs text-base-content/55 leading-snug">{p.description}</span>
+                  <span className="text-xs text-base-content/65 leading-snug">{p.description}</span>
                 </button>
               ))}
             </div>
             {activePreset === "custom" && (
-              <p className="text-xs text-base-content/50">
+              <p className="text-xs text-base-content/65">
                 <Zap size={12} className="inline mr-1" />
                 Configuração personalizada — ajuste os controles abaixo.
               </p>

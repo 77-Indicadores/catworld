@@ -59,7 +59,7 @@ export function ManageGrantsDialog({ userId, userName }: { userId: string; userN
         <div className="modal-box max-w-xl">
           <h3 className="text-lg font-bold">Acessos de {userName}</h3>
           <div className="mt-4 space-y-2">
-            {grants.length === 0 && <p className="text-sm text-base-content/55">Nenhum acesso concedido.</p>}
+            {grants.length === 0 && <p className="text-sm text-base-content/65">Nenhum acesso concedido.</p>}
             {grants.map((g) => (
               <div key={g.id} className="flex items-center justify-between rounded-lg bg-base-200 px-3 py-2 text-sm">
                 <span>{g.scopeType === "GLOBAL" ? "Global" : g.scopeType === "PROJECT" ? g.project?.name : `${g.dataset?.project.name} / ${g.dataset?.name}`} · {g.permission}</span>

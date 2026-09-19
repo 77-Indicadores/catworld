@@ -107,7 +107,7 @@ export function UploadCard({ upload, importSummary }: { upload: UploadWithDatase
           </span>
         </div>
 
-        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-base-content/55">
+        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-base-content/65">
           <span>{destination}</span>
           <span>·</span>
           <span>{MODE_LABELS[upload.mode] ?? upload.mode}</span>
@@ -135,7 +135,7 @@ export function UploadCard({ upload, importSummary }: { upload: UploadWithDatase
                   <><span>·</span><span title="Linhas removidas nesta operação">−{formatInt(removed)} removidas</span></>
                 )}
                 {inserted === 0 && removed === 0 && upload.mode === "replace" && (
-                  <><span>·</span><span className="text-base-content/40" title="Dados idênticos ao import anterior — nenhuma linha alterada">sem alterações</span></>
+                  <><span>·</span><span className="text-base-content/65" title="Dados idênticos ao import anterior — nenhuma linha alterada">sem alterações</span></>
                 )}
               </>
             );
@@ -182,7 +182,7 @@ export function UploadCard({ upload, importSummary }: { upload: UploadWithDatase
         {isInProgress && upload.progress > 0 && (
           <div className="mt-2 flex items-center gap-2">
             <progress className="progress progress-info w-40" value={upload.progress} max={100} />
-            <span className="text-xs text-base-content/50">{upload.progress}%</span>
+            <span className="text-xs text-base-content/65">{upload.progress}%</span>
           </div>
         )}
       </div>

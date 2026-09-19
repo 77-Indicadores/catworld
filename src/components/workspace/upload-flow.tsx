@@ -259,7 +259,7 @@ export function UploadFlow({
         <h3 className="text-sm font-semibold">
           Importando {jobs.length} arquivo{jobs.length > 1 ? "s" : ""}
         </h3>
-        <p className="text-xs text-base-content/55">
+        <p className="text-xs text-base-content/65">
           Você pode sair desta tela — o processamento continua no servidor.
         </p>
         <div className="mt-4 grid gap-2">
@@ -288,7 +288,7 @@ export function UploadFlow({
                     ? "text-error"
                     : j.status === "completed"
                       ? "text-success"
-                      : "text-base-content/60"
+                      : "text-base-content/65"
                 }`}
               >
                 {j.statusLabel}
@@ -326,10 +326,10 @@ export function UploadFlow({
           ? `para atualizar "${targetTable.name}"`
           : "para criar tabelas automaticamente"}
       </p>
-      <p className="mt-1 text-xs text-base-content/50">
+      <p className="mt-1 text-xs text-base-content/65">
         CSV, XLSX ou XLS — vários arquivos de uma vez
       </p>
-      <p className="mt-1 text-xs text-base-content/50">ou</p>
+      <p className="mt-1 text-xs text-base-content/65">ou</p>
       <input
         ref={inputRef}
         type="file"

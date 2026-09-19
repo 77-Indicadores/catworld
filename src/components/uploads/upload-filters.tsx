@@ -157,7 +157,7 @@ export function UploadFilters({ projects, selectedStatuses, selectedProjectIds, 
 
       {hasFilter && (
         <button
-          className="btn btn-ghost btn-sm text-base-content/40"
+          className="btn btn-ghost btn-sm text-base-content/65"
           onClick={() => updateParams({ status: null, projectId: null })}
         >
           Limpar filtros

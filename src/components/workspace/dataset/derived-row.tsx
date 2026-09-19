@@ -34,7 +34,7 @@ export function DerivedRow({ dt, schemaName, onSelectTable, onChanged }: {
   return (
     <div className="px-5 py-3">
       <div className="flex items-center gap-3">
-        <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-base-200 text-base-content/50">
+        <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-base-200 text-base-content/65">
           <Code2 size={13} />
         </span>
         <div className="min-w-0 flex-1">
@@ -42,7 +42,7 @@ export function DerivedRow({ dt, schemaName, onSelectTable, onChanged }: {
             <span className="truncate font-medium text-base-content">{dt.name}</span>
             <StatusBadge status={status} label={label} />
           </div>
-          <p className="truncate text-xs text-base-content/40">
+          <p className="truncate text-xs text-base-content/65">
             <span className="font-mono">{schemaName}.{dt.sqlName}</span>
             {fmtRows(rowCount) && <span> · {fmtRows(rowCount)} linhas</span>}
             {dt.refreshCron ? <span> · {dt.refreshCron}</span> : <span> · Manual</span>}

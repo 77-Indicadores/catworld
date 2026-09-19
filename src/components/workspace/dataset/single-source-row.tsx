@@ -39,7 +39,7 @@ export function SingleSourceRow({ source: s, table: t, onSelectTable, onChanged 
   return (
     <div className={"px-5 py-3 " + (s.active ? "" : "opacity-50")}>
       <div className="flex items-center gap-3">
-        <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-base-200 text-base-content/50">
+        <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-base-200 text-base-content/65">
           {s.mode === "live" ? <Cable size={13} /> : <DatabaseZap size={13} />}
         </span>
         <div className="min-w-0 flex-1">
@@ -47,7 +47,7 @@ export function SingleSourceRow({ source: s, table: t, onSelectTable, onChanged 
             <span className="truncate font-medium text-base-content">{s.name}</span>
             <StatusBadge status={sourceBadge(s).status} label={sourceBadge(s).label} />
           </div>
-          <p className="truncate text-xs text-base-content/40">
+          <p className="truncate text-xs text-base-content/65">
             {s.connection.name} · {sourceOriginLabel(s)}
             {s.mode === "extract" && " · " + refreshText(s.refreshCron)}
             {fmtRows(s.lastRowCount) && " · " + fmtRows(s.lastRowCount) + " linhas"}
@@ -68,7 +68,7 @@ export function SingleSourceRow({ source: s, table: t, onSelectTable, onChanged 
         <button onClick={toggleActive} className="btn btn-ghost btn-xs gap-1">
           {s.active
             ? <ToggleRight size={13} className="text-success" />
-            : <ToggleLeft size={13} className="text-base-content/30" />}
+            : <ToggleLeft size={13} className="text-base-content/65" />}
           {s.active ? "Sync ativo" : "Sync pausado"}
         </button>
         {s.mode === "extract" && (

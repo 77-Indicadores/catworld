@@ -23,11 +23,11 @@ function suggestDeltaColumn(cols: Column[]): string {
 }
 
 function Field({ label, hint, children, wide = false }: { label: string; hint?: string; children: React.ReactNode; wide?: boolean }) {
-  return <label className={`form-control w-full ${wide ? "lg:col-span-2" : ""}`}><span className="label-text font-medium">{label}</span><div className="mt-1">{children}</div>{hint && <span className="label-text-alt mt-1 text-base-content/55">{hint}</span>}</label>;
+  return <label className={`form-control w-full ${wide ? "lg:col-span-2" : ""}`}><span className="label-text font-medium">{label}</span><div className="mt-1">{children}</div>{hint && <span className="label-text-alt mt-1 text-base-content/65">{hint}</span>}</label>;
 }
 
 function StepItem({ active, done, label }: { active: boolean; done: boolean; label: string }) {
-  return <span className={`flex items-center gap-2 rounded-full px-3 py-1 text-xs ${active ? "bg-primary text-primary-content" : done ? "bg-success/10 text-success" : "bg-base-200 text-base-content/60"}`}>{done ? <CheckCircle2 size={13} /> : null}{label}</span>;
+  return <span className={`flex items-center gap-2 rounded-full px-3 py-1 text-xs ${active ? "bg-primary text-primary-content" : done ? "bg-success/10 text-success" : "bg-base-200 text-base-content/65"}`}>{done ? <CheckCircle2 size={13} /> : null}{label}</span>;
 }
 
 export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onComplete: () => void }) {
@@ -193,7 +193,7 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
       <dialog ref={ref} className="modal">
         <div className="modal-box max-w-4xl">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-            <div><h3 className="text-lg font-bold">Adicionar fonte de dados</h3><p className="mt-1 text-sm text-base-content/60">Escolha uma ou mais tabelas, ou crie uma fonte a partir de uma consulta.</p></div>
+            <div><h3 className="text-lg font-bold">Adicionar fonte de dados</h3><p className="mt-1 text-sm text-base-content/65">Escolha uma ou mais tabelas, ou crie uma fonte a partir de uma consulta.</p></div>
             <div className="flex flex-wrap gap-2"><StepItem label="Origem" active={step === "origin"} done={step !== "origin"} /><StepItem label="Uso" active={step === "mode"} done={step === "incremental" || step === "preview"} /><StepItem label="Sincronizacao" active={step === "incremental"} done={step === "preview"} /><StepItem label="Revisao" active={step === "preview"} done={false} /></div>
           </div>
 
@@ -224,20 +224,20 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
                           <>
                             <div className="mb-2 flex items-center gap-2">
                               <label className="input input-sm flex flex-1 items-center gap-2 border border-base-300">
-                                <Search size={13} className="text-base-content/40" />
+                                <Search size={13} className="text-base-content/65" />
                                 <input type="text" className="grow" placeholder="Pesquisar tabela/view..." value={tableSearch} onChange={e => setTableSearch(e.target.value)} />
                               </label>
-                              <label className="flex cursor-pointer items-center gap-1.5 text-xs text-base-content/60 select-none whitespace-nowrap">
+                              <label className="flex cursor-pointer items-center gap-1.5 text-xs text-base-content/65 select-none whitespace-nowrap">
                                 <input type="checkbox" className="checkbox checkbox-xs" checked={allFilteredSelected} onChange={toggleAll} disabled={filtered.length === 0} />
                                 Selecionar todas
                               </label>
-                              <span className="text-xs text-base-content/40 whitespace-nowrap">{selectedTables.length} sel.</span>
+                              <span className="text-xs text-base-content/65 whitespace-nowrap">{selectedTables.length} sel.</span>
                             </div>
                             <div className="max-h-64 overflow-auto rounded-box border border-base-300">
                               {tables.length === 0
-                                ? <div className="p-4 text-sm text-base-content/50">Nenhuma tabela ou view encontrada neste schema.</div>
+                                ? <div className="p-4 text-sm text-base-content/65">Nenhuma tabela ou view encontrada neste schema.</div>
                                 : filtered.length === 0
-                                  ? <div className="p-4 text-sm text-base-content/50">Nenhum resultado para &ldquo;{tableSearch}&rdquo;.</div>
+                                  ? <div className="p-4 text-sm text-base-content/65">Nenhum resultado para &ldquo;{tableSearch}&rdquo;.</div>
                                   : filtered.map(t => (
                                     <label key={t.schema + "." + t.table} className="flex cursor-pointer items-center gap-3 border-b border-base-300 px-4 py-2 text-sm last:border-b-0 hover:bg-base-200">
                                       <input type="checkbox" className="checkbox checkbox-sm" checked={selectedTables.includes(t.table)} onChange={() => toggleTable(t.table)} />
@@ -270,8 +270,8 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
 
           {step === "mode" && (
             <div className="mt-5 grid gap-4 lg:grid-cols-2">
-              <button type="button" onClick={() => setMode("extract")} className={`rounded-box border p-4 text-left ${mode === "extract" ? "border-primary bg-primary/10" : "border-base-300 bg-base-100"}`}><DatabaseZap className="text-primary" size={22} /><h4 className="mt-3 font-semibold">Copiar para o Catworld</h4><p className="mt-1 text-sm text-base-content/60">Cria tabela(s) fisicas no dataset com o mesmo nome das tabelas selecionadas.</p></button>
-              <button type="button" onClick={() => setMode("live")} className={`rounded-box border p-4 text-left ${mode === "live" ? "border-primary bg-primary/10" : "border-base-300 bg-base-100"}`}><Cable className="text-primary" size={22} /><h4 className="mt-3 font-semibold">Consultar direto no {providerLabel}</h4><p className="mt-1 text-sm text-base-content/60">Nao copia dados. Cada visualizacao consulta a origem.</p></button>
+              <button type="button" onClick={() => setMode("extract")} className={`rounded-box border p-4 text-left ${mode === "extract" ? "border-primary bg-primary/10" : "border-base-300 bg-base-100"}`}><DatabaseZap className="text-primary" size={22} /><h4 className="mt-3 font-semibold">Copiar para o Catworld</h4><p className="mt-1 text-sm text-base-content/65">Cria tabela(s) fisicas no dataset com o mesmo nome das tabelas selecionadas.</p></button>
+              <button type="button" onClick={() => setMode("live")} className={`rounded-box border p-4 text-left ${mode === "live" ? "border-primary bg-primary/10" : "border-base-300 bg-base-100"}`}><Cable className="text-primary" size={22} /><h4 className="mt-3 font-semibold">Consultar direto no {providerLabel}</h4><p className="mt-1 text-sm text-base-content/65">Nao copia dados. Cada visualizacao consulta a origem.</p></button>
               <Field label="Agendamento (cron UTC)" hint={mode === "live" ? "Fontes ao vivo sempre consultam a origem na hora." : "Vazio = manual. Ex: 0 7-19/2 * * * (a cada 2h das 7-19h)"} wide>
                 <input
                   disabled={mode === "live"}
@@ -288,12 +288,12 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
           {step === "incremental" && (
             <div className="mt-5 space-y-5">
               <div className="grid gap-4 lg:grid-cols-2">
-                <button type="button" onClick={() => setIncrementalEnabled(false)} className={`rounded-box border p-4 text-left ${!incrementalEnabled ? "border-primary bg-primary/10" : "border-base-300 bg-base-100"}`}><CircleSlash className="text-primary" size={22} /><h4 className="mt-3 font-semibold">Substituir tudo a cada carga</h4><p className="mt-1 text-sm text-base-content/60">Comportamento padrao. Cada atualizacao apaga e recria a tabela com o resultado mais recente.</p></button>
-                <button type="button" onClick={() => setIncrementalEnabled(true)} className={`rounded-box border p-4 text-left ${incrementalEnabled ? "border-primary bg-primary/10" : "border-base-300 bg-base-100"}`}><GitMerge className="text-primary" size={22} /><h4 className="mt-3 font-semibold">Sincronizacao incremental</h4><p className="mt-1 text-sm text-base-content/60">Atualiza (upsert) por uma coluna-chave: registros novos entram, registros existentes sao atualizados.</p></button>
+                <button type="button" onClick={() => setIncrementalEnabled(false)} className={`rounded-box border p-4 text-left ${!incrementalEnabled ? "border-primary bg-primary/10" : "border-base-300 bg-base-100"}`}><CircleSlash className="text-primary" size={22} /><h4 className="mt-3 font-semibold">Substituir tudo a cada carga</h4><p className="mt-1 text-sm text-base-content/65">Comportamento padrao. Cada atualizacao apaga e recria a tabela com o resultado mais recente.</p></button>
+                <button type="button" onClick={() => setIncrementalEnabled(true)} className={`rounded-box border p-4 text-left ${incrementalEnabled ? "border-primary bg-primary/10" : "border-base-300 bg-base-100"}`}><GitMerge className="text-primary" size={22} /><h4 className="mt-3 font-semibold">Sincronizacao incremental</h4><p className="mt-1 text-sm text-base-content/65">Atualiza (upsert) por uma coluna-chave: registros novos entram, registros existentes sao atualizados.</p></button>
               </div>
               {incrementalEnabled && (
                 <div className="grid gap-4 lg:grid-cols-2">
-                  {loadingIncrementalColumns && <div className="lg:col-span-2 text-sm text-base-content/50"><span className="loading loading-spinner loading-xs mr-2" />Carregando colunas...</div>}
+                  {loadingIncrementalColumns && <div className="lg:col-span-2 text-sm text-base-content/65"><span className="loading loading-spinner loading-xs mr-2" />Carregando colunas...</div>}
                   <Field label="Coluna-chave (obrigatoria)" hint="Cada linha nova (chave inexistente) e inserida; cada linha existente (mesma chave) e atualizada.">
                     {incrementalColumns.length > 0 ? (
                       <select className="select w-full font-mono text-sm" value={keyColumn} onChange={(e) => setKeyColumn(e.target.value)}>
@@ -312,7 +312,7 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
                       </select>
                     </Field>
                   ) : (
-                    <div className="rounded-box border border-base-300 bg-base-200/40 p-3 text-sm text-base-content/60">Para consultas customizadas, o filtro incremental (janela de datas, cortes) deve estar embutido no proprio SQL. O Catworld apenas atualiza (upsert) pela coluna-chave informada.</div>
+                    <div className="rounded-box border border-base-300 bg-base-200/40 p-3 text-sm text-base-content/65">Para consultas customizadas, o filtro incremental (janela de datas, cortes) deve estar embutido no proprio SQL. O Catworld apenas atualiza (upsert) pela coluna-chave informada.</div>
                   )}
                 </div>
               )}
@@ -321,7 +321,7 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
 
           {step === "preview" && (
             <div className="mt-5 space-y-4">
-              <div className="rounded-box border border-base-300 bg-base-200/40 p-4 text-sm"><strong>{modeLabel}</strong><span className="ml-2 text-base-content/60">{sourceKind === "table" ? `${selectedTables.length} tabela(s) de ${schema}` : queryName}</span>{mode === "extract" && <span className="ml-2 text-base-content/60">· {incrementalEnabled && keyColumn.trim() ? `Incremental por "${keyColumn.trim()}"${deltaColumn.trim() ? ` (delta: ${deltaColumn.trim()})` : ""}` : "Substitui tudo a cada carga"}</span>}</div>
+              <div className="rounded-box border border-base-300 bg-base-200/40 p-4 text-sm"><strong>{modeLabel}</strong><span className="ml-2 text-base-content/65">{sourceKind === "table" ? `${selectedTables.length} tabela(s) de ${schema}` : queryName}</span>{mode === "extract" && <span className="ml-2 text-base-content/65">· {incrementalEnabled && keyColumn.trim() ? `Incremental por "${keyColumn.trim()}"${deltaColumn.trim() ? ` (delta: ${deltaColumn.trim()})` : ""}` : "Substitui tudo a cada carga"}</span>}</div>
               {sourceKind === "table" ? <div className="max-h-72 overflow-auto rounded-box border border-base-300"><table className="table table-sm"><thead><tr><th>Tabela {providerLabel}</th><th>Nome no Catworld</th></tr></thead><tbody>{selectedTables.map((t) => <tr key={t}><td className="font-mono text-xs">{schema}.{t}</td><td>{t}</td></tr>)}</tbody></table></div> : columns.length > 0 ? <div className="max-h-72 overflow-auto rounded-box border border-base-300"><table className="table table-sm"><thead><tr><th>Coluna na origem</th><th>Nome no Catworld</th><th>Tipo</th></tr></thead><tbody>{columns.map((c) => <tr key={c.sqlName}><td>{c.originalName}</td><td className="font-mono text-xs">{c.sqlName}</td><td>{c.sqlType}</td></tr>)}</tbody></table></div> : <div className="alert alert-warning alert-soft">Nenhuma coluna carregada. Volte e gere a previa novamente.</div>}
             </div>
           )}

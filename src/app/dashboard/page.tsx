@@ -134,7 +134,7 @@ export default async function DashboardPage() {
         <Panel title="Atualização dos projetos">
           <div className="divide-y divide-base-300">
             {projectsData.length === 0 && (
-              <p className="p-6 text-sm text-base-content/50">Nenhum projeto ativo.</p>
+              <p className="p-6 text-sm text-base-content/65">Nenhum projeto ativo.</p>
             )}
             {projectsData.map((project) => {
               const allTables = project.datasets.flatMap((d) => d.tables);
@@ -147,19 +147,19 @@ export default async function DashboardPage() {
                     <div className="flex min-w-0 items-center gap-3">
                       <ChevronRight
                         size={14}
-                        className="shrink-0 text-base-content/40 transition-transform group-open:rotate-90"
+                        className="shrink-0 text-base-content/65 transition-transform group-open:rotate-90"
                       />
                       <span className="truncate text-sm font-medium">{project.name}</span>
                     </div>
                     <div className="ml-3 flex shrink-0 items-center gap-2">
                       <StatusBadge status={headline.tone} label={headline.label} />
-                      <span className="text-xs text-base-content/40">{allTables.length} tab.</span>
+                      <span className="text-xs text-base-content/65">{allTables.length} tab.</span>
                     </div>
                   </summary>
 
                   <div className="border-t border-base-300 bg-base-200/40">
                     {project.datasets.length === 0 && (
-                      <p className="px-10 py-3 text-xs text-base-content/50">Sem datasets.</p>
+                      <p className="px-10 py-3 text-xs text-base-content/65">Sem datasets.</p>
                     )}
                     {project.datasets.map((dataset) => {
                       const dsSummary = summarizeFreshness(itemsByDataset.get(dataset.id) ?? []);
@@ -175,7 +175,7 @@ export default async function DashboardPage() {
                           </Link>
                           <div className="flex items-center gap-2">
                             {dsTotal > 0 && <StatusBadge status={dsHeadline.tone} label={dsHeadline.label} />}
-                            <span className="text-xs text-base-content/40">{dsTotal} tab.</span>
+                            <span className="text-xs text-base-content/65">{dsTotal} tab.</span>
                           </div>
                         </div>
                       );
@@ -196,7 +196,7 @@ function JobStat({ label, value, color }: { label: string; value: number; color:
   return (
     <div className="flex flex-col gap-1 px-6 py-5">
       <span className={`text-2xl font-bold ${color}`}>{value}</span>
-      <span className="text-xs text-base-content/55">{label}</span>
+      <span className="text-xs text-base-content/65">{label}</span>
     </div>
   );
 }

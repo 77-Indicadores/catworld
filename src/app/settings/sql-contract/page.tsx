@@ -147,12 +147,12 @@ export default function SqlContractSettingsPage() {
                 >
                   <Icon className="size-5" />
                   <span className="font-semibold text-sm mt-1">{m.label}</span>
-                  <span className="text-xs text-base-content/55 leading-snug">{m.description}</span>
+                  <span className="text-xs text-base-content/65 leading-snug">{m.description}</span>
                 </button>
               );
             })}
           </div>
-          {mode && <p className="text-xs text-base-content/60 leading-relaxed">{MODES.find((m) => m.id === mode)?.detail}</p>}
+          {mode && <p className="text-xs text-base-content/65 leading-relaxed">{MODES.find((m) => m.id === mode)?.detail}</p>}
           {mode === "strict" && saved !== "strict" && (
             <div className="alert alert-warning alert-soft text-sm">
               O modo estrito pode rejeitar consultas que hoje funcionam. Prefira o Fallback; ative o Estrito depois de revisar os logs (tag sql-contract).
@@ -169,7 +169,7 @@ export default function SqlContractSettingsPage() {
       <Panel>
         <div className="p-5 space-y-3">
           <h2 className="font-semibold text-sm text-base-content/70 uppercase tracking-wide">Uso do contrato</h2>
-          <p className="text-xs text-base-content/55">
+          <p className="text-xs text-base-content/65">
             Contadores desta instância desde {stats ? <Time iso={stats.since} /> : "—"} (zeram ao reiniciar). Guardam só o
             formato da consulta, sem valores.
           </p>
@@ -188,7 +188,7 @@ export default function SqlContractSettingsPage() {
                   {stats.top.map((t) => (
                     <tr key={`${t.kind}|${t.path}|${t.hash}`}>
                       <td className="font-mono">{t.count}</td>
-                      <td>{KIND_LABEL[t.kind] ?? t.kind}{t.message ? <div className="text-base-content/50">{t.message}</div> : null}</td>
+                      <td>{KIND_LABEL[t.kind] ?? t.kind}{t.message ? <div className="text-base-content/65">{t.message}</div> : null}</td>
                       <td className="font-mono">{t.path}</td>
                       <td className="font-mono max-w-md truncate" title={t.shape}>{t.shape}</td>
                     </tr>
@@ -197,7 +197,7 @@ export default function SqlContractSettingsPage() {
               </table>
             </div>
           ) : (
-            <p className="text-sm text-base-content/60">Nenhum caso registrado: nada foi rejeitado nem caiu no caminho antigo.</p>
+            <p className="text-sm text-base-content/65">Nenhum caso registrado: nada foi rejeitado nem caiu no caminho antigo.</p>
           )}
         </div>
       </Panel>
@@ -231,7 +231,7 @@ export default function SqlContractSettingsPage() {
               Normalizado (recomendado)
             </button>
           </div>
-          <p className="text-xs text-base-content/55">
+          <p className="text-xs text-base-content/65">
             Legado: tipos como o driver entrega (varia por backend); as respostas avisam em <code>meta.warnings</code>. Normalizado: datas
             ISO, decimal e bigint como texto. Quem envia <code>normalize</code> explicitamente não é afetado.
           </p>

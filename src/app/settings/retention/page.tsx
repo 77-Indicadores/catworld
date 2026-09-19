@@ -52,7 +52,7 @@ function NumberField({
     <div className="flex items-start justify-between gap-6">
       <div className="flex-1">
         <div className="font-medium text-sm">{label}</div>
-        <div className="text-xs text-base-content/55 mt-0.5">{description}</div>
+        <div className="text-xs text-base-content/65 mt-0.5">{description}</div>
       </div>
       <div className="flex items-center gap-2 shrink-0">
         <div className="text-right">
@@ -70,7 +70,7 @@ function NumberField({
           />
           {!valid && <p id={`${name}-hint`} className="mt-1 text-xs text-error">Informe um número inteiro entre {min} e {max}.</p>}
         </div>
-        <span className="w-14 pt-1.5 text-sm text-base-content/60">{unit}</span>
+        <span className="w-14 pt-1.5 text-sm text-base-content/65">{unit}</span>
       </div>
     </div>
   );
@@ -97,7 +97,7 @@ function RunRow({ run }: { run: CleanupRun }) {
           <span className="badge badge-sm badge-success badge-soft">ok</span>
         )}
       </td>
-      <td className="py-2 pr-4 text-base-content/60">{run.duration_ms ? fmtDuration(run.duration_ms) : "—"}</td>
+      <td className="py-2 pr-4 text-base-content/65">{run.duration_ms ? fmtDuration(run.duration_ms) : "—"}</td>
       <td className="py-2 pr-4 tabular-nums">
         {failed ? (
           <span className="text-error text-xs truncate max-w-[200px] block" title={run.error ?? ""}>
@@ -109,7 +109,7 @@ function RunRow({ run }: { run: CleanupRun }) {
           </span>
         )}
       </td>
-      <td className="py-2 text-base-content/50 text-right tabular-nums">
+      <td className="py-2 text-base-content/65 text-right tabular-nums">
         {!failed && (
           <span title={`jobs=${run.deleted_jobs} audit=${run.deleted_audit} uploads=${run.deleted_uploads} arquivos=${run.deleted_files} órfãos=${run.deleted_orphans} versões=${run.deleted_versions}`}>
             j{run.deleted_jobs} · a{run.deleted_audit} · u{run.deleted_uploads} · v{run.deleted_versions}
@@ -287,12 +287,12 @@ export default function RetentionPage() {
             </button>
           </div>
           {history.length === 0 ? (
-            <p className="text-sm text-base-content/50 py-4 text-center">Nenhuma execução registrada ainda.</p>
+            <p className="text-sm text-base-content/65 py-4 text-center">Nenhuma execução registrada ainda.</p>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full">
                 <thead>
-                  <tr className="text-xs text-base-content/50 border-b border-base-200">
+                  <tr className="text-xs text-base-content/65 border-b border-base-200">
                     <th className="pb-2 pr-4 text-left font-medium">Início</th>
                     <th className="pb-2 pr-4 text-left font-medium">Status</th>
                     <th className="pb-2 pr-4 text-left font-medium">Duração</th>

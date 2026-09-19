@@ -63,7 +63,7 @@ export function EditCatalogDialog({ kind, id, name, description, active }: Props
           </form>
           <div className="mt-6 rounded-xl border border-error/30 bg-error/5 p-4">
             <p className="flex items-center gap-2 text-sm font-semibold text-error"><TriangleAlert size={15} />Zona de perigo</p>
-            <p className="mt-1 text-xs text-base-content/60">
+            <p className="mt-1 text-xs text-base-content/65">
               {kind === "project" ? "Apaga o projeto, todos os seus datasets, os schemas e tabelas no Azure SQL e os dados associados. Isso não pode ser desfeito." : "Apaga o dataset, suas tabelas, o schema no Azure SQL e os dados associados. Isso não pode ser desfeito."}
             </p>
             <p className="mt-3 text-xs">Digite <span className="font-mono font-semibold">{name}</span> para confirmar:</p>

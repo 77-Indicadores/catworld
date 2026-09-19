@@ -103,7 +103,7 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
       <dialog ref={ref} className="modal">
         <div className="modal-box max-w-2xl">
           <h3 className="text-lg font-bold">Editar fonte</h3>
-          <p className="mt-1 text-xs text-base-content/50">{source.connection.name} · {source.sourceKind === "query" ? "Consulta personalizada" : "Tabela"}</p>
+          <p className="mt-1 text-xs text-base-content/65">{source.connection.name} · {source.sourceKind === "query" ? "Consulta personalizada" : "Tabela"}</p>
 
           <div className="mt-5 space-y-4">
             <label className="form-control w-full">
@@ -159,32 +159,32 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
               />
               {mode !== "live" && refreshCron.trim() && <CronPreview cron={refreshCron} onPick={setRefreshCron} />}
               {mode !== "live" && !refreshCron.trim() && (
-                <span className="label-text-alt mt-1 text-base-content/55">Vazio = sem agendamento automático</span>
+                <span className="label-text-alt mt-1 text-base-content/65">Vazio = sem agendamento automático</span>
               )}
-              {mode === "live" && <span className="label-text-alt mt-1 text-base-content/55">Fontes ao vivo sempre consultam a origem na hora.</span>}
+              {mode === "live" && <span className="label-text-alt mt-1 text-base-content/65">Fontes ao vivo sempre consultam a origem na hora.</span>}
             </label>
 
             {mode === "extract" && (
               <label className="form-control w-full">
-                <span className="label-text font-medium">Coluna-chave para upsert <span className="font-normal text-base-content/50">(opcional)</span></span>
+                <span className="label-text font-medium">Coluna-chave para upsert <span className="font-normal text-base-content/65">(opcional)</span></span>
                 <input className="input mt-1 w-full font-mono text-sm" placeholder="ex: id" value={keyColumn} onChange={(e) => setKeyColumn(e.target.value)} />
-                <span className="label-text-alt mt-1 text-base-content/55">Se definida, cada atualização faz upsert pela chave em vez de substituir a tabela inteira.</span>
+                <span className="label-text-alt mt-1 text-base-content/65">Se definida, cada atualização faz upsert pela chave em vez de substituir a tabela inteira.</span>
               </label>
             )}
 
             {mode === "extract" && source.sourceKind === "table" && (
               <label className="form-control w-full">
-                <span className="label-text font-medium">Coluna delta (incremental) <span className="font-normal text-base-content/50">(opcional)</span></span>
+                <span className="label-text font-medium">Coluna delta (incremental) <span className="font-normal text-base-content/65">(opcional)</span></span>
                 <input className="input mt-1 w-full font-mono text-sm" placeholder="ex: updated_at" value={deltaColumn} onChange={(e) => setDeltaColumn(e.target.value)} />
-                <span className="label-text-alt mt-1 text-base-content/55">Requer coluna-chave. Cada carga busca apenas registros com valor maior que o último carregado.</span>
+                <span className="label-text-alt mt-1 text-base-content/65">Requer coluna-chave. Cada carga busca apenas registros com valor maior que o último carregado.</span>
               </label>
             )}
 
             {mode === "extract" && keyColumn.trim() && (
               <div className="rounded-box border border-base-300 p-3 space-y-3">
                 <div>
-                  <span className="label-text font-medium">Reconciliação periódica <span className="font-normal text-base-content/50">(opcional)</span></span>
-                  <p className="mt-0.5 text-xs text-base-content/55">Roda um snapshot completo (sem filtro incremental) pra detectar exclusões que a carga incremental normal não veria — rede de segurança, ex: uma vez por semana.</p>
+                  <span className="label-text font-medium">Reconciliação periódica <span className="font-normal text-base-content/65">(opcional)</span></span>
+                  <p className="mt-0.5 text-xs text-base-content/65">Roda um snapshot completo (sem filtro incremental) pra detectar exclusões que a carga incremental normal não veria — rede de segurança, ex: uma vez por semana.</p>
                 </div>
                 <label className="form-control w-full">
                   <span className="label-text text-sm">Agendamento (cron UTC)</span>
@@ -206,10 +206,10 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
                       onChange={(e) => setSourceSqlReconciliation(e.target.value)}
                       spellCheck={false}
                     />
-                    <span className="label-text-alt mt-1 text-base-content/55">Obrigatória se o cron acima estiver preenchido — linhas ausentes aqui são marcadas como excluídas.</span>
+                    <span className="label-text-alt mt-1 text-base-content/65">Obrigatória se o cron acima estiver preenchido — linhas ausentes aqui são marcadas como excluídas.</span>
                   </label>
                 ) : (
-                  <p className="text-xs text-base-content/55">Reconciliação lê a tabela inteira, ignorando a coluna delta nessa rodada.</p>
+                  <p className="text-xs text-base-content/65">Reconciliação lê a tabela inteira, ignorando a coluna delta nessa rodada.</p>
                 )}
               </div>
             )}

@@ -137,7 +137,7 @@ export function StorageServerManager({ initialServers }: { initialServers: Serve
     <>
       {/* Header row */}
       <div className="flex items-center justify-between gap-3 px-5 py-4">
-        <span className="text-sm text-base-content/60">{servers.length} servidor{servers.length !== 1 ? "es" : ""}</span>
+        <span className="text-sm text-base-content/65">{servers.length} servidor{servers.length !== 1 ? "es" : ""}</span>
         <button className="btn btn-sm btn-primary gap-2" onClick={openCreate}>
           <Plus size={15} />Adicionar servidor
         </button>
@@ -145,7 +145,7 @@ export function StorageServerManager({ initialServers }: { initialServers: Serve
 
       {/* Table */}
       {servers.length === 0 ? (
-        <div className="flex flex-col items-center justify-center gap-3 py-16 text-base-content/50">
+        <div className="flex flex-col items-center justify-center gap-3 py-16 text-base-content/65">
           <Database size={36} />
           <p className="text-sm">Nenhum servidor cadastrado</p>
         </div>
@@ -153,7 +153,7 @@ export function StorageServerManager({ initialServers }: { initialServers: Serve
         <div className="overflow-x-auto">
           <table className="table table-sm">
             <thead>
-              <tr className="border-t border-base-300 text-xs uppercase tracking-wide text-base-content/45">
+              <tr className="border-t border-base-300 text-xs uppercase tracking-wide text-base-content/65">
                 <th>Nome</th>
                 <th>URL</th>
                 <th className="text-center">Datasets</th>
@@ -176,7 +176,7 @@ export function StorageServerManager({ initialServers }: { initialServers: Serve
                         </span>
                       </div>
                     </td>
-                    <td className="max-w-xs truncate font-mono text-xs text-base-content/60">{maskedUrl(s.url)}</td>
+                    <td className="max-w-xs truncate font-mono text-xs text-base-content/65">{maskedUrl(s.url)}</td>
                     <td className="text-center text-sm">{s._count.datasets}</td>
                     <td className="text-center">
                       {tr && "error" in tr
@@ -253,13 +253,13 @@ export function StorageServerManager({ initialServers }: { initialServers: Serve
                   <option value="sqlserver">SQL Server (MSSQL)</option>
                   <option value="postgres">PostgreSQL</option>
                 </select>
-                {editing && <label className="label"><span className="label-text-alt text-base-content/45">Provider não pode ser alterado após criação.</span></label>}
+                {editing && <label className="label"><span className="label-text-alt text-base-content/65">Provider não pode ser alterado após criação.</span></label>}
               </div>
 
               <div className="form-control">
                 <label className="label">
                   <span className="label-text font-medium">URL de conexão</span>
-                  <span className="label-text-alt text-base-content/50">{formProvider === "postgres" ? "PostgreSQL" : "SQL Server"}</span>
+                  <span className="label-text-alt text-base-content/65">{formProvider === "postgres" ? "PostgreSQL" : "SQL Server"}</span>
                 </label>
                 <textarea
                   className="textarea textarea-bordered textarea-sm w-full font-mono text-xs leading-relaxed"
@@ -272,7 +272,7 @@ export function StorageServerManager({ initialServers }: { initialServers: Serve
                   required
                 />
                 <label className="label">
-                  <span className="label-text-alt text-base-content/45">A URL é criptografada antes de ser salva.</span>
+                  <span className="label-text-alt text-base-content/65">A URL é criptografada antes de ser salva.</span>
                 </label>
               </div>
 

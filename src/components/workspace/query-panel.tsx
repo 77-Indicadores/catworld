@@ -104,7 +104,7 @@ export function QueryPanel({ datasets, projectId }: { datasets: WorkspaceDataset
         <button type="button" onClick={() => setShowBrowser((v) => !v)} aria-pressed={showBrowser} className="btn btn-ghost btn-sm gap-1.5"><Table2 size={13} />Tabelas</button>
         {result && (
           <>
-            <span className="text-xs text-base-content/45">{result.rows.length} linhas · {result.executionTimeMs} ms</span>
+            <span className="text-xs text-base-content/65">{result.rows.length} linhas · {result.executionTimeMs} ms</span>
             <div className="ml-auto flex items-center gap-1">
               <button onClick={() => download("csv")} className="btn btn-ghost btn-xs gap-1"><Download size={12} />CSV</button>
               <button onClick={() => download("xlsx")} className="btn btn-ghost btn-xs gap-1"><Download size={12} />XLSX</button>
@@ -146,7 +146,7 @@ export function QueryPanel({ datasets, projectId }: { datasets: WorkspaceDataset
       {/* Results */}
       <div className="min-h-0 flex-1 overflow-auto">
         {!result && !error && (
-          <div className="flex h-full items-center justify-center text-sm text-base-content/35 select-none">
+          <div className="flex h-full items-center justify-center text-sm text-base-content/65 select-none">
             <span className="text-center">
               Pressione Executar ou <kbd className="kbd kbd-xs mx-1">Ctrl+Enter</kbd> para rodar a consulta.
               <span className="mt-1 block text-xs">A linguagem é T-SQL. Use ORDER BY junto com TOP para o resultado vir sempre na mesma ordem.</span>

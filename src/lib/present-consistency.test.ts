@@ -39,3 +39,23 @@ describe("formatação de data/hora/contagem só pela camada de apresentação",
     expect([...LEGACY].filter((f) => !offenders.includes(f))).toEqual([]);
   });
 });
+
+/**
+ * Contraste (medido nos dois temas): texto informativo precisa de pelo menos 4,5:1. Com `text-base-content/N` isso
+ * exige N >= 65 no tema claro (60 dá 3,99:1). Abaixo disso só para decoração — e decoração não usa `text-`.
+ */
+describe("contraste mínimo do texto", () => {
+  it("nenhum text-base-content abaixo de /65", () => {
+    const offenders: string[] = [];
+    const walk = (dir: string): string[] =>
+      readdirSync(dir).flatMap((n) => {
+        const p = join(dir, n);
+        return statSync(p).isDirectory() ? walk(p) : /\.tsx$/.test(n) ? [p] : [];
+      });
+    for (const f of walk(root)) {
+      const m = readFileSync(f, "utf8").match(/text-base-content\/(\d+)/g) ?? [];
+      for (const cls of m) if (Number(cls.split("/")[1]) < 65) offenders.push(`${relative(root, f).replaceAll("\\", "/")}: ${cls}`);
+    }
+    expect(offenders).toEqual([]);
+  });
+});

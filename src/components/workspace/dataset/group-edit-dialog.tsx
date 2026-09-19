@@ -86,9 +86,9 @@ export function GroupEditDialog({ groupId, datasetId, connectionId, connectionNa
       <dialog ref={dialogRef} className="modal">
         <div className="modal-box max-w-md">
           <h3 className="font-bold text-base">Editar importação</h3>
-          <p className="mt-0.5 text-xs text-base-content/50">{subtitle}</p>
+          <p className="mt-0.5 text-xs text-base-content/65">{subtitle}</p>
 
-          <p className="mt-4 text-[11px] font-semibold uppercase tracking-wider text-base-content/40">Configurações</p>
+          <p className="mt-4 text-[11px] font-semibold uppercase tracking-wider text-base-content/65">Configurações</p>
           <div className="mt-2 space-y-3">
             <label className="form-control w-full">
               <span className="label-text font-medium">Modo</span>
@@ -108,17 +108,17 @@ export function GroupEditDialog({ groupId, datasetId, connectionId, connectionNa
               />
               {mode !== "live" && refreshCron.trim() && <CronPreview cron={refreshCron} onPick={setRefreshCron} />}
               {mode !== "live" && !refreshCron.trim() && (
-                <span className="label-text-alt mt-1 text-base-content/55">Vazio = sem agendamento automático</span>
+                <span className="label-text-alt mt-1 text-base-content/65">Vazio = sem agendamento automático</span>
               )}
-              {mode === "live" && <span className="label-text-alt mt-1 text-base-content/55">Fontes ao vivo sempre consultam a origem na hora.</span>}
+              {mode === "live" && <span className="label-text-alt mt-1 text-base-content/65">Fontes ao vivo sempre consultam a origem na hora.</span>}
             </label>
           </div>
 
-          <p className="mt-5 text-[11px] font-semibold uppercase tracking-wider text-base-content/40">Tabelas</p>
+          <p className="mt-5 text-[11px] font-semibold uppercase tracking-wider text-base-content/65">Tabelas</p>
           <div className="mt-2 max-h-48 overflow-y-auto divide-y divide-base-300 rounded-lg border border-base-300">
             {tables.map(t => (
               <div key={t.id} className="flex items-center gap-2 px-3 py-1.5">
-                <Table2 size={11} className="shrink-0 text-base-content/40" />
+                <Table2 size={11} className="shrink-0 text-base-content/65" />
                 <span className="flex-1 truncate text-xs font-mono">{t.name}</span>
                 <button
                   onClick={() => removeTable(t.source!.id)}
@@ -139,11 +139,11 @@ export function GroupEditDialog({ groupId, datasetId, connectionId, connectionNa
           ) : (
             <div className="mt-3">
               {loadingPicker ? (
-                <div className="flex items-center gap-2 py-2 text-xs text-base-content/50">
+                <div className="flex items-center gap-2 py-2 text-xs text-base-content/65">
                   <span className="loading loading-spinner loading-xs" />Carregando tabelas…
                 </div>
               ) : availableTables.length === 0 ? (
-                <p className="py-2 text-xs text-base-content/40">Nenhuma tabela ou view nova disponível neste schema.</p>
+                <p className="py-2 text-xs text-base-content/65">Nenhuma tabela ou view nova disponível neste schema.</p>
               ) : (
                 <>
                   {(() => {
@@ -157,17 +157,17 @@ export function GroupEditDialog({ groupId, datasetId, connectionId, connectionNa
                       <>
                         <div className="mb-2 flex items-center gap-2">
                           <label className="input input-xs flex flex-1 items-center gap-1.5 border border-base-300">
-                            <Search size={11} className="text-base-content/40" />
+                            <Search size={11} className="text-base-content/65" />
                             <input type="text" className="grow" placeholder="Pesquisar..." value={pickerSearch} onChange={e => setPickerSearch(e.target.value)} />
                           </label>
-                          <label className="flex cursor-pointer items-center gap-1 text-xs text-base-content/60 select-none whitespace-nowrap">
+                          <label className="flex cursor-pointer items-center gap-1 text-xs text-base-content/65 select-none whitespace-nowrap">
                             <input type="checkbox" className="checkbox checkbox-xs" checked={allSelected} onChange={toggleAll} disabled={filtered.length === 0} />
                             Todas
                           </label>
                         </div>
                         <div className="max-h-40 overflow-y-auto divide-y divide-base-300 rounded-lg border border-base-300">
                           {filtered.length === 0
-                            ? <p className="px-3 py-2 text-xs text-base-content/40">Sem resultados para &ldquo;{pickerSearch}&rdquo;.</p>
+                            ? <p className="px-3 py-2 text-xs text-base-content/65">Sem resultados para &ldquo;{pickerSearch}&rdquo;.</p>
                             : filtered.map(name => (
                               <label key={name} className="flex cursor-pointer items-center gap-2 px-3 py-1.5 hover:bg-base-200">
                                 <input type="checkbox" className="checkbox checkbox-xs" checked={selectedNew.includes(name)} onChange={() => toggleNew(name)} />

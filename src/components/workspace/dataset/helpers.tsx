@@ -50,7 +50,7 @@ export function fmtRows(n: string | null) {
 export function SectionHeader({ label, action }: { label: string; action?: React.ReactNode }) {
   return (
     <div className="flex items-center justify-between border-b border-base-300 px-5 py-2">
-      <span className="text-[10px] font-semibold uppercase tracking-widest text-base-content/40">{label}</span>
+      <span className="text-[10px] font-semibold uppercase tracking-widest text-base-content/65">{label}</span>
       {action}
     </div>
   );

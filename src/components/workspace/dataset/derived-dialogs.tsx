@@ -39,7 +39,7 @@ export function DerivedCreateDialog({ datasetId, onComplete }: { datasetId: stri
       <dialog ref={dialogRef} className="modal">
         <div className="modal-box max-w-lg">
           <h3 className="font-bold text-base">Nova tabela derivada</h3>
-          <p className="mt-0.5 text-xs text-base-content/50">Tabela materializada a partir de uma consulta SQL</p>
+          <p className="mt-0.5 text-xs text-base-content/65">Tabela materializada a partir de uma consulta SQL</p>
           <div className="mt-4 space-y-3">
             <label className="form-control w-full">
               <span className="label-text font-medium">Nome da tabela</span>
@@ -64,7 +64,7 @@ export function DerivedCreateDialog({ datasetId, onComplete }: { datasetId: stri
                 onChange={e => setRefreshCron(e.target.value)}
               />
               {refreshCron.trim() ? <CronPreview cron={refreshCron} onPick={setRefreshCron} /> : (
-                <span className="label-text-alt mt-1 text-base-content/55">Vazio = sem agendamento automático</span>
+                <span className="label-text-alt mt-1 text-base-content/65">Vazio = sem agendamento automático</span>
               )}
             </label>
             <label className="flex cursor-pointer items-center gap-2 text-sm select-none">
@@ -117,7 +117,7 @@ export function DerivedEditDialog({ dt, onComplete }: { dt: DerivedTable; onComp
       <dialog ref={dialogRef} className="modal">
         <div className="modal-box max-w-lg">
           <h3 className="font-bold text-base">Editar tabela derivada</h3>
-          <p className="mt-0.5 font-mono text-xs text-base-content/40">{dt.sqlName}</p>
+          <p className="mt-0.5 font-mono text-xs text-base-content/65">{dt.sqlName}</p>
           <div className="mt-4 space-y-3">
             <label className="form-control w-full">
               <span className="label-text font-medium">Nome</span>
@@ -141,7 +141,7 @@ export function DerivedEditDialog({ dt, onComplete }: { dt: DerivedTable; onComp
                 onChange={e => setRefreshCron(e.target.value)}
               />
               {refreshCron.trim() ? <CronPreview cron={refreshCron} onPick={setRefreshCron} /> : (
-                <span className="label-text-alt mt-1 text-base-content/55">Vazio = sem agendamento automático</span>
+                <span className="label-text-alt mt-1 text-base-content/65">Vazio = sem agendamento automático</span>
               )}
             </label>
           </div>

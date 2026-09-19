@@ -17,7 +17,7 @@ export default function KnowledgePage() {
     <div className="mx-auto max-w-4xl space-y-10">
       <div>
         <h1 className="text-2xl font-bold">Base de conhecimento</h1>
-        <p className="mt-1 text-base-content/55">Guias, referências e tutoriais para usar o Catworld.</p>
+        <p className="mt-1 text-base-content/65">Guias, referências e tutoriais para usar o Catworld.</p>
       </div>
 
       {categories.map((cat) => {
@@ -25,7 +25,7 @@ export default function KnowledgePage() {
         if (!catArticles.length) return null;
         return (
           <section key={cat.key}>
-            <h2 className="mb-3 text-sm font-semibold uppercase tracking-widest text-base-content/40">{cat.label}</h2>
+            <h2 className="mb-3 text-sm font-semibold uppercase tracking-widest text-base-content/65">{cat.label}</h2>
             <div className="grid gap-3 sm:grid-cols-2">
               {catArticles.map((a) => (
                 <Link
@@ -39,9 +39,9 @@ export default function KnowledgePage() {
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center justify-between gap-2">
                       <p className="font-medium leading-snug">{a.title}</p>
-                      <ChevronRight size={15} className="shrink-0 text-base-content/30 transition-transform group-hover:translate-x-0.5 group-hover:text-primary" />
+                      <ChevronRight size={15} className="shrink-0 text-base-content/65 transition-transform group-hover:translate-x-0.5 group-hover:text-primary" />
                     </div>
-                    <p className="mt-1 text-sm text-base-content/55 leading-snug">{a.description}</p>
+                    <p className="mt-1 text-sm text-base-content/65 leading-snug">{a.description}</p>
                   </div>
                 </Link>
               ))}

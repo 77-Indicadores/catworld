@@ -42,7 +42,7 @@ export function FailedActions({ count }: { count: number }) {
         <button
           onClick={dismissAll}
           disabled={!!busy}
-          className="btn btn-xs btn-ghost gap-1 text-base-content/45"
+          className="btn btn-xs btn-ghost gap-1 text-base-content/65"
         >
           {busy === "dismiss" ? <Loader2 size={11} className="animate-spin" /> : <X size={11} />}
           Descartar

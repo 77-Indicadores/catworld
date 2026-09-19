@@ -65,7 +65,7 @@ export function SourceRefreshCard({ job }: { job: SourceRefreshWithSource }) {
     <div className="flex flex-col gap-2 px-5 py-4 sm:flex-row sm:items-start sm:justify-between">
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
-          <DatabaseZap size={14} className="shrink-0 text-base-content/40" />
+          <DatabaseZap size={14} className="shrink-0 text-base-content/65" />
           <p className="truncate font-medium">{name}</p>
           <span className={`badge badge-sm shrink-0 gap-1 ${cfg.cls}`}>
             <Icon size={11} className={isRunning ? "animate-spin" : ""} />
@@ -73,7 +73,7 @@ export function SourceRefreshCard({ job }: { job: SourceRefreshWithSource }) {
           </span>
         </div>
 
-        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-base-content/55">
+        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-base-content/65">
           <span>{destination}</span>
           <span>·</span>
           <span>atualização de fonte</span>
@@ -121,7 +121,7 @@ export function SourceRefreshCard({ job }: { job: SourceRefreshWithSource }) {
       {datasetHref && (
         <a
           href={datasetHref}
-          className="btn btn-ghost btn-xs mt-1 shrink-0 text-base-content/50"
+          className="btn btn-ghost btn-xs mt-1 shrink-0 text-base-content/65"
           title="Abrir dataset"
         >
           <ExternalLink size={13} />

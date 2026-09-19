@@ -74,7 +74,7 @@ function renderSection(s: Section, i: number) {
     case "code":
       return (
         <div key={i}>
-          {s.label && <p className="mb-1.5 text-xs font-medium text-base-content/50">{s.label}</p>}
+          {s.label && <p className="mb-1.5 text-xs font-medium text-base-content/65">{s.label}</p>}
           <pre className="overflow-x-auto rounded-lg border border-base-300 bg-base-200 px-4 py-3 text-xs leading-relaxed text-base-content">
             <code>{s.value}</code>
           </pre>
@@ -88,7 +88,7 @@ function renderSection(s: Section, i: number) {
             <thead>
               <tr className="border-b border-base-300">
                 {s.headers.map((h) => (
-                  <th key={h} className="pb-2 pr-6 text-left text-xs font-semibold uppercase tracking-wide text-base-content/50">{h}</th>
+                  <th key={h} className="pb-2 pr-6 text-left text-xs font-semibold uppercase tracking-wide text-base-content/65">{h}</th>
                 ))}
               </tr>
             </thead>
@@ -121,7 +121,7 @@ export default async function ArticlePage({ params }: { params: Promise<{ slug: 
   return (
     <div className="mx-auto max-w-3xl">
       {/* Breadcrumb */}
-      <div className="mb-6 flex items-center gap-2 text-xs text-base-content/45">
+      <div className="mb-6 flex items-center gap-2 text-xs text-base-content/65">
         <Link href="/knowledge" className="hover:text-primary">Base de conhecimento</Link>
         <span>/</span>
         <span>{cat?.label}</span>
@@ -136,7 +136,7 @@ export default async function ArticlePage({ params }: { params: Promise<{ slug: 
             </span>
             <div>
               <h1 className="text-xl font-bold leading-snug">{article.title}</h1>
-              <p className="mt-1 text-sm text-base-content/55">{article.description}</p>
+              <p className="mt-1 text-sm text-base-content/65">{article.description}</p>
             </div>
           </div>
 
@@ -155,7 +155,7 @@ export default async function ArticlePage({ params }: { params: Promise<{ slug: 
         {/* Sidebar — outros artigos da mesma categoria */}
         {catArticles.length > 0 && (
           <aside className="space-y-2">
-            <p className="text-xs font-semibold uppercase tracking-widest text-base-content/40">{cat?.label}</p>
+            <p className="text-xs font-semibold uppercase tracking-widest text-base-content/65">{cat?.label}</p>
             {catArticles.map((a) => (
               <Link
                 key={a.slug}

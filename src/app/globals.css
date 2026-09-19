@@ -99,3 +99,45 @@ body {
     linear-gradient(to bottom, color-mix(in oklab, var(--color-base-content) 4%, transparent) 1px, transparent 1px);
   background-size: 24px 24px;
 }
+
+/*
+ * .table-stack — no celular a tabela vira uma lista de cartões (um por linha), com o rótulo da coluna (data-label) ao
+ * lado do valor. Assim as AÇÕES (última coluna) ficam à vista em vez de escondidas atrás de rolagem horizontal.
+ */
+@media (max-width: 767px) {
+  .table-stack thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+  }
+  .table-stack tr {
+    display: block;
+    border-bottom: 1px solid var(--color-base-300);
+    padding: 0.5rem 0;
+  }
+  .table-stack td {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    border: 0;
+    padding: 0.25rem 0.75rem;
+    text-align: right;
+  }
+  .table-stack td::before {
+    content: attr(data-label);
+    flex-shrink: 0;
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-align: left;
+    color: color-mix(in oklab, var(--color-base-content) 70%, transparent);
+  }
+  .table-stack td[data-label=""]::before {
+    content: none;
+  }
+  .table-stack td[data-label=""] {
+    justify-content: flex-end;
+  }
+}

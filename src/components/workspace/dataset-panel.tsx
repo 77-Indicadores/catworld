@@ -21,7 +21,7 @@ function StorageServerBadge({ dataset, storageServers }: { dataset: Dataset; sto
     ? storageServers.find(s => s.id === dataset.storageServerId)
     : storageServers.find(s => s.isDefault);
   return (
-    <span className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-base-content/45" title="Servidor de armazenamento">
+    <span className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-base-content/65" title="Servidor de armazenamento">
       <Server size={10} className="shrink-0" />
       {current?.name ?? "Servidor padrão"}
     </span>
@@ -52,7 +52,7 @@ export function DatasetPanel({ dataset, projectSlug, publicOrigin, storageServer
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <h2 className="truncate font-semibold">{dataset.name}</h2>
-            {dataset.description && <p className="mt-0.5 truncate text-xs text-base-content/45">{dataset.description}</p>}
+            {dataset.description && <p className="mt-0.5 truncate text-xs text-base-content/65">{dataset.description}</p>}
             <div className="mt-1.5 flex flex-wrap items-center gap-1">
               <CopyableId value={dataset.id} label="Dataset ID" />
               {storageServers.length > 0 && (
@@ -74,7 +74,7 @@ export function DatasetPanel({ dataset, projectSlug, publicOrigin, storageServer
       />
 
       {sourceGroups.length === 0 ? (
-        <div className="flex items-center gap-3 px-5 py-4 text-xs text-base-content/40">
+        <div className="flex items-center gap-3 px-5 py-4 text-xs text-base-content/65">
           <DatabaseZap size={14} />
           <span>Nenhuma fonte conectada.</span>
         </div>
@@ -95,7 +95,7 @@ export function DatasetPanel({ dataset, projectSlug, publicOrigin, storageServer
       />
 
       {dataset.derivedTables.length === 0 ? (
-        <div className="flex items-center gap-3 px-5 py-4 text-xs text-base-content/40">
+        <div className="flex items-center gap-3 px-5 py-4 text-xs text-base-content/65">
           <Code2 size={14} />
           <span>Nenhuma tabela derivada. Crie uma a partir de uma consulta SQL.</span>
         </div>
@@ -111,7 +111,7 @@ export function DatasetPanel({ dataset, projectSlug, publicOrigin, storageServer
       <SectionHeader label={"Tabelas" + (uploadTables.length ? ` (${uploadTables.length})` : "")} />
 
       {uploadTables.length === 0 ? (
-        <div className="flex items-center gap-3 px-5 py-4 text-xs text-base-content/40">
+        <div className="flex items-center gap-3 px-5 py-4 text-xs text-base-content/65">
           <Database size={14} />
           <span>Nenhuma tabela de upload. Faça um upload abaixo.</span>
         </div>
@@ -123,7 +123,7 @@ export function DatasetPanel({ dataset, projectSlug, publicOrigin, storageServer
                 <Database size={13} className="shrink-0 text-primary" />
                 <span className="flex-1 truncate font-medium">{t.name}</span>
                 {t.lastDataAt && (
-                  <span className="shrink-0 text-base-content/60"><Time iso={t.lastDataAt} /></span>
+                  <span className="shrink-0 text-base-content/65"><Time iso={t.lastDataAt} /></span>
                 )}
               </button>
               <button onClick={() => deleteTable(t.id, t.name)} className="btn btn-ghost btn-xs text-error/50 hover:text-error" title="Excluir tabela">
@@ -150,7 +150,7 @@ export function DatasetPanel({ dataset, projectSlug, publicOrigin, storageServer
           <UploadFlow datasetId={dataset.id} onComplete={() => { onChanged(); setUploadOpen(false); }} />
         </div>
       ) : (
-        <button onClick={() => setUploadOpen(true)} className="flex items-center gap-3 px-5 py-4 text-left text-xs text-base-content/40 hover:bg-base-200 hover:text-base-content/60">
+        <button onClick={() => setUploadOpen(true)} className="flex items-center gap-3 px-5 py-4 text-left text-xs text-base-content/65 hover:bg-base-200 hover:text-base-content/65">
           <UploadCloud size={14} />
           <span>Arraste um CSV, XLSX ou XLS aqui, ou clique para selecionar</span>
         </button>

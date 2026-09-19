@@ -71,7 +71,7 @@ function JobRow({ item, position }: { item: QueueItem; position?: number }) {
         <div className="mt-0.5 w-6 shrink-0 text-center">
           {isRunning && <Loader2 size={14} className="animate-spin text-info" />}
           {isFailed  && <CircleX size={14} className="text-error" />}
-          {isQueued  && <span className="text-[11px] font-mono text-base-content/35">{position}°</span>}
+          {isQueued  && <span className="text-[11px] font-mono text-base-content/65">{position}°</span>}
         </div>
 
         <div className="min-w-0 flex-1">
@@ -82,7 +82,7 @@ function JobRow({ item, position }: { item: QueueItem; position?: number }) {
             )}
           </div>
 
-          <div className="mt-0.5 flex flex-wrap gap-x-2 gap-y-0 text-[11px] text-base-content/45">
+          <div className="mt-0.5 flex flex-wrap gap-x-2 gap-y-0 text-[11px] text-base-content/65">
             {item.subtitle && <span className="truncate">{item.subtitle}</span>}
             {item.meta && <><span>·</span><span>{item.meta}</span></>}
             <span>·</span>
@@ -98,7 +98,7 @@ function JobRow({ item, position }: { item: QueueItem; position?: number }) {
           {isRunning && item.progress !== null && item.progress > 0 && (
             <div className="mt-1.5 flex items-center gap-2">
               <progress className="progress progress-info h-1 w-28" value={item.progress} max={100} />
-              <span className="text-[11px] text-base-content/40">{item.progress}%</span>
+              <span className="text-[11px] text-base-content/65">{item.progress}%</span>
             </div>
           )}
 
@@ -115,7 +115,7 @@ function JobRow({ item, position }: { item: QueueItem; position?: number }) {
             <button
               onClick={cancel}
               disabled={!!busy}
-              className="btn btn-ghost btn-xs text-base-content/30 hover:text-error"
+              className="btn btn-ghost btn-xs text-base-content/65 hover:text-error"
               title="Cancelar"
             >
               {busy === "cancel" ? <Loader2 size={12} className="animate-spin" /> : <X size={12} />}
@@ -125,7 +125,7 @@ function JobRow({ item, position }: { item: QueueItem; position?: number }) {
             <button
               onClick={retry}
               disabled={!!busy}
-              className="btn btn-ghost btn-xs text-base-content/30 hover:text-primary"
+              className="btn btn-ghost btn-xs text-base-content/65 hover:text-primary"
               title="Tentar novamente"
             >
               {busy === "retry" ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
@@ -175,7 +175,7 @@ export function QueueLane({
             <span className="badge badge-error badge-sm">{failed.length}</span>
           )}
           {total === 0 && (
-            <span className="text-xs text-base-content/50">vazia</span>
+            <span className="text-xs text-base-content/65">vazia</span>
           )}
         </div>
       </div>
@@ -186,7 +186,7 @@ export function QueueLane({
         {queued.map((item, i) => <JobRow key={item.jobId} item={item} position={i + 1} />)}
         {failed.map(item => <JobRow key={item.jobId} item={item} />)}
         {total === 0 && (
-          <div className="flex items-center justify-center py-10 text-xs text-base-content/25">
+          <div className="flex items-center justify-center py-10 text-xs text-base-content/65">
             Sem jobs ativos
           </div>
         )}
@@ -197,7 +197,7 @@ export function QueueLane({
         <div className="border-t border-base-300 px-4 py-2">
           <a
             href={`/uploads/history?type=${type}`}
-            className="flex items-center gap-1.5 text-[11px] text-base-content/35 hover:text-base-content/60"
+            className="flex items-center gap-1.5 text-[11px] text-base-content/65 hover:text-base-content/65"
           >
             <Archive size={11} />
             {formatInt(completedCount)} concluídos

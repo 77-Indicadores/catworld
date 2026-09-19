@@ -9,7 +9,7 @@ type Connection = { id: string; name: string; provider: string; environment: str
 type TestState = null | { ok: true; latencyMs: number; database?: string } | { ok: false; message: string };
 
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
-  return <label className="form-control w-full"><span className="label-text font-medium">{label}</span><div className="mt-1">{children}</div>{hint && <span className="label-text-alt mt-1 text-base-content/55">{hint}</span>}</label>;
+  return <label className="form-control w-full"><span className="label-text font-medium">{label}</span><div className="mt-1">{children}</div>{hint && <span className="label-text-alt mt-1 text-base-content/65">{hint}</span>}</label>;
 }
 
 function providerLabel(provider: string) {
@@ -147,7 +147,7 @@ export default function ConnectionsPage() {
                         <h2 className="font-semibold">{c.name}</h2>
                         <StatusBadge status={c.lastStatus === "healthy" ? "healthy" : c.lastStatus ? "warning" : "inactive"} />
                       </div>
-                      <p className="text-xs text-base-content/45">{c.environment} · {providerLabel(c.provider)}{c.sshTunnelEnabled ? " · Túnel SSH" : ""}</p>
+                      <p className="text-xs text-base-content/65">{c.environment} · {providerLabel(c.provider)}{c.sshTunnelEnabled ? " · Túnel SSH" : ""}</p>
                     </div>
                   </div>
                   <div className="flex gap-1">
@@ -178,7 +178,7 @@ export default function ConnectionsPage() {
             <h3 className="text-lg font-bold">{editing ? "Editar conexão" : "Nova conexão"}</h3>
             {editing && <span className="badge badge-ghost badge-sm">{providerLabel(editing.provider)}</span>}
           </div>
-          <p className="mt-1 text-sm text-base-content/60">Use um usuário com permissão de leitura nas tabelas que serão consultadas.</p>
+          <p className="mt-1 text-sm text-base-content/65">Use um usuário com permissão de leitura nas tabelas que serão consultadas.</p>
           <div className="mt-5 space-y-5">
             <section>
               <h4 className="text-sm font-semibold">Identificação</h4>
@@ -302,7 +302,7 @@ export default function ConnectionsPage() {
                 )}
               </div>
               {!formTest && !formTesting && (
-                <p className="mt-1.5 text-xs text-base-content/45">Teste a conexão antes de salvar.</p>
+                <p className="mt-1.5 text-xs text-base-content/65">Teste a conexão antes de salvar.</p>
               )}
             </section>
           </div>

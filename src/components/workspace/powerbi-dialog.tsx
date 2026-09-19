@@ -11,13 +11,13 @@ function CopyField({ label, value, mono = true }: { label: string; value: string
   }
   return (
     <div>
-      <p className="mb-1 text-xs font-medium text-base-content/60">{label}</p>
+      <p className="mb-1 text-xs font-medium text-base-content/65">{label}</p>
       <button
         onClick={copy}
         className={`flex w-full items-center justify-between gap-3 rounded-lg border border-base-300 bg-base-200 px-3 py-2 text-left hover:bg-base-300 ${mono ? "font-mono text-xs" : "text-xs"}`}
       >
         <span className="truncate">{value}</span>
-        {copied ? <Check size={13} className="shrink-0 text-success" /> : <Copy size={13} className="shrink-0 text-base-content/40" />}
+        {copied ? <Check size={13} className="shrink-0 text-success" /> : <Copy size={13} className="shrink-0 text-base-content/65" />}
       </button>
     </div>
   );
@@ -53,7 +53,7 @@ export function PowerBIDialog({ projectSlug, datasetSlug, datasetName, publicOri
               </span>
               <div className="min-w-0">
                 <h2 className="font-semibold">Conectar ao Power BI</h2>
-                <p className="truncate text-sm text-base-content/55">{datasetName}</p>
+                <p className="truncate text-sm text-base-content/65">{datasetName}</p>
               </div>
               <button onClick={() => setOpen(false)} className="btn btn-ghost btn-sm btn-square ml-auto shrink-0">
                 <X size={16} />
@@ -64,13 +64,13 @@ export function PowerBIDialog({ projectSlug, datasetSlug, datasetName, publicOri
             <div className="flex border-b border-base-300">
               <button
                 onClick={() => setTab("desktop")}
-                className={`flex flex-1 items-center justify-center gap-2 px-4 py-3 text-sm font-medium transition-colors ${tab === "desktop" ? "border-b-2 border-primary text-primary" : "text-base-content/55 hover:text-base-content"}`}
+                className={`flex flex-1 items-center justify-center gap-2 px-4 py-3 text-sm font-medium transition-colors ${tab === "desktop" ? "border-b-2 border-primary text-primary" : "text-base-content/65 hover:text-base-content"}`}
               >
                 <Monitor size={14} /> Power BI Desktop
               </button>
               <button
                 onClick={() => setTab("service")}
-                className={`flex flex-1 items-center justify-center gap-2 px-4 py-3 text-sm font-medium transition-colors ${tab === "service" ? "border-b-2 border-primary text-primary" : "text-base-content/55 hover:text-base-content"}`}
+                className={`flex flex-1 items-center justify-center gap-2 px-4 py-3 text-sm font-medium transition-colors ${tab === "service" ? "border-b-2 border-primary text-primary" : "text-base-content/65 hover:text-base-content"}`}
               >
                 <Cloud size={14} /> Power BI Service
               </button>

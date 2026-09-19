@@ -29,7 +29,7 @@ export function SchemaBrowser({ datasets, onInsert }: { datasets: Pick<Workspace
     <nav aria-label="Tabelas e colunas" className="flex h-full min-h-0 flex-col text-xs">
       <label className="relative m-2 block">
         <span className="sr-only">Buscar tabela ou coluna</span>
-        <Search size={12} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-base-content/50" />
+        <Search size={12} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-base-content/65" />
         <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Buscar tabela ou coluna…" className="input input-bordered input-xs w-full pl-7" />
       </label>
       <div className="min-h-0 flex-1 overflow-y-auto px-1 pb-2">
@@ -46,7 +46,7 @@ export function SchemaBrowser({ datasets, onInsert }: { datasets: Pick<Workspace
                       <ChevronRight size={11} className={`transition-transform ${isOpen ? "rotate-90" : ""}`} />
                     </button>
                     <button type="button" onClick={() => onInsert(qualifiedSqlName(d.schemaName, t.sqlName))} title={`Inserir ${qualifiedSqlName(d.schemaName, t.sqlName)}`} className="flex flex-1 items-center gap-1.5 overflow-hidden py-1 pr-2 text-left">
-                      <Table2 size={11} className="shrink-0 text-base-content/60" />
+                      <Table2 size={11} className="shrink-0 text-base-content/65" />
                       <span className="truncate font-mono">{t.sqlName}</span>
                     </button>
                   </div>

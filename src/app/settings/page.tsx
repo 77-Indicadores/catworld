@@ -108,7 +108,7 @@ export default function SettingsPage() {
 
       {groups.map((group) => (
         <section key={group.title}>
-          <h2 className="mb-3 text-xs font-semibold uppercase tracking-[0.18em] text-base-content/40">
+          <h2 className="mb-3 text-xs font-semibold uppercase tracking-[0.18em] text-base-content/65">
             {group.title}
           </h2>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -118,12 +118,12 @@ export default function SettingsPage() {
                 href={item.href}
                 className="group flex items-start gap-4 rounded-2xl border border-base-300 bg-base-100 p-5 transition-all hover:border-primary/40 hover:bg-base-200 hover:shadow-sm"
               >
-                <span className="mt-0.5 grid size-10 shrink-0 place-items-center rounded-xl bg-base-200 text-base-content/60 transition-colors group-hover:bg-primary/10 group-hover:text-primary">
+                <span className="mt-0.5 grid size-10 shrink-0 place-items-center rounded-xl bg-base-200 text-base-content/65 transition-colors group-hover:bg-primary/10 group-hover:text-primary">
                   <item.icon size={19} />
                 </span>
                 <span className="min-w-0">
                   <span className="block font-medium leading-snug">{item.label}</span>
-                  <span className="mt-0.5 block text-sm text-base-content/55 leading-snug">
+                  <span className="mt-0.5 block text-sm text-base-content/65 leading-snug">
                     {item.description}
                   </span>
                 </span>

@@ -31,7 +31,7 @@ function Stage({ icon, label, count, color, width, isLast }: StageProps) {
         <span className="text-xl font-bold">{formatInt(count)}</span>
       </div>
       {!isLast && (
-        <div className="hidden text-base-content/30 sm:block">▶</div>
+        <div className="hidden text-base-content/65 sm:block">▶</div>
       )}
     </div>
   );
@@ -45,7 +45,7 @@ export function UploadFunnel({ counts }: Props) {
 
   return (
     <div className="rounded-box border border-base-300 bg-base-100 p-5 shadow-sm">
-      <h2 className="mb-4 text-sm font-semibold uppercase tracking-wide text-base-content/50">Funil de processamento</h2>
+      <h2 className="mb-4 text-sm font-semibold uppercase tracking-wide text-base-content/65">Funil de processamento</h2>
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
         <Stage
           icon={<Clock3 size={16} />}
@@ -54,7 +54,7 @@ export function UploadFunnel({ counts }: Props) {
           color="bg-base-200 text-base-content"
           width={pct(counts.waiting)}
         />
-        <div className="hidden text-base-content/30 sm:block">▶</div>
+        <div className="hidden text-base-content/65 sm:block">▶</div>
         <Stage
           icon={<Loader2 size={16} className="animate-spin" />}
           label="Em andamento"
@@ -62,7 +62,7 @@ export function UploadFunnel({ counts }: Props) {
           color="bg-info/15 text-info"
           width={pct(counts.active)}
         />
-        <div className="hidden text-base-content/30 sm:block">▶</div>
+        <div className="hidden text-base-content/65 sm:block">▶</div>
         <Stage
           icon={<CheckCircle2 size={16} />}
           label="Concluído"
@@ -73,7 +73,7 @@ export function UploadFunnel({ counts }: Props) {
         />
         {counts.failed > 0 && (
           <>
-            <div className="hidden text-base-content/30 sm:block">▶</div>
+            <div className="hidden text-base-content/65 sm:block">▶</div>
             <Stage
               icon={<CircleX size={16} />}
               label="Falhou"

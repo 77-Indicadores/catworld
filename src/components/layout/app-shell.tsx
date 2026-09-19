@@ -76,12 +76,12 @@ export function AppShell({ children, user, signOutAction }: { children: React.Re
         <div className="flex h-16 items-center justify-between border-b border-base-300 px-3 xl:px-5">
           <Link href="/dashboard" className="flex items-center gap-3">
             <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-primary text-primary-content shadow-sm"><Database size={19} /></span>
-            <span className="xl:block hidden"><strong className="block leading-none">Catworld</strong><small className="text-[10px] uppercase tracking-[0.2em] text-base-content/45">data lake</small></span>
+            <span className="xl:block hidden"><strong className="block leading-none">Catworld</strong><small className="text-[10px] uppercase tracking-[0.2em] text-base-content/65">data lake</small></span>
           </Link>
           <button aria-label="Fechar menu" className="btn btn-ghost btn-sm btn-square lg:hidden" onClick={() => setSidebarOpen(false)}><X size={18} /></button>
         </div>
         <nav className="flex-1 overflow-y-auto p-2 xl:p-3">
-          <p className="hidden px-3 pb-2 pt-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-base-content/40 xl:block">Workspace</p>
+          <p className="hidden px-3 pb-2 pt-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-base-content/65 xl:block">Workspace</p>
           <ul className="menu w-full gap-1 p-0">
             {visibleNav.map((item) => {
               const settingsSubpaths = ["/settings", "/storage-servers", "/users", "/tokens", "/database-users"];
@@ -118,10 +118,10 @@ export function AppShell({ children, user, signOutAction }: { children: React.Re
                 ? <CheckCircle2 size={15} className="shrink-0 text-success" />
                 : storageStatus?.status === "error"
                 ? <CircleX size={15} className="shrink-0 text-error" />
-                : <CloudCog size={15} className="shrink-0 text-base-content/40" />}
+                : <CloudCog size={15} className="shrink-0 text-base-content/65" />}
               <span className="hidden xl:block min-w-0">
                 <span className="block truncate text-xs font-medium">{storageStatus?.name ?? "SQL Server"}</span>
-                <p className="text-[11px] text-base-content/50">
+                <p className="text-[11px] text-base-content/65">
                   {storageStatus?.status === "healthy" && storageStatus.latencyMs ? `${storageStatus.latencyMs}ms · conectado` : storageStatus?.status === "error" ? "erro de conexão" : "não testado"}
                 </p>
               </span>
@@ -166,7 +166,7 @@ export function AppShell({ children, user, signOutAction }: { children: React.Re
           <main className="overflow-hidden">{children}</main>
         ) : (
           <main className="p-4 sm:p-6 lg:p-8">
-            <nav aria-label="Você está em" className="mb-5 flex items-center gap-1 text-xs text-base-content/60">
+            <nav aria-label="Você está em" className="mb-5 flex items-center gap-1 text-xs text-base-content/65">
               <span>Catworld</span>
               {crumbs.map((crumb, i) => <span className="flex items-center gap-1" key={`${i}-${crumb}`}><ChevronRight size={12} /><span>{crumb}</span></span>)}
             </nav>

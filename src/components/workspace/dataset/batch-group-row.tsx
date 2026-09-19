@@ -65,7 +65,7 @@ export function BatchGroupRow({ groupId, datasetId, sources, tables, onSelectTab
   return (
     <div className={"px-5 py-3 " + (allActive ? "" : "opacity-50")}>
       <div className="flex items-center gap-3">
-        <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-base-200 text-base-content/50">
+        <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-base-200 text-base-content/65">
           {rep.mode === "live" ? <Cable size={13} /> : <DatabaseZap size={13} />}
         </span>
         <div className="min-w-0 flex-1">
@@ -75,7 +75,7 @@ export function BatchGroupRow({ groupId, datasetId, sources, tables, onSelectTab
             </span>
             <StatusBadge status={groupStatus} label={groupLabel} />
           </div>
-          <p className="text-xs text-base-content/40">
+          <p className="text-xs text-base-content/65">
             {tables.length} tabela{tables.length !== 1 ? "s" : ""}
             {" · " + (rep.mode === "extract" ? refreshText(rep.refreshCron) : "Ao vivo")}
             {rep.nextRefreshAt && rep.mode === "extract" && rep.refreshCron && (
@@ -97,11 +97,11 @@ export function BatchGroupRow({ groupId, datasetId, sources, tables, onSelectTab
               onClick={() => onSelectTable(t.id)}
               className="flex flex-1 items-center gap-2 px-3 py-1.5 text-left text-xs"
             >
-              <Table2 size={11} className="shrink-0 text-base-content/40" />
+              <Table2 size={11} className="shrink-0 text-base-content/65" />
               <span className="flex-1 truncate font-mono">{t.name}</span>
               {t.source && <StatusBadge status={sourceBadge(t.source).status} label={sourceBadge(t.source).label} />}
               {t.lastDataAt && (
-                <span className="shrink-0 text-base-content/60"><Time iso={t.lastDataAt} /></span>
+                <span className="shrink-0 text-base-content/65"><Time iso={t.lastDataAt} /></span>
               )}
             </button>
             <button
@@ -132,7 +132,7 @@ export function BatchGroupRow({ groupId, datasetId, sources, tables, onSelectTab
         <button onClick={toggleGroup} className="btn btn-ghost btn-xs gap-1">
           {allActive
             ? <ToggleRight size={13} className="text-success" />
-            : <ToggleLeft size={13} className="text-base-content/30" />}
+            : <ToggleLeft size={13} className="text-base-content/65" />}
           {allActive ? "Sync ativo" : "Sync pausado"}
         </button>
         {rep.mode === "extract" && (

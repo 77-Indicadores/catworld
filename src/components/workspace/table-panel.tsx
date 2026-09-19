@@ -34,7 +34,7 @@ function DeleteTableDialog({ id, name, onDeleted }: { id: string; name: string; 
         <div className="modal-box">
           <div className="rounded-xl border border-error/30 bg-error/5 p-4">
             <p className="flex items-center gap-2 text-sm font-semibold text-error"><TriangleAlert size={15} />Zona de perigo</p>
-            <p className="mt-1 text-xs text-base-content/60">Apaga a tabela e seus dados. Isso não pode ser desfeito.</p>
+            <p className="mt-1 text-xs text-base-content/65">Apaga a tabela e seus dados. Isso não pode ser desfeito.</p>
             <label className="form-control mt-3 w-full"><span className="label-text text-xs">Digite <span className="font-mono font-semibold">{name}</span> para confirmar</span><input value={confirmName} onChange={(e) => setConfirmName(e.target.value)} className="input input-sm mt-1 w-full" /></label>
             <button onClick={destroy} disabled={confirmName !== name || deleting} className="btn btn-error btn-sm mt-3 w-full">{deleting ? "Excluindo..." : "Excluir definitivamente"}</button>
           </div>
@@ -118,7 +118,7 @@ export function TablePanel({ datasetId, table, onChanged, compact }: { datasetId
           {loading ? (
             <div className="flex h-40 items-center justify-center"><span className="loading loading-spinner" /></div>
           ) : rows.length === 0 ? (
-            <div className="flex h-40 items-center justify-center text-sm text-base-content/40">Nenhuma linha para exibir.</div>
+            <div className="flex h-40 items-center justify-center text-sm text-base-content/65">Nenhuma linha para exibir.</div>
           ) : (
             <ResultGrid
               columns={table.columns.map(c => c.sqlName)}
@@ -149,8 +149,8 @@ export function TablePanel({ datasetId, table, onChanged, compact }: { datasetId
       <div className="flex items-start justify-between gap-3 border-b border-base-300 p-5">
         <div>
           <h2 className="font-semibold">{table.name}</h2>
-          <p className="text-xs text-base-content/45">{table.source?.mode === "live" ? "Dados consultados na origem" : `${formatInt(table.rowCount)} linhas`} · {table.columns.length} colunas{table.lastDataAt ? <> · atualizado <Time iso={table.lastDataAt} /></> : null}</p>
-          {table.source && <div className="mt-3 rounded-box border border-base-300 bg-base-200/40 p-3 text-xs"><div className="flex flex-wrap items-center gap-2"><span className="badge badge-outline gap-1">{table.source.mode === "live" ? <Cable size={12} /> : <DatabaseZap size={12} />}{sourceMode(table.source)}</span><StatusBadge status={sourceFreshness(table.source).tone} label={sourceFreshness(table.source).label} /><span className="text-base-content/60">{table.source.connection.name}</span></div><div className="mt-2 text-base-content/60">Origem: {sourceOriginLabel(table.source)}{table.source.nextRefreshAt ? <> · próxima <Time iso={table.source.nextRefreshAt} /></> : null}</div></div>}
+          <p className="text-xs text-base-content/65">{table.source?.mode === "live" ? "Dados consultados na origem" : `${formatInt(table.rowCount)} linhas`} · {table.columns.length} colunas{table.lastDataAt ? <> · atualizado <Time iso={table.lastDataAt} /></> : null}</p>
+          {table.source && <div className="mt-3 rounded-box border border-base-300 bg-base-200/40 p-3 text-xs"><div className="flex flex-wrap items-center gap-2"><span className="badge badge-outline gap-1">{table.source.mode === "live" ? <Cable size={12} /> : <DatabaseZap size={12} />}{sourceMode(table.source)}</span><StatusBadge status={sourceFreshness(table.source).tone} label={sourceFreshness(table.source).label} /><span className="text-base-content/65">{table.source.connection.name}</span></div><div className="mt-2 text-base-content/65">Origem: {sourceOriginLabel(table.source)}{table.source.nextRefreshAt ? <> · próxima <Time iso={table.source.nextRefreshAt} /></> : null}</div></div>}
         </div>
         <div className="flex flex-wrap justify-end gap-2"><ExportMenu tableId={table.id} tab={tab} />{table.source?.mode === "extract" ? <button onClick={refreshSource} disabled={refreshing} className="btn btn-outline btn-sm"><RefreshCw size={14} className={refreshing ? "animate-spin" : ""} />{refreshing ? "Enfileirando..." : "Atualizar agora"}</button> : <UpdateDataDialog datasetId={datasetId} table={table} onComplete={onChanged} />}<DeleteTableDialog id={table.id} name={table.name} onDeleted={onChanged} /></div>
       </div>
@@ -160,7 +160,7 @@ export function TablePanel({ datasetId, table, onChanged, compact }: { datasetId
         <button className={`tab gap-2 ${tab === "data" ? "tab-active" : ""}`} onClick={() => setTab("data")}><Rows3 size={14} />Dados</button>
         <button className={`tab gap-2 ${tab === "columns" ? "tab-active" : ""}`} onClick={() => setTab("columns")}><Columns3 size={14} />Colunas</button>
       </div>
-      {tab === "data" ? <div className="overflow-x-auto">{loading ? <div className="p-10 text-center"><span className="loading loading-spinner" /></div> : rows.length === 0 ? <div className="p-10 text-center text-sm text-base-content/50">Nenhuma linha para exibir.</div> : <table className="table table-zebra data-grid"><thead><tr>{table.columns.map((c) => <th key={c.id}>{c.sqlName}</th>)}</tr></thead><tbody>{rows.map((row, i) => <tr key={i}>{table.columns.map((c) => <td className="whitespace-nowrap" key={c.id}>{fmtCellStr(row[c.sqlName])}</td>)}</tr>)}</tbody></table>}</div> : <div className="overflow-x-auto"><table className="table"><thead><tr><th>Coluna</th><th>Original</th><th>Tipo</th><th>Nulável</th></tr></thead><tbody>{table.columns.map((c) => <tr key={c.id}><td className="font-mono text-xs">{c.sqlName}</td><td>{c.originalName}</td><td>{c.sqlType}</td><td>{c.nullable ? "Sim" : "Não"}</td></tr>)}</tbody></table></div>}
+      {tab === "data" ? <div className="overflow-x-auto">{loading ? <div className="p-10 text-center"><span className="loading loading-spinner" /></div> : rows.length === 0 ? <div className="p-10 text-center text-sm text-base-content/65">Nenhuma linha para exibir.</div> : <table className="table table-zebra data-grid"><thead><tr>{table.columns.map((c) => <th key={c.id}>{c.sqlName}</th>)}</tr></thead><tbody>{rows.map((row, i) => <tr key={i}>{table.columns.map((c) => <td className="whitespace-nowrap" key={c.id}>{fmtCellStr(row[c.sqlName])}</td>)}</tr>)}</tbody></table>}</div> : <div className="overflow-x-auto"><table className="table"><thead><tr><th>Coluna</th><th>Original</th><th>Tipo</th><th>Nulável</th></tr></thead><tbody>{table.columns.map((c) => <tr key={c.id}><td className="font-mono text-xs">{c.sqlName}</td><td>{c.originalName}</td><td>{c.sqlType}</td><td>{c.nullable ? "Sim" : "Não"}</td></tr>)}</tbody></table></div>}
     </div>
   );
 }

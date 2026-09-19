@@ -140,14 +140,14 @@ export default async function AuditPage({ searchParams }: { searchParams: Promis
                   ) : e.tokenId ? (
                     <Link className="link font-mono text-xs" href={`/audit?tokenId=${e.tokenId}`}>token …{e.tokenId.slice(0, 8)}</Link>
                   ) : (
-                    <span className="text-base-content/60">Sistema</span>
+                    <span className="text-base-content/65">Sistema</span>
                   );
                   return (
                     <tr key={e.id}>
                       <td className="whitespace-nowrap text-xs"><Time iso={e.createdAt.toISOString()} /></td>
                       <td>
                         <div className="text-sm">{AUDIT_EVENT_LABELS[e.eventType] ?? e.eventType}</div>
-                        <div className="font-mono text-[11px] text-base-content/60">{e.eventType}</div>
+                        <div className="font-mono text-[11px] text-base-content/65">{e.eventType}</div>
                       </td>
                       <td>{who}</td>
                       <td className="max-w-64 break-all font-mono text-xs">{e.resourceId ?? e.resourceType ?? "—"}</td>
