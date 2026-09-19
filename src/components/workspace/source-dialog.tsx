@@ -237,7 +237,7 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
                               {tables.length === 0
                                 ? <div className="p-4 text-sm text-base-content/50">Nenhuma tabela ou view encontrada neste schema.</div>
                                 : filtered.length === 0
-                                  ? <div className="p-4 text-sm text-base-content/50">Nenhum resultado para "{tableSearch}".</div>
+                                  ? <div className="p-4 text-sm text-base-content/50">Nenhum resultado para &ldquo;{tableSearch}&rdquo;.</div>
                                   : filtered.map(t => (
                                     <label key={t.schema + "." + t.table} className="flex cursor-pointer items-center gap-3 border-b border-base-300 px-4 py-2 text-sm last:border-b-0 hover:bg-base-200">
                                       <input type="checkbox" className="checkbox checkbox-sm" checked={selectedTables.includes(t.table)} onChange={() => toggleTable(t.table)} />

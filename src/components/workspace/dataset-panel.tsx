@@ -402,7 +402,7 @@ function GroupEditDialog({ groupId, datasetId, connectionId, connectionName, sou
                         </div>
                         <div className="max-h-40 overflow-y-auto divide-y divide-base-300 rounded-lg border border-base-300">
                           {filtered.length === 0
-                            ? <p className="px-3 py-2 text-xs text-base-content/40">Sem resultados para "{pickerSearch}".</p>
+                            ? <p className="px-3 py-2 text-xs text-base-content/40">Sem resultados para &ldquo;{pickerSearch}&rdquo;.</p>
                             : filtered.map(name => (
                               <label key={name} className="flex cursor-pointer items-center gap-2 px-3 py-1.5 hover:bg-base-200">
                                 <input type="checkbox" className="checkbox checkbox-xs" checked={selectedNew.includes(name)} onChange={() => toggleNew(name)} />

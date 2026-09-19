@@ -24,15 +24,17 @@ const fmt = (d: Date) => d.toLocaleString("pt-BR", { timeZone: "UTC", dateStyle:
  * aqui e recusada pela API (400 INVALID_CRON) — a fonte nunca fica "agendada" sem rodar.
  */
 export function CronPreview({ cron, onPick }: { cron: string; onPick?: (cron: string) => void }) {
-  let content: React.ReactNode;
+  let next: { n1: Date | null; n2: Date | null } | null = null;
   try {
     const c = new Cron(cron.trim(), { timezone: "UTC" });
     const n1 = c.nextRun();
-    const n2 = n1 ? c.nextRun(n1) : null;
-    content = <span className="label-text-alt text-base-content/70">Próxima execução: {n1 ? fmt(n1) : "—"}{n2 ? ` · depois: ${fmt(n2)}` : ""}</span>;
+    next = { n1, n2: n1 ? c.nextRun(n1) : null };
   } catch {
-    content = <span className="label-text-alt text-error">Expressão cron inválida. Exemplo: 0 3 * * * (todo dia às 03:00 UTC).</span>;
+    next = null;
   }
+  const content = next
+    ? <span className="label-text-alt text-base-content/70">Próxima execução: {next.n1 ? fmt(next.n1) : "—"}{next.n2 ? ` · depois: ${fmt(next.n2)}` : ""}</span>
+    : <span className="label-text-alt text-error">Expressão cron inválida. Exemplo: 0 3 * * * (todo dia às 03:00 UTC).</span>;
   return (
     <span role="status" className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
       {content}
