@@ -1,13 +1,15 @@
 "use client";
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { Pencil, UserPlus } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { apiErrorText } from "@/lib/api-client";
+import { useDialog, ModalBackdrop } from "@/components/ui/modal";
 
 const roles = ["ADMIN", "DATA_MANAGER", "ANALYST", "VIEWER"];
 
 export function CreateUserDialog() {
-  const ref = useRef<HTMLDialogElement>(null), router = useRouter();
+  const { ref, open, close } = useDialog();
+  const router = useRouter();
   const [error, setError] = useState("");
   async function submit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -21,12 +23,12 @@ export function CreateUserDialog() {
     const body = await response.json();
     if (!response.ok) { setError(apiErrorText(body, "Falha ao criar usuário")); return; }
     e.currentTarget.reset();
-    ref.current?.close();
+    close();
     router.refresh();
   }
   return (
     <>
-      <button onClick={() => ref.current?.showModal()} className="btn btn-primary btn-sm"><UserPlus size={15} />Novo usuário</button>
+      <button onClick={open} className="btn btn-primary btn-sm"><UserPlus size={15} />Novo usuário</button>
       <dialog ref={ref} className="modal">
         <form onSubmit={submit} className="modal-box">
           <h3 className="text-lg font-bold">Novo usuário</h3>
@@ -38,18 +40,19 @@ export function CreateUserDialog() {
           </div>
           {error && <div className="alert alert-error alert-soft mt-4">{error}</div>}
           <div className="modal-action">
-            <button type="button" onClick={() => ref.current?.close()} className="btn btn-ghost btn-sm">Cancelar</button>
+            <button type="button" onClick={close} className="btn btn-ghost btn-sm">Cancelar</button>
             <button className="btn btn-primary btn-sm">Criar</button>
           </div>
         </form>
-        <form method="dialog" className="modal-backdrop"><button>fechar</button></form>
+        <ModalBackdrop onClose={close} />
       </dialog>
     </>
   );
 }
 
 export function EditUserDialog({ id, name, role, active }: { id: string; name: string; role: string; active: boolean }) {
-  const ref = useRef<HTMLDialogElement>(null), router = useRouter();
+  const { ref, open, close } = useDialog();
+  const router = useRouter();
   const [error, setError] = useState("");
   async function submit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -63,12 +66,12 @@ export function EditUserDialog({ id, name, role, active }: { id: string; name: s
     });
     const body = await response.json();
     if (!response.ok) { setError(apiErrorText(body, "Falha ao salvar")); return; }
-    ref.current?.close();
+    close();
     router.refresh();
   }
   return (
     <>
-      <button onClick={() => ref.current?.showModal()} className="btn btn-ghost btn-xs"><Pencil size={13} />Editar</button>
+      <button onClick={open} className="btn btn-ghost btn-xs"><Pencil size={13} />Editar</button>
       <dialog ref={ref} className="modal">
         <form onSubmit={submit} className="modal-box">
           <h3 className="text-lg font-bold">Editar usuário</h3>
@@ -80,11 +83,11 @@ export function EditUserDialog({ id, name, role, active }: { id: string; name: s
           </div>
           {error && <div className="alert alert-error alert-soft mt-4">{error}</div>}
           <div className="modal-action">
-            <button type="button" onClick={() => ref.current?.close()} className="btn btn-ghost btn-sm">Cancelar</button>
+            <button type="button" onClick={close} className="btn btn-ghost btn-sm">Cancelar</button>
             <button className="btn btn-primary btn-sm">Salvar</button>
           </div>
         </form>
-        <form method="dialog" className="modal-backdrop"><button>fechar</button></form>
+        <ModalBackdrop onClose={close} />
       </dialog>
     </>
   );

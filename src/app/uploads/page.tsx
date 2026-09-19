@@ -144,8 +144,8 @@ export default async function UploadsPage() {
       lastError:   job.lastError,
       createdAt:   job.createdAt,
       updatedAt:   job.updatedAt,
-      cancelPath:  null,
-      retryPath:   null,
+      cancelPath:  src ? `/api/v1/dataset-sources/${src.id}/refresh?action=cancel` : null,
+      retryPath:   src ? `/api/v1/dataset-sources/${src.id}/refresh` : null,
     };
   });
 
