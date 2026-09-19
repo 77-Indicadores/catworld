@@ -1,3 +1,5 @@
+import { relativeTime } from "@/lib/present/datetime";
+
 export function fmtBytes(n: bigint | number) {
   const v = Number(n);
   if (!v) return "0 B";
@@ -6,14 +8,8 @@ export function fmtBytes(n: bigint | number) {
   return `${(v / 1024 ** i).toFixed(i ? 1 : 0)} ${units[i]}`;
 }
 
-export function fmtRelative(date: Date) {
-  const diff = Date.now() - date.getTime();
-  const mins = Math.floor(diff / 60000);
-  if (mins < 1) return "agora";
-  if (mins < 60) return `há ${mins} min`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `há ${hours}h`;
-  return `há ${Math.floor(hours / 24)}d`;
+export function fmtRelative(date: Date, now: Date = new Date()) {
+  return relativeTime(date, now);
 }
 
 export function fmtDuration(ms: number) {
