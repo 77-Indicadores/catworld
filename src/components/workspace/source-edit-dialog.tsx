@@ -2,7 +2,7 @@
 
 import { useRef, useState } from "react";
 import { Pencil, Play } from "lucide-react";
-import { apiErrorText } from "@/lib/api-client";
+import { apiRequest, errorMessage } from "@/lib/api-client";
 import { CronPreview } from "./cron-field";
 
 type Column = { originalName: string; sqlName: string; sqlType: string };
@@ -55,13 +55,17 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
 
   async function testQuery() {
     setTesting(true); setError(""); setSqlStatus("idle");
-    const response = await fetch(`/api/v1/connections/${source.connection.id}/columns?sql=${encodeURIComponent(sql)}`);
-    const body = await response.json();
-    setTesting(false);
-    if (!response.ok) { setSqlStatus("error"); setError(apiErrorText(body, "Falha ao testar consulta")); return; }
-    setColumns(body.data ?? []);
-    setSqlTested(sql);
-    setSqlStatus("ok");
+    try {
+      const { data } = await apiRequest<Column[]>(`/api/v1/connections/${source.connection.id}/columns?sql=${encodeURIComponent(sql)}`);
+      setColumns(data ?? []);
+      setSqlTested(sql);
+      setSqlStatus("ok");
+    } catch (err) {
+      setSqlStatus("error");
+      setError(errorMessage(err));
+    } finally {
+      setTesting(false);
+    }
   }
 
   async function save() {
@@ -82,13 +86,18 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
       sourceSqlReconciliation: source.sourceKind === "query" ? (sourceSqlReconciliation.trim() || null) : null,
     };
     if (source.sourceKind === "query") body.sourceSql = sql;
-    const response = await fetch(`/api/v1/dataset-sources/${source.id}`, {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
+    try {
+      await apiRequest(`/api/v1/dataset-sources/${source.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    } catch (err) {
+      setLoading(false);
+      setError(errorMessage(err));
+      return;
+    }
     setLoading(false);
-    if (!response.ok) { const b = await response.json(); setError(apiErrorText(b, "Falha ao salvar")); return; }
     ref.current?.close();
     onComplete();
   }
