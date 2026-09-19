@@ -14,6 +14,7 @@ export function DangerZone({
   busyLabel = "Processando...",
   onConfirm,
   busy = false,
+  error,
 }: {
   description: string;
   confirmValue: string;
@@ -21,6 +22,7 @@ export function DangerZone({
   busyLabel?: string;
   onConfirm: () => void | Promise<void>;
   busy?: boolean;
+  error?: string;
 }) {
   const [value, setValue] = useState("");
   return (
@@ -48,6 +50,7 @@ export function DangerZone({
       >
         {busy ? busyLabel : confirmLabel}
       </button>
+      {error && <p role="alert" className="mt-2 text-xs text-error">{error}</p>}
     </div>
   );
 }
