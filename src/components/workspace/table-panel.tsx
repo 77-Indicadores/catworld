@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { Download, FileText } from "lucide-react";
-import { apiErrorText } from "@/lib/api-client";
+import { apiRequest, errorMessage } from "@/lib/api-client";
 import type { WorkspaceTable as Table } from "@/lib/workspace/types";
 import { formatInt, presentCount } from "@/lib/present";
 import { ResultGrid } from "./result-grid";
@@ -38,9 +38,12 @@ export function TablePanel({ table }: { table: Table }) {
     let cancelled = false;
     Promise.resolve().then(() => { if (!cancelled) { setLoading(true); setError(""); } });
     const live = sourceModeValue === "live";
-    fetch(live ? `/api/v1/dataset-sources/${sourceId}/query` : `/api/v1/tables/${table.id}/rows?limit=100`, live ? { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ limit: 100 }) } : undefined)
-      .then((r) => r.json().then((body) => ({ ok: r.ok, body })))
-      .then(({ ok, body }) => { if (cancelled) return; if (!ok) setError(apiErrorText(body, "Falha ao carregar dados")); else setRows(live ? body.data?.rows ?? [] : body.data ?? []); })
+    apiRequest<{ rows?: Record<string, unknown>[] } | Record<string, unknown>[]>(
+      live ? `/api/v1/dataset-sources/${sourceId}/query` : `/api/v1/tables/${table.id}/rows?limit=100`,
+      live ? { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ limit: 100 }) } : undefined,
+    )
+      .then(({ data }) => { if (cancelled) return; setRows(live ? (data as { rows?: Record<string, unknown>[] })?.rows ?? [] : (data as Record<string, unknown>[]) ?? []); })
+      .catch((err) => { if (!cancelled) setError(errorMessage(err)); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [table.id, sourceId, sourceModeValue]);

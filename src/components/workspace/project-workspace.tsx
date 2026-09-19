@@ -8,7 +8,7 @@ import { EditCatalogDialog } from "@/components/management/edit-catalog-dialog";
 import { TablePanel } from "./table-panel";
 import { QueryPanel } from "./query-panel";
 import { DatasetPanel } from "./dataset-panel";
-import { apiErrorText } from "@/lib/api-client";
+import { apiRequest, errorMessage } from "@/lib/api-client";
 import type { StorageServerOption, WorkspaceDataset as Dataset, WorkspaceProject as Project, WorkspaceTable as Table } from "@/lib/workspace/types";
 import { FreshnessBlock } from "./table-detail/freshness-block";
 import { OriginBlock } from "./table-detail/origin-block";
@@ -47,9 +47,14 @@ function MetadataPanel({ table, dataset, projectSlug, publicOrigin, onChanged }:
   async function refreshSource() {
     if (!table.source) return;
     setRefreshing(true); setError(""); setNotice("");
-    const r = await fetch(`/api/v1/dataset-sources/${table.source.id}/refresh`, { method: "POST" });
+    try {
+      await apiRequest(`/api/v1/dataset-sources/${table.source.id}/refresh`, { method: "POST" });
+    } catch (err) {
+      setRefreshing(false);
+      setError(errorMessage(err));
+      return;
+    }
     setRefreshing(false);
-    if (!r.ok) { const body = await r.json().catch(() => ({})); setError(apiErrorText(body, "Falha ao enfileirar")); return; }
     setNotice("Atualização enfileirada."); onChanged();
   }
 
@@ -124,9 +129,14 @@ function DeleteTableButton({ tableId, tableName, onDeleted }: { tableId: string;
 
   async function destroy() {
     setDeleting(true); setError("");
-    const r = await fetch(`/api/v1/tables/${tableId}`, { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ confirmName: confirm }) });
+    try {
+      await apiRequest(`/api/v1/tables/${tableId}`, { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ confirmName: confirm }) });
+    } catch (err) {
+      setDeleting(false);
+      setError(errorMessage(err));
+      return;
+    }
     setDeleting(false);
-    if (!r.ok) { const b = await r.json(); setError(apiErrorText(b, "Falha ao excluir")); return; }
     onDeleted();
   }
 
@@ -181,17 +191,15 @@ function ProjectMigrateStorageDialog({ project, storageServers, onChanged }: {
   async function migrate() {
     setMigrating(true); setResult(null); setError(null);
     try {
-      const r = await fetch(`/api/v1/projects/${project.id}/migrate-storage`, {
+      const { data } = await apiRequest<{ datasetsMigrated: number }>(`/api/v1/projects/${project.id}/migrate-storage`, {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ targetStorageServerId: targetId }),
       });
-      const j = await r.json() as { data?: { datasetsMigrated: number }; error?: { message: string } };
-      if (!r.ok) { setError(apiErrorText(j, "Erro na migração")); setMigrating(false); return; }
-      setResult(`✓ ${j.data?.datasetsMigrated ?? 0} dataset(s) migrado(s) com sucesso`);
+      setResult(`✓ ${data?.datasetsMigrated ?? 0} dataset(s) migrado(s) com sucesso`);
       setMigrating(false);
       onChanged();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Erro de rede");
+      setError(errorMessage(e));
       setMigrating(false);
     }
   }
