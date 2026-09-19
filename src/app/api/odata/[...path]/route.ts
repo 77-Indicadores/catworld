@@ -61,7 +61,7 @@ async function resolveODataActor(request: NextRequest): Promise<Actor> {
   const auth = request.headers.get("authorization");
 
   // 1. Bearer token
-  if (auth?.match(/^Bearer\s+/i)) return resolveActor(request);
+  if (auth?.match(/^Bearer\s+/i)) return resolveActor(request, { rateLimit: false });
 
   // 2. Basic auth
   const basic = auth?.match(/^Basic\s+(.+)$/i)?.[1];

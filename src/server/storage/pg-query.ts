@@ -8,7 +8,7 @@
 
 import { Query, type PoolClient } from "pg";
 import { validateReadOnlySql } from "@/server/security/sql-safety";
-import { ApiError } from "@/server/http";
+import { ApiError, publicQueryErrorMessage } from "@/server/http";
 import { MAX_RESULT_BYTES, approxRowBytes } from "@/server/query/protection";
 import { contractTranslate, getContractMode, runWithContract } from "@/server/sql-contract/apply";
 import type { PgStorageConnection } from "./pg-storage";
@@ -209,7 +209,7 @@ export async function executeReadOnlyPgStream(
         }
         safeEnqueue(encoder.encode(JSON.stringify({ __done__: true, rowCount, executionTimeMs: Date.now() - started }) + "\n"));
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = publicQueryErrorMessage(err instanceof Error ? err.message : String(err));
         safeEnqueue(encoder.encode(JSON.stringify({ __error__: true, message: msg }) + "\n"));
       } finally {
         client?.release();

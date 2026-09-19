@@ -17,8 +17,10 @@ const CACHE_TTL_MS      = 5 * 60_000; // TTL padrão do cache: 5 minutos
 const CACHE_MAX_ENTRIES = 200;        // máx entradas no cache (LRU)
 const RATE_WINDOW_MS    = 60_000;     // janela do rate limit: 1 minuto
 const RATE_LIMIT_QUERY  = 60;         // req/min por token — /api/v1/queries
-const RATE_LIMIT_UPLOAD = 10;         // req/min por token — uploads
-const RATE_LIMIT_DEFAULT = 120;       // req/min por token — demais rotas
+const RATE_LIMIT_UPLOAD = 60;         // req/min por token — criacao de uploads
+// Protecao contra loop descontrolado, nao contra uso legitimo: SDK paginando tabelas grandes faz dezenas de
+// requisicoes por segundo. (OData fica fora: o Power BI pagina muito e rapido.)
+const RATE_LIMIT_DEFAULT = 2400;      // req/min por principal — demais rotas
 
 // O limite de linhas (10.000) não protege contra colunas muito largas
 // (NVARCHAR(MAX)/TEXT sem teto de tamanho) — um resultado "dentro do limite
@@ -184,6 +186,7 @@ export function checkRateLimit(principal: string, tier: RateLimitTier = "default
       429,
       "RATE_LIMIT_EXCEEDED",
       `Limite de ${limit} requisições/min atingido. Tente novamente em ${retryAfter}s.`,
+      { retryAfterSeconds: retryAfter, limit, tier },
     );
   }
 

@@ -4,7 +4,7 @@ import * as Sentry from "@sentry/nextjs";
 import { resolveActor } from "@/server/auth/actor";
 import { syncActorGrants } from "@/server/auth/sync-grants";
 import { executeReadOnly, executeReadOnlyStream } from "@/server/azure/sql";
-import { ApiError, handleApiError, ok } from "@/server/http";
+import { ApiError, handleApiError, ok, publicQueryErrorMessage } from "@/server/http";
 import { audit } from "@/server/audit";
 import { prisma } from "@/server/db";
 import { getStorageConnection } from "@/server/storage/connection";
@@ -130,7 +130,7 @@ export async function POST(request: NextRequest) {
     if (e instanceof ApiError) return handleApiError(e);
     if (e instanceof Error && "code" in e) {
       Sentry.captureException(e);
-      return handleApiError(new ApiError(400, "QUERY_FAILED", e.message));
+      return handleApiError(new ApiError(400, "QUERY_FAILED", publicQueryErrorMessage(e.message)));
     }
     return handleApiError(e);
   }

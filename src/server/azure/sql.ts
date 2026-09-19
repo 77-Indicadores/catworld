@@ -4,7 +4,7 @@ import sql from "mssql";
 import { getStoragePool } from "@/server/storage/pool";
 import { quoteIdentifier } from "@/server/security/naming";
 import { validateReadOnlySql } from "@/server/security/sql-safety";
-import { ApiError } from "@/server/http";
+import { ApiError, publicQueryErrorMessage } from "@/server/http";
 import { MAX_RESULT_BYTES, approxRowBytes } from "@/server/query/protection";
 
 /** Returns the default storage pool (StorageServer with isDefault=true). */
@@ -291,7 +291,7 @@ export async function executeReadOnlyStream(
 
       request.on("error", (err: Error) => {
         Sentry.addBreadcrumb({ category: "db.query", message: "executeReadOnlyStream failed", level: "error", data: { sql: statement, principal, schemas } });
-        safeEnqueue(encoder.encode(JSON.stringify({ __error__: true, message: err.message }) + "\n"));
+        safeEnqueue(encoder.encode(JSON.stringify({ __error__: true, message: publicQueryErrorMessage(err.message) }) + "\n"));
         safeClose();
       });
 

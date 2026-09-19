@@ -8,6 +8,7 @@ import { prisma } from "@/server/db";
 import { env } from "@/server/env";
 import { ApiError, handleApiError, ok } from "@/server/http";
 import { uploadTarget } from "@/server/storage";
+import { checkRateLimit } from "@/server/query/protection";
 
 export async function GET(r: NextRequest) {
   try {
@@ -28,6 +29,7 @@ export async function POST(r: NextRequest) {
   try {
     const actor = await resolveActor(r);
     if (!await hasAnyWriteGrant(actor)) throw new ApiError(403, "FORBIDDEN", "Permissao insuficiente");
+    checkRateLimit(actor.principal, "upload");
 
     const input = z.object({
       filename: z.string().min(1).max(500),
