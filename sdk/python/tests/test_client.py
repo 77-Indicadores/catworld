@@ -79,7 +79,7 @@ def test_query_routes_live_table_through_live_endpoint():
         assert result.rows == [{"id": 1}]
 
     assert calls[0][:2] == ("GET", "/api/v1/datasets/ds_1/tables")
-    assert calls[1] == ("POST", "/api/v1/dataset-sources/src_1/query", {"timeout": 30, "limit": 50, "sql": "SELECT * FROM clientes"})
+    assert calls[1] == ("POST", "/api/v1/dataset-sources/src_1/query", {"timeout": 60, "limit": 50, "sql": "SELECT * FROM clientes"})
 
 
 def test_query_result_exposes_dataframe_property():
@@ -93,7 +93,7 @@ def test_query_result_exposes_dataframe_property():
         return httpx.Response(200, json={"data": {"columns": ["id", "nome"], "rows": [{"id": 1, "nome": "Ana"}]}})
 
     with client_with_handler(handler) as client:
-        result = client.query("SELECT * FROM clientes", dataset_id="ds_1")
+        result = client.query("SELECT * FROM clientes", dataset_id="ds_1", limit=100)
         assert result.columns == ["id", "nome"]
         assert isinstance(result.dataframe, pandas.DataFrame)
         assert result.dataframe.to_dict("records") == [{"id": 1, "nome": "Ana"}]
@@ -111,7 +111,7 @@ def test_query_keeps_internal_tables_on_query_endpoint():
         return httpx.Response(200, json={"data": {"rows": []}})
 
     with client_with_handler(handler) as client:
-        assert client.query("SELECT * FROM clientes", dataset_id="ds_1") == {"rows": []}
+        assert client.query("SELECT * FROM clientes", dataset_id="ds_1", limit=100) == {"rows": []}
 
 
 def test_query_rejects_mixed_live_and_internal_tables():
@@ -132,7 +132,7 @@ def test_query_rejects_mixed_live_and_internal_tables():
 
 
 def test_upload_raises_connection_error_when_polling_gets_non_json_error():
-    upload_file = Path("sdk/python/tests/.tmp-upload.csv")
+    upload_file = Path(__file__).parent / ".tmp-upload.csv"
     upload_file.write_text("id,name\n1,Mochi\n", encoding="utf-8")
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -172,7 +172,7 @@ def test_upload_raises_connection_error_when_polling_gets_non_json_error():
 def test_upload_wait_raises_upload_error_on_failed_status():
     from catworld import UploadError
 
-    upload_file = Path("sdk/python/tests/.tmp-upload-fail.csv")
+    upload_file = Path(__file__).parent / ".tmp-upload-fail.csv"
     upload_file.write_text("id,name\n1,Mochi\n", encoding="utf-8")
 
     statuses = iter(["IMPORTING", "FAILED"])
@@ -208,7 +208,7 @@ def test_upload_wait_raises_upload_error_on_failed_status():
 
 
 def test_upload_wait_returns_final_upload_on_completed():
-    upload_file = Path("sdk/python/tests/.tmp-upload-ok.csv")
+    upload_file = Path(__file__).parent / ".tmp-upload-ok.csv"
     upload_file.write_text("id,name\n1,Mochi\n", encoding="utf-8")
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -238,7 +238,7 @@ def test_upload_wait_returns_final_upload_on_completed():
 
 
 def test_upload_wait_false_returns_immediately_without_polling():
-    upload_file = Path("sdk/python/tests/.tmp-upload-nowait.csv")
+    upload_file = Path(__file__).parent / ".tmp-upload-nowait.csv"
     upload_file.write_text("id,name\n1,Mochi\n", encoding="utf-8")
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -371,7 +371,7 @@ def test_check_upsert_ready_skips_unknown_table_silently():
 def test_upload_raises_immediately_for_upsert_without_key_column():
     from catworld import ValidationError
 
-    upload_file = Path("sdk/python/tests/.tmp-upload-no-key.csv")
+    upload_file = Path(__file__).parent / ".tmp-upload-no-key.csv"
     upload_file.write_text("id,name\n1,Mochi\n", encoding="utf-8")
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -392,7 +392,7 @@ def test_upload_raises_immediately_for_upsert_without_key_column():
 def test_upload_runs_preflight_and_blocks_before_sending_bytes():
     from catworld import ValidationError
 
-    upload_file = Path("sdk/python/tests/.tmp-upload-preflight.csv")
+    upload_file = Path(__file__).parent / ".tmp-upload-preflight.csv"
     upload_file.write_text("id,documento\n1,999\n", encoding="utf-8")
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -415,7 +415,7 @@ def test_upload_runs_preflight_and_blocks_before_sending_bytes():
 
 
 def test_upload_sends_type_overrides_in_create_body():
-    upload_file = Path("sdk/python/tests/.tmp-upload-overrides.csv")
+    upload_file = Path(__file__).parent / ".tmp-upload-overrides.csv"
     upload_file.write_text("id,dt\n1,2026-01-01\n", encoding="utf-8")
 
     def handler(request: httpx.Request) -> httpx.Response:
