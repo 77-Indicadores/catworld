@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { CheckCircle2, Eye, LifeBuoy, ShieldCheck, Undo2 } from "lucide-react";
 import { PageHeader, Panel } from "@/components/ui/primitives";
 import { Time } from "@/components/ui/time";
+import { apiRequest, errorMessage } from "@/lib/api-client";
 
 type Mode = "off" | "shadow" | "fallback" | "strict";
 
@@ -63,29 +64,26 @@ export default function SqlContractSettingsPage() {
   const [fmtSaving, setFmtSaving] = useState(false);
 
   useEffect(() => {
-    fetch("/api/v1/settings/sql-contract")
-      .then((r) => r.json())
-      .then((j) => {
-        if (j.error) setError(j.error.message ?? "Falha ao carregar");
-        else { setMode(j.data.mode); setSaved(j.data.mode); setStats(j.data.stats ?? null); setPgIsolation(j.data.pgIsolation ?? null); setResultFormat(j.data.resultFormat === "normalized" ? "normalized" : "legacy"); }
+    apiRequest<{ mode: Mode; stats?: Stats; pgIsolation?: string; resultFormat?: string }>("/api/v1/settings/sql-contract")
+      .then(({ data }) => {
+        setMode(data.mode); setSaved(data.mode); setStats(data.stats ?? null); setPgIsolation(data.pgIsolation ?? null);
+        setResultFormat(data.resultFormat === "normalized" ? "normalized" : "legacy");
       })
-      .catch(() => setError("Falha ao carregar"));
+      .catch((e) => setError(errorMessage(e)));
   }, []);
 
   async function saveFormat(next: "legacy" | "normalized") {
     if (next === resultFormat) return;
     setFmtSaving(true); setError("");
     try {
-      const r = await fetch("/api/v1/settings/sql-contract", {
+      await apiRequest("/api/v1/settings/sql-contract", {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ resultFormat: next }),
       });
-      const j = await r.json();
-      if (j.error) throw new Error(j.error.message ?? "Falha ao salvar");
       setResultFormat(next);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Falha ao salvar");
+      setError(errorMessage(e));
     } finally {
       setFmtSaving(false);
     }
@@ -95,16 +93,14 @@ export default function SqlContractSettingsPage() {
     if (!mode) return;
     setSaving(true); setError(""); setOk(false);
     try {
-      const r = await fetch("/api/v1/settings/sql-contract", {
+      await apiRequest("/api/v1/settings/sql-contract", {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ mode }),
       });
-      const j = await r.json();
-      if (j.error) throw new Error(j.error.message ?? "Falha ao salvar");
       setSaved(mode); setOk(true);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Falha ao salvar");
+      setError(errorMessage(e));
     } finally {
       setSaving(false);
     }
@@ -182,15 +178,15 @@ export default function SqlContractSettingsPage() {
           )}
           {stats && stats.top.length > 0 ? (
             <div className="overflow-x-auto">
-              <table className="table table-xs">
+              <table className="table table-xs table-stack">
                 <thead><tr><th>Ocorrências</th><th>O que aconteceu</th><th>Caminho</th><th>Consulta (formato)</th></tr></thead>
                 <tbody>
                   {stats.top.map((t) => (
                     <tr key={`${t.kind}|${t.path}|${t.hash}`}>
-                      <td className="font-mono">{t.count}</td>
-                      <td>{KIND_LABEL[t.kind] ?? t.kind}{t.message ? <div className="text-base-content/65">{t.message}</div> : null}</td>
-                      <td className="font-mono">{t.path}</td>
-                      <td className="font-mono max-w-md truncate" title={t.shape}>{t.shape}</td>
+                      <td data-label="Ocorrências" className="font-mono">{t.count}</td>
+                      <td data-label="O que aconteceu">{KIND_LABEL[t.kind] ?? t.kind}{t.message ? <div className="text-base-content/65">{t.message}</div> : null}</td>
+                      <td data-label="Caminho" className="font-mono">{t.path}</td>
+                      <td data-label="Consulta" className="font-mono max-w-md truncate" title={t.shape}>{t.shape}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -217,7 +213,7 @@ export default function SqlContractSettingsPage() {
         <div className="p-5 space-y-2 text-sm text-base-content/70">
           <h2 className="font-semibold text-sm text-base-content/70 uppercase tracking-wide">Formato do resultado</h2>
           <p>Formato padrão para requisições que <strong>não</strong> enviam <code>normalize</code>:</p>
-          <div className="flex flex-wrap gap-2" role="group" aria-label="Formato padrão do resultado">
+          <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Formato padrão do resultado">
             <button
               type="button" disabled={fmtSaving} onClick={() => saveFormat("legacy")}
               className={`btn btn-sm ${resultFormat === "legacy" ? "btn-primary" : "btn-ghost border border-base-300"}`}
@@ -230,6 +226,9 @@ export default function SqlContractSettingsPage() {
             >
               Normalizado (recomendado)
             </button>
+            {fmtSaving
+              ? <span className="loading loading-spinner loading-xs text-base-content/65" />
+              : <span className="text-xs text-base-content/65">Aplicado imediatamente ao clicar — diferente do Modo acima, que exige Salvar.</span>}
           </div>
           <p className="text-xs text-base-content/65">
             Legado: tipos como o driver entrega (varia por backend); as respostas avisam em <code>meta.warnings</code>. Normalizado: datas

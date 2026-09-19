@@ -1,7 +1,7 @@
 "use client";
 import { useRef, useState } from "react";
 import { Pencil, Plus } from "lucide-react";
-import { apiErrorText } from "@/lib/api-client";
+import { apiRequest, errorMessage } from "@/lib/api-client";
 import { CronPreview } from "../cron-field";
 import type { WorkspaceDerived as DerivedTable } from "@/lib/workspace/types";
 
@@ -22,12 +22,17 @@ export function DerivedCreateDialog({ datasetId, onComplete }: { datasetId: stri
 
   async function create() {
     setSaving(true); setError("");
-    const r = await fetch(`/api/v1/datasets/${datasetId}/derived-tables`, {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name, querySql, refreshCron: refreshCron.trim() || null, triggerNow: runNow }),
-    });
+    try {
+      await apiRequest(`/api/v1/datasets/${datasetId}/derived-tables`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name, querySql, refreshCron: refreshCron.trim() || null, triggerNow: runNow }),
+      });
+    } catch (err) {
+      setSaving(false);
+      setError(errorMessage(err));
+      return;
+    }
     setSaving(false);
-    if (!r.ok) { const b = await r.json().catch(() => ({})); setError(apiErrorText(b, "Erro ao criar")); return; }
     close(); onComplete();
   }
 
@@ -102,12 +107,17 @@ export function DerivedEditDialog({ dt, onComplete }: { dt: DerivedTable; onComp
 
   async function save() {
     setSaving(true); setError("");
-    const r = await fetch(`/api/v1/derived-tables/${dt.id}`, {
-      method: "PATCH", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name, querySql, refreshCron: refreshCron.trim() || null }),
-    });
+    try {
+      await apiRequest(`/api/v1/derived-tables/${dt.id}`, {
+        method: "PATCH", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name, querySql, refreshCron: refreshCron.trim() || null }),
+      });
+    } catch (err) {
+      setSaving(false);
+      setError(errorMessage(err));
+      return;
+    }
     setSaving(false);
-    if (!r.ok) { const b = await r.json().catch(() => ({})); setError(apiErrorText(b, "Erro ao salvar")); return; }
     close(); onComplete();
   }
 

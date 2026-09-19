@@ -1,2 +1,81 @@
-import { ROLE_LABEL, grantLabel } from "@/lib/labels";import { KeyRound } from "lucide-react";import { Time } from "@/components/ui/time";import { prisma } from "@/server/db";import { CreateDialog } from "@/components/management/create-dialog";import { RevokeButton } from "@/components/management/revoke-button";import { EmptyState,PageHeader,Panel,StatusBadge } from "@/components/ui/primitives";import { resolveActor,requireRole } from "@/server/auth/actor";export const dynamic="force-dynamic";
-export default async function TokensPage(){requireRole(await resolveActor(),["ADMIN"]);const rows=await prisma.apiToken.findMany({include:{grants:true},orderBy:{createdAt:"desc"}});return <div className="space-y-6"><PageHeader eyebrow="Integrações" title="Tokens de acesso" description="Credenciais hash-only para a API Catworld." actions={<CreateDialog kind="token" triggerLabel="Novo token"/>}/><Panel><div className="overflow-x-auto"><table className="table table-stack"><thead><tr><th>Nome</th><th>Prefixo</th><th>Escopo</th><th>Último uso</th><th>Expira</th><th>Criado por</th><th>Status</th><th/></tr></thead><tbody>{rows.map(t=><tr key={t.id}><td data-label="Nome">{t.name}</td><td data-label="Prefixo" className="font-mono text-xs">{t.prefix}</td><td data-label="Escopo">{t.grants.map(grantLabel).join(", ")||"—"}</td><td data-label="Último uso">{<Time iso={t.lastUsedAt?.toISOString()} empty="Nunca"/>}</td><td data-label="Expira">{t.expiresAt?<span className={t.expiresAt<new Date()?"text-error":""}><Time iso={t.expiresAt.toISOString()}/>{t.expiresAt<new Date()?" (expirado)":""}</span>:"Não expira"}</td><td data-label="Criado por" className="text-xs">{t.createdBy??"—"}<div className="text-base-content/65"><Time iso={t.createdAt.toISOString()}/></div></td><td data-label="Status"><StatusBadge status={t.active&&!(t.expiresAt&&t.expiresAt<new Date())?"healthy":"inactive"} label={t.active?(t.expiresAt&&t.expiresAt<new Date()?"Expirado":"Ativo"):"Revogado"}/></td><td data-label="">{t.active&&<RevokeButton url={`/api/v1/tokens/${t.id}`} confirmText={`Revogar o token "${t.name}"? Aplicações que o usam perderão acesso imediatamente.`}/>}</td></tr>)}</tbody></table></div>{rows.length===0&&<EmptyState icon={<KeyRound size={26}/>} title="Nenhum token criado" description="Crie um token para que aplicações e scripts acessem a API." action={<CreateDialog kind="token" triggerLabel="Novo token"/>}/>}</Panel></div>}
+import { grantLabel } from "@/lib/labels";
+import { KeyRound } from "lucide-react";
+import { Time } from "@/components/ui/time";
+import { prisma } from "@/server/db";
+import { CreateDialog } from "@/components/management/create-dialog";
+import { RevokeButton } from "@/components/management/revoke-button";
+import { EmptyState, PageHeader, Panel, StatusBadge } from "@/components/ui/primitives";
+import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
+import { resolveActor, requireRole } from "@/server/auth/actor";
+
+export const dynamic = "force-dynamic";
+
+type Row = Awaited<ReturnType<typeof loadTokens>>[number];
+
+async function loadTokens() {
+  return prisma.apiToken.findMany({ include: { grants: true }, orderBy: { createdAt: "desc" } });
+}
+
+const columns: DataTableColumn<Row>[] = [
+  { header: "Nome", cell: (t) => t.name },
+  { header: "Prefixo", className: "font-mono text-xs", cell: (t) => t.prefix },
+  { header: "Escopo", cell: (t) => t.grants.map(grantLabel).join(", ") || "—" },
+  { header: "Último uso", cell: (t) => <Time iso={t.lastUsedAt?.toISOString()} empty="Nunca" /> },
+  {
+    header: "Expira",
+    cell: (t) => t.expiresAt ? (
+      <span className={t.expiresAt < new Date() ? "text-error" : ""}>
+        <Time iso={t.expiresAt.toISOString()} />{t.expiresAt < new Date() ? " (expirado)" : ""}
+      </span>
+    ) : "Não expira",
+  },
+  {
+    header: "Criado por",
+    className: "text-xs",
+    cell: (t) => <>{t.createdBy ?? "—"}<div className="text-base-content/65"><Time iso={t.createdAt.toISOString()} /></div></>,
+  },
+  {
+    header: "Status",
+    cell: (t) => (
+      <StatusBadge
+        status={t.active && !(t.expiresAt && t.expiresAt < new Date()) ? "healthy" : "inactive"}
+        label={t.active ? (t.expiresAt && t.expiresAt < new Date() ? "Expirado" : "Ativo") : "Revogado"}
+      />
+    ),
+  },
+  {
+    header: "",
+    cell: (t) => t.active && <RevokeButton url={`/api/v1/tokens/${t.id}`} confirmText={`Revogar o token "${t.name}"? Aplicações que o usam perderão acesso imediatamente.`} />,
+  },
+];
+
+export default async function TokensPage() {
+  requireRole(await resolveActor(), ["ADMIN"]);
+  const rows = await loadTokens();
+
+  return (
+    <div className="space-y-6">
+      <PageHeader
+        eyebrow="Integrações"
+        title="Tokens de acesso"
+        description="Credenciais hash-only para a API Catworld."
+        actions={<CreateDialog kind="token" triggerLabel="Novo token" />}
+      />
+      <Panel>
+        <DataTable
+          columns={columns}
+          rows={rows}
+          rowKey={(t) => t.id}
+          empty={
+            <EmptyState
+              icon={<KeyRound size={26} />}
+              title="Nenhum token criado"
+              description="Crie um token para que aplicações e scripts acessem a API."
+              action={<CreateDialog kind="token" triggerLabel="Novo token" />}
+            />
+          }
+        />
+      </Panel>
+    </div>
+  );
+}

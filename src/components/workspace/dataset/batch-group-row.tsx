@@ -41,19 +41,18 @@ export function BatchGroupRow({ groupId, datasetId, sources, tables, onSelectTab
   const allActive = activeSources.length === sources.length;
 
   async function toggleGroup() {
-    await fetch(`/api/v1/source-groups/${groupId}`, {
+    if (await runAction(`/api/v1/source-groups/${groupId}`, {
       method: "PATCH", headers: { "content-type": "application/json" },
       body: JSON.stringify({ active: !allActive }),
-    });
-    onChanged();
+    })) onChanged();
   }
 
   async function refreshGroup() {
     setRefreshing(true);
     const targets = failedSources.length ? failedSources : activeSources;
-    await Promise.all(targets.map(s => fetch(`/api/v1/dataset-sources/${s.id}/refresh`, { method: "POST" })));
+    const results = await Promise.all(targets.map(s => runAction(`/api/v1/dataset-sources/${s.id}/refresh`, { method: "POST" })));
     setRefreshing(false);
-    onChanged();
+    if (results.some(Boolean)) onChanged();
   }
 
   async function deleteGroup() {

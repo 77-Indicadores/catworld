@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useState } from "react";
+import { useDarkMode } from "@/lib/use-dark-mode";
 import {
   ArrowUpFromLine, BookOpen, CheckCircle2, ChevronRight, CircleUserRound, CircleX, CloudCog, Database,
   FolderKanban, Home, LayoutDashboard, LogOut, Menu, Moon, ScrollText,
@@ -11,6 +12,7 @@ import {
 
 type StorageStatus = { name: string; status: string | null; latencyMs: number | null } | null;
 import { ROLE_LABEL } from "@/lib/labels";
+import { apiRequest } from "@/lib/api-client";
 export type ShellUser = { name: string; email: string; role: string } | null;
 
 /** `roles` ausente = todos os papéis. Espelha o que as rotas exigem (Configurações e seus filhos: só ADMIN). */
@@ -34,17 +36,11 @@ const navBottom = [
   { href: "/knowledge", label: "Base de conhecimento", icon: BookOpen },
 ];
 
-function subscribeTheme(onChange: () => void) {
-  const observer = new MutationObserver(onChange);
-  observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
-  return () => observer.disconnect();
-}
-
 export function AppShell({ children, user, signOutAction }: { children: React.ReactNode; user?: ShellUser; signOutAction?: () => Promise<void> }) {
   const pathname = usePathname();
 
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const dark = useSyncExternalStore(subscribeTheme, () => document.documentElement.getAttribute("data-theme") === "catworld-dark", () => false);
+  const dark = useDarkMode();
   const [storageStatus, setStorageStatus] = useState<StorageStatus>(null);
 
   // O tema inicial é aplicado antes da pintura por um script no layout (sem "piscar"); aqui só lemos e alternamos.
@@ -56,12 +52,12 @@ export function AppShell({ children, user, signOutAction }: { children: React.Re
 
   useEffect(() => {
     if (!user) return;
-    fetch("/api/v1/storage-servers")
-      .then(r => (r.ok ? r.json() : null))
-      .then((j: { data?: { name: string; lastStatus: string | null; lastLatencyMs: number | null; isDefault: boolean }[] } | null) => {
-        const def = j?.data?.find(s => s.isDefault) ?? j?.data?.[0];
+    apiRequest<{ name: string; lastStatus: string | null; lastLatencyMs: number | null; isDefault: boolean }[]>("/api/v1/storage-servers")
+      .then(({ data }) => {
+        const def = data?.find(s => s.isDefault) ?? data?.[0];
         if (def) setStorageStatus({ name: def.name, status: def.lastStatus, latencyMs: def.lastLatencyMs });
       })
+      // Widget de status silencioso: falha aqui não deve gerar toast/ruído em toda navegação.
       .catch(() => undefined);
   }, [user]);
 

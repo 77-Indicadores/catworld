@@ -1,5 +1,4 @@
 import { prisma } from "@/server/db";
-import { PageHeader, Panel } from "@/components/ui/primitives";
 import { StorageServerManager } from "./manager";
 export const dynamic = "force-dynamic";
 
@@ -20,16 +19,5 @@ export default async function StorageServersPage() {
     },
   });
 
-  return (
-    <div className="space-y-6">
-      <PageHeader
-        eyebrow="Infraestrutura"
-        title="Servidores de armazenamento"
-        description="Gerencie os SQL Servers onde os dados dos datasets são armazenados."
-      />
-      <Panel>
-        <StorageServerManager initialServers={servers} />
-      </Panel>
-    </div>
-  );
+  return <StorageServerManager initialServers={servers} />;
 }

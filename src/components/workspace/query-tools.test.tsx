@@ -61,11 +61,13 @@ describe("SchemaBrowser", () => {
 
 describe("QueryPanel com navegador de tabelas", () => {
   it("clicar numa tabela insere no editor, com espaço quando necessário", () => {
-    render(<QueryPanel datasets={datasets} />);
-    const editor = screen.getByLabelText("Editor SQL") as HTMLTextAreaElement;
-    fireEvent.change(editor, { target: { value: "SELECT * FROM" } });
+    // O editor SQL virou CodeMirror (não dá pra simular digitação via fireEvent.change num
+    // contentEditable em jsdom) — verifica o texto inicial + inserção pelo conteúdo renderizado.
+    const { container } = render(<QueryPanel datasets={datasets} />);
     fireEvent.click(screen.getByTitle("Inserir ds_test.clientes"));
-    expect(editor.value).toBe("SELECT * FROM ds_test.clientes");
+    const text = container.querySelector(".cm-content")?.textContent ?? "";
+    // Valor inicial do editor já termina com espaço ("...\nFROM "), então não deve dobrar o espaço.
+    expect(text).toContain("FROM ds_test.clientes");
   });
   it("o navegador pode ser recolhido", () => {
     render(<QueryPanel datasets={datasets} />);

@@ -121,7 +121,7 @@ export default async function AuditPage({ searchParams }: { searchParams: Promis
           />
         ) : (
           <div className="overflow-x-auto">
-            <table className="table table-sm">
+            <table className="table table-sm table-stack">
               <caption className="sr-only">Eventos de auditoria, do mais recente ao mais antigo</caption>
               <thead>
                 <tr>
@@ -146,16 +146,16 @@ export default async function AuditPage({ searchParams }: { searchParams: Promis
                   );
                   return (
                     <tr key={e.id}>
-                      <td className="whitespace-nowrap text-xs"><Time iso={e.createdAt.toISOString()} /></td>
-                      <td>
+                      <td data-label="Quando" className="whitespace-nowrap text-xs"><Time iso={e.createdAt.toISOString()} /></td>
+                      <td data-label="Evento">
                         <div className="text-sm">{AUDIT_EVENT_LABELS[e.eventType] ?? e.eventType}</div>
                         <div className="font-mono text-[11px] text-base-content/65">{e.eventType}</div>
                       </td>
-                      <td>{who}</td>
-                      <td className="max-w-64 break-all font-mono text-xs" title={e.resourceId ?? undefined}>{displayResource(e.resourceId, e.resourceType, names)}</td>
-                      <td><StatusBadge status={e.success ? "healthy" : "error"} label={e.success ? "Sucesso" : "Falha"} /></td>
-                      <td className="whitespace-nowrap font-mono text-xs">{e.ipAddress ?? "—"}</td>
-                      <td className="text-xs">
+                      <td data-label="Quem">{who}</td>
+                      <td data-label="Onde" className="max-w-64 break-all font-mono text-xs" title={e.resourceId ?? undefined}>{displayResource(e.resourceId, e.resourceType, names)}</td>
+                      <td data-label="Resultado"><StatusBadge status={e.success ? "healthy" : "error"} label={e.success ? "Sucesso" : "Falha"} /></td>
+                      <td data-label="IP" className="whitespace-nowrap font-mono text-xs">{e.ipAddress ?? "—"}</td>
+                      <td data-label="Detalhe" className="text-xs">
                         {detail ? (
                           <details>
                             <summary className="cursor-pointer">Ver</summary>

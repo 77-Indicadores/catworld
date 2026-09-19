@@ -1,14 +1,15 @@
 "use client";
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { useRouter } from "next/navigation";
 import { apiRequest, errorMessage } from "@/lib/api-client";
 import { SecretReveal } from "./secret-reveal";
+import { useDialog, ModalBackdrop } from "@/components/ui/modal";
 
 type Project = { id: string; name: string; datasets: { id: string; name: string }[] };
 
 export function CreateDialog({ kind, triggerLabel }: { kind: "token" | "database-user"; triggerLabel: string }) {
   const router = useRouter();
-  const ref = useRef<HTMLDialogElement>(null);
+  const { ref, open, close: closeDialog } = useDialog();
   const titleId = useId();
   const [projects, setProjects] = useState<Project[]>([]);
   const [scopeType, setScopeType] = useState("GLOBAL");
@@ -53,7 +54,7 @@ export function CreateDialog({ kind, triggerLabel }: { kind: "token" | "database
   }
 
   function close() {
-    ref.current?.close();
+    closeDialog();
     setSecret("");
     setScopeType("GLOBAL");
     setError("");
@@ -63,7 +64,7 @@ export function CreateDialog({ kind, triggerLabel }: { kind: "token" | "database
 
   return (
     <>
-      <button className="btn btn-primary btn-sm" onClick={() => ref.current?.showModal()}>{triggerLabel}</button>
+      <button className="btn btn-primary btn-sm" onClick={open}>{triggerLabel}</button>
       {/* Com o segredo na tela, Esc e clique fora NÃO fecham: só "Concluir", depois de confirmar que foi guardado. */}
       <dialog ref={ref} className="modal" aria-labelledby={titleId} onCancel={(e) => { if (showingSecret) e.preventDefault(); else close(); }}>
         <div className="modal-box max-w-2xl">
@@ -109,7 +110,7 @@ export function CreateDialog({ kind, triggerLabel }: { kind: "token" | "database
             </form>
           )}
         </div>
-        {!showingSecret && <form method="dialog" className="modal-backdrop"><button onClick={close} aria-label="Fechar">Fechar</button></form>}
+        {!showingSecret && <ModalBackdrop onClose={close} />}
       </dialog>
     </>
   );

@@ -1,9 +1,9 @@
 "use client";
-import { useEffect, useState, useCallback } from "react";
-import { CheckCircle2, Trash2, RefreshCw, Clock, AlertCircle } from "lucide-react";
+import { useEffect, useRef, useState, useCallback } from "react";
+import { CheckCircle2, Trash2, RefreshCw, AlertCircle } from "lucide-react";
 import { PageHeader, Panel } from "@/components/ui/primitives";
-import { useFeedback } from "@/components/ui/feedback";
-import { apiErrorText, apiRequest, errorMessage } from "@/lib/api-client";
+import { DangerZone } from "@/components/ui/danger-zone";
+import { apiRequest, errorMessage } from "@/lib/api-client";
 import { Time } from "@/components/ui/time";
 import { fmtDuration } from "@/lib/fmt";
 
@@ -83,10 +83,10 @@ function RunRow({ run }: { run: CleanupRun }) {
 
   return (
     <tr className="text-xs">
-      <td className="py-2 pr-4 whitespace-nowrap text-base-content/70">
+      <td data-label="Início" className="py-2 pr-4 whitespace-nowrap text-base-content/70">
         <Time iso={run.started_at} />
       </td>
-      <td className="py-2 pr-4">
+      <td data-label="Status" className="py-2 pr-4">
         {running ? (
           <span className="badge badge-sm badge-warning badge-soft">rodando</span>
         ) : failed ? (
@@ -97,8 +97,8 @@ function RunRow({ run }: { run: CleanupRun }) {
           <span className="badge badge-sm badge-success badge-soft">ok</span>
         )}
       </td>
-      <td className="py-2 pr-4 text-base-content/65">{run.duration_ms ? fmtDuration(run.duration_ms) : "—"}</td>
-      <td className="py-2 pr-4 tabular-nums">
+      <td data-label="Duração" className="py-2 pr-4 text-base-content/65">{run.duration_ms ? fmtDuration(run.duration_ms) : "—"}</td>
+      <td data-label="Resultado" className="py-2 pr-4 tabular-nums">
         {failed ? (
           <span className="text-error text-xs truncate max-w-[200px] block" title={run.error ?? ""}>
             {run.error}
@@ -109,7 +109,7 @@ function RunRow({ run }: { run: CleanupRun }) {
           </span>
         )}
       </td>
-      <td className="py-2 text-base-content/65 text-right tabular-nums">
+      <td data-label="Detalhes" className="py-2 text-base-content/65 text-right tabular-nums">
         {!failed && (
           <span title={`jobs=${run.deleted_jobs} audit=${run.deleted_audit} uploads=${run.deleted_uploads} arquivos=${run.deleted_files} órfãos=${run.deleted_orphans} versões=${run.deleted_versions}`}>
             j{run.deleted_jobs} · a{run.deleted_audit} · u{run.deleted_uploads} · v{run.deleted_versions}
@@ -120,8 +120,10 @@ function RunRow({ run }: { run: CleanupRun }) {
   );
 }
 
+const PURGE_PHRASE = "PURGAR AGORA";
+
 export default function RetentionPage() {
-  const { confirm: askConfirm } = useFeedback();
+  const purgeRef = useRef<HTMLDialogElement>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [history, setHistory] = useState<CleanupRun[]>([]);
   const [saved, setSaved] = useState(false);
@@ -131,9 +133,8 @@ export default function RetentionPage() {
   const [error, setError] = useState("");
 
   const loadHistory = useCallback(() => {
-    fetch("/api/v1/settings/retention/history")
-      .then((r) => r.json())
-      .then((b) => Array.isArray(b.data) && setHistory(b.data))
+    apiRequest<CleanupRun[]>("/api/v1/settings/retention/history")
+      .then((r) => Array.isArray(r.data) && setHistory(r.data))
       .catch(() => {});
   }, []);
 
@@ -156,36 +157,31 @@ export default function RetentionPage() {
       || !Number.isInteger(settings.dataset_versions_keep) || settings.dataset_versions_keep < 1 || settings.dataset_versions_keep > 1000;
     if (bad) { setError("Revise os campos destacados: use números inteiros dentro da faixa indicada."); return; }
     setSaving(true); setError(""); setSaved(false);
-    const r = await fetch("/api/v1/settings/retention", {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(settings),
-    });
-    setSaving(false);
-    if (!r.ok) {
-      const b = await r.json().catch(() => ({}));
-      setError(apiErrorText(b, "Falha ao salvar"));
-    } else {
+    try {
+      await apiRequest("/api/v1/settings/retention", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(settings),
+      });
       setSaved(true);
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setSaving(false);
     }
   }
 
   async function purge() {
-    if (!await askConfirm({
-      title: "Limpar agora",
-      message: "Apaga já os jobs, eventos de auditoria, uploads e versões de dados mais antigos que os períodos salvos nesta tela. Eventos de auditoria apagados não podem ser recuperados.",
-      confirmLabel: "Limpar agora",
-      danger: true,
-    })) return;
     setPurging(true); setPurgeOk(false); setError("");
-    const r = await fetch("/api/v1/settings/retention/purge", { method: "POST" });
-    setPurging(false);
-    if (!r.ok) {
-      const b = await r.json().catch(() => ({}));
-      setError(apiErrorText(b, "Falha ao enfileirar purga"));
-    } else {
+    try {
+      await apiRequest("/api/v1/settings/retention/purge", { method: "POST" });
+      purgeRef.current?.close();
       setPurgeOk(true);
       setTimeout(loadHistory, 1500);
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setPurging(false);
     }
   }
 
@@ -264,7 +260,7 @@ export default function RetentionPage() {
           <button
             type="button"
             disabled={purging}
-            onClick={purge}
+            onClick={() => purgeRef.current?.showModal()}
             className="btn btn-outline btn-error btn-sm"
           >
             <Trash2 size={14} className={purging ? "animate-pulse" : ""} />
@@ -290,7 +286,7 @@ export default function RetentionPage() {
             <p className="text-sm text-base-content/65 py-4 text-center">Nenhuma execução registrada ainda.</p>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full">
+              <table className="w-full table-stack">
                 <thead>
                   <tr className="text-xs text-base-content/65 border-b border-base-200">
                     <th className="pb-2 pr-4 text-left font-medium">Início</th>
@@ -314,13 +310,35 @@ export default function RetentionPage() {
           <h2 className="font-semibold text-sm text-base-content/70 uppercase tracking-wide">Como funciona</h2>
           <ul className="text-sm text-base-content/65 space-y-1 list-disc list-inside">
             <li>O worker executa a limpeza automaticamente a cada 24 horas via job <code className="font-mono text-xs">METADATA_CLEANUP</code>.</li>
-            <li>Use "Purgar agora" para forçar a limpeza imediatamente (enfileira um job).</li>
+            <li>Use &quot;Purgar agora&quot; para forçar a limpeza imediatamente (enfileira um job).</li>
             <li>Dados de datasets (tabelas SQL Server) nunca são afetados — apenas metadados internos.</li>
             <li>A janela de retenção conta a partir de <code className="font-mono text-xs">created_at</code> de cada registro.</li>
             <li>Os detalhes de cada execução ficam no histórico: <code className="font-mono text-xs">j=jobs · a=audit · u=uploads · v=versões</code>.</li>
           </ul>
         </div>
       </Panel>
+
+      <dialog ref={purgeRef} className="modal">
+        <div className="modal-box max-w-md">
+          <h3 className="text-lg font-bold">Purgar agora</h3>
+          <p className="mt-2 text-sm text-base-content/65">
+            Apaga já os jobs, eventos de auditoria, uploads e versões de dados mais antigos que os
+            períodos salvos nesta tela. Eventos de auditoria apagados não podem ser recuperados.
+          </p>
+          <DangerZone
+            description="Esta ação é imediata e não pode ser desfeita — mesmo dados que ainda seriam úteis para auditoria/conformidade serão removidos se estiverem fora da janela configurada."
+            confirmValue={PURGE_PHRASE}
+            confirmLabel="Purgar agora"
+            busyLabel="Enfileirando..."
+            busy={purging}
+            onConfirm={purge}
+          />
+          <div className="modal-action">
+            <button type="button" className="btn btn-sm btn-ghost" onClick={() => purgeRef.current?.close()}>Cancelar</button>
+          </div>
+        </div>
+        <form method="dialog" className="modal-backdrop"><button aria-label="Fechar" onClick={() => purgeRef.current?.close()}>fechar</button></form>
+      </dialog>
     </div>
   );
 }

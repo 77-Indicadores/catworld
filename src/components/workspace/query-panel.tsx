@@ -1,7 +1,9 @@
 "use client";
-import { useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Download, Play, Table2 } from "lucide-react";
-import { apiErrorText, warningsOf } from "@/lib/api-client";
+import CodeMirror, { EditorSelection, keymap, oneDark, Prec, type ReactCodeMirrorRef } from "@uiw/react-codemirror";
+import { sql as sqlLang } from "@codemirror/lang-sql";
+import { apiErrorText, apiRequest, errorMessage, warningsOf } from "@/lib/api-client";
 import { useFeedback } from "@/components/ui/feedback";
 import { SchemaBrowser } from "./schema-browser";
 import { ResultGrid } from "./result-grid";
@@ -18,41 +20,51 @@ export function QueryPanel({ datasets, projectId }: { datasets: WorkspaceDataset
   const [warnings, setWarnings] = useState<string[]>([]);
   const { notify } = useFeedback();
   const [liveSourceId, setLiveSourceId] = useState("");
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const editorRef = useRef<ReactCodeMirrorRef>(null);
 
   const [showBrowser, setShowBrowser] = useState(true);
-
-  // Posição do cursor guardada (o textarea sem foco não informa uma posição confiável): padrão = fim do texto.
-  const caret = useRef<{ start: number; end: number } | null>(null);
-  const rememberCaret = (el: HTMLTextAreaElement) => { caret.current = { start: el.selectionStart, end: el.selectionEnd }; };
-
-  /** Insere no cursor do editor (ou no fim, se ainda não houve cursor), mantendo o foco. */
-  function insertAtCursor(text: string) {
-    const { start, end } = caret.current ?? { start: sql.length, end: sql.length };
-    const needsSpace = start > 0 && !/[\s(,.\[]$/.test(sql.slice(0, start));
-    const chunk = (needsSpace ? " " : "") + text;
-    const pos = start + chunk.length;
-    setSql(sql.slice(0, start) + chunk + sql.slice(end));
-    caret.current = { start: pos, end: pos };
-    requestAnimationFrame(() => { const el = textareaRef.current; el?.focus(); el?.setSelectionRange(pos, pos); });
-  }
 
   async function execute() {
     setRunning(true); setError(""); setWarnings([]);
     try {
-      const response = await fetch(
+      const { data, meta } = await apiRequest<Result>(
         liveSourceId ? `/api/v1/dataset-sources/${liveSourceId}/query` : "/api/v1/queries",
         { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sql, limit: 10000, timeout: 30, normalize: true, ...(projectId ? { projectId } : {}) }) }
       );
-      const body = await response.json();
-      if (!response.ok) throw new Error(apiErrorText(body, "Falha na consulta"));
-      setResult(body.data);
-      setWarnings(warningsOf(body.meta));
+      setResult(data);
+      setWarnings(warningsOf(meta));
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Falha na consulta");
+      setError(errorMessage(e));
     } finally {
       setRunning(false);
     }
+  }
+
+  // Ref "sempre atual" pro atalho de teclado do editor não precisar recriar extensions a cada tecla.
+  const executeRef = useRef(execute);
+  useEffect(() => { executeRef.current = execute; });
+
+  const extensions = useMemo(() => [
+    sqlLang(),
+    // eslint-disable-next-line react-hooks/refs -- padrão "ref sempre atual": só lido dentro do handler, quando o atalho dispara, nunca durante o render.
+    Prec.highest(keymap.of([
+      { key: "Mod-Enter", run: () => { void executeRef.current(); return true; } },
+    ])),
+  ], []);
+
+  /** Insere no cursor do editor (ou no fim, se ainda não houve cursor), mantendo o foco. */
+  function insertAtCursor(text: string) {
+    const view = editorRef.current?.view;
+    if (!view) return;
+    const { from, to } = view.state.selection.main;
+    const doc = view.state.doc.toString();
+    const needsSpace = from > 0 && !/[\s(,.\[]$/.test(doc.slice(0, from));
+    const chunk = (needsSpace ? " " : "") + text;
+    view.dispatch({
+      changes: { from, to, insert: chunk },
+      selection: EditorSelection.cursor(from + chunk.length),
+    });
+    view.focus();
   }
 
   async function download(format: "csv" | "xlsx") {
@@ -114,19 +126,21 @@ export function QueryPanel({ datasets, projectId }: { datasets: WorkspaceDataset
       </div>
 
       {/* SQL editor */}
-      <div className="shrink-0 border-b border-base-300">
-        <label className="sr-only" htmlFor="query-sql-editor">Editor SQL</label>
-        <textarea
-          id="query-sql-editor"
-          ref={textareaRef}
+      <div className="shrink-0 border-b border-base-300" role="group" aria-label="Editor SQL">
+        <CodeMirror
+          ref={editorRef}
           value={sql}
-          onChange={(e) => { setSql(e.target.value); rememberCaret(e.target); }}
-          onSelect={(e) => rememberCaret(e.currentTarget)}
-          onBlur={(e) => rememberCaret(e.currentTarget)}
-          onKeyDown={(e) => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); execute(); } }}
-          className="block h-52 w-full resize-none bg-neutral p-4 font-mono text-sm leading-6 text-neutral-content outline-none"
-          spellCheck={false}
+          onChange={setSql}
+          extensions={extensions}
+          theme={oneDark}
+          height="208px"
+          basicSetup={{ lineNumbers: true, foldGutter: false, highlightActiveLine: true }}
+          className="text-sm"
           placeholder="Digite sua consulta SQL…"
+          onCreateEditor={(view) => {
+            // Cursor começa no fim do texto (como o textarea anterior) — sem isso, ficaria no início.
+            view.dispatch({ selection: EditorSelection.cursor(view.state.doc.length) });
+          }}
         />
       </div>
 

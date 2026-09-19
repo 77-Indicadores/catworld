@@ -78,8 +78,7 @@ export function UploadCard({ upload, importSummary }: { upload: UploadWithDatase
   const handleRetry = async () => {
     setRetrying(true);
     try {
-      await fetch(`/api/v1/uploads/${upload.id}?action=retry`, { method: "POST" });
-      router.refresh();
+      if (await runAction(`/api/v1/uploads/${upload.id}?action=retry`, { method: "POST" })) router.refresh();
     } finally {
       setRetrying(false);
     }

@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { Cable, CheckCircle2, CircleSlash, DatabaseZap, GitMerge, Play, Plus, RefreshCw, Search, Table2 } from "lucide-react";
-import { apiErrorText } from "@/lib/api-client";
+import { apiRequest, errorMessage } from "@/lib/api-client";
 import { CronPreview } from "./cron-field";
 
 type Connection = { id: string; name: string; provider: string; server: string; databaseName: string };
@@ -62,32 +62,36 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
     setIncrementalEnabled(false); setKeyColumn(""); setDeltaColumn(""); setIncrementalColumns([]);
     ref.current?.showModal();
     setLoadingMeta(true);
-    const response = await fetch("/api/v1/connections");
-    const body = await response.json();
-    const rows = (body.data ?? []).filter((c: Connection) => c.id);
-    setConnections(rows);
-    if (rows[0] && !connectionId) setConnectionId(rows[0].id);
-    setLoadingMeta(false);
+    try {
+      const { data } = await apiRequest<Connection[]>("/api/v1/connections");
+      const rows = (data ?? []).filter((c) => c.id);
+      setConnections(rows);
+      if (rows[0] && !connectionId) setConnectionId(rows[0].id);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setLoadingMeta(false);
+    }
   }
 
   useEffect(() => {
     if (!connectionId) return;
     Promise.resolve().then(() => setLoadingMeta(true));
-    fetch(`/api/v1/connections/${connectionId}/schemas`).then((r) => r.json()).then((body) => {
-      const rows = body.data ?? [];
+    apiRequest<SchemaRow[]>(`/api/v1/connections/${connectionId}/schemas`).then(({ data }) => {
+      const rows = data ?? [];
       setSchemas(rows);
       setSchema(rows[0]?.schema ?? "");
       setSelectedTables([]);
-    }).finally(() => setLoadingMeta(false));
+    }).catch((err) => setError(errorMessage(err))).finally(() => setLoadingMeta(false));
   }, [connectionId]);
 
   useEffect(() => {
     if (!connectionId || !schema || sourceKind !== "table") return;
     Promise.resolve().then(() => setLoadingMeta(true));
-    fetch(`/api/v1/connections/${connectionId}/tables?schema=${encodeURIComponent(schema)}`).then((r) => r.json()).then((body) => {
-      setTables(body.data ?? []);
+    apiRequest<TableRow[]>(`/api/v1/connections/${connectionId}/tables?schema=${encodeURIComponent(schema)}`).then(({ data }) => {
+      setTables(data ?? []);
       setSelectedTables([]);
-    }).finally(() => setLoadingMeta(false));
+    }).catch((err) => setError(errorMessage(err))).finally(() => setLoadingMeta(false));
   }, [connectionId, schema, sourceKind]);
 
   function toggleTable(table: string) {
@@ -121,12 +125,13 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
     if (!selectedTables[0]) return;
     setLoadingIncrementalColumns(true);
     try {
-      const response = await fetch(`/api/v1/connections/${connectionId}/columns?schema=${encodeURIComponent(schema)}&table=${encodeURIComponent(selectedTables[0])}`);
-      const body = await response.json();
-      const cols: Column[] = body.data ?? [];
+      const { data } = await apiRequest<Column[]>(`/api/v1/connections/${connectionId}/columns?schema=${encodeURIComponent(schema)}&table=${encodeURIComponent(selectedTables[0])}`);
+      const cols = data ?? [];
       setIncrementalColumns(cols);
       if (!keyColumn) setKeyColumn(suggestKeyColumn(cols));
       if (!deltaColumn) setDeltaColumn(suggestDeltaColumn(cols));
+    } catch (err) {
+      setError(errorMessage(err));
     } finally {
       setLoadingIncrementalColumns(false);
     }
@@ -135,20 +140,26 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
   async function testQuery() {
     if (!connectionId || sourceKind !== "query") return false;
     setLoading(true); setError(""); setQueryStatus("idle");
-    const response = await fetch(`/api/v1/connections/${connectionId}/columns?sql=${encodeURIComponent(sourceSql)}`);
-    const body = await response.json();
-    setLoading(false);
-    if (!response.ok) { setColumns([]); setQueryStatus("error"); setError(apiErrorText(body, "Falha ao testar consulta")); return false; }
-    setColumns(body.data ?? []);
-    setQueryTestedSql(sourceSql);
-    setQueryStatus("ok");
-    return true;
+    try {
+      const { data } = await apiRequest<Column[]>(`/api/v1/connections/${connectionId}/columns?sql=${encodeURIComponent(sourceSql)}`);
+      setColumns(data ?? []);
+      setQueryTestedSql(sourceSql);
+      setQueryStatus("ok");
+      return true;
+    } catch (err) {
+      setColumns([]);
+      setQueryStatus("error");
+      setError(errorMessage(err));
+      return false;
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function create() {
     setLoading(true); setError("");
     try {
-      const response = await fetch(`/api/v1/datasets/${datasetId}/sources`, {
+      await apiRequest(`/api/v1/datasets/${datasetId}/sources`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(sourceKind === "table" ? {
@@ -170,12 +181,10 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
           keyColumn: mode === "extract" && incrementalEnabled ? (keyColumn.trim() || null) : null,
         }),
       });
-      const body = await response.json();
-      if (!response.ok) throw new Error(apiErrorText(body, "Falha ao criar fonte"));
       ref.current?.close();
       onComplete();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Falha ao criar fonte");
+      setError(errorMessage(e));
     } finally {
       setLoading(false);
     }
