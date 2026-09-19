@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useState } from "react";
+import { useDarkMode } from "@/lib/use-dark-mode";
 import {
   ArrowUpFromLine, BookOpen, CheckCircle2, ChevronRight, CircleUserRound, CircleX, CloudCog, Database,
   FolderKanban, Home, LayoutDashboard, LogOut, Menu, Moon, ScrollText,
@@ -35,17 +36,11 @@ const navBottom = [
   { href: "/knowledge", label: "Base de conhecimento", icon: BookOpen },
 ];
 
-function subscribeTheme(onChange: () => void) {
-  const observer = new MutationObserver(onChange);
-  observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
-  return () => observer.disconnect();
-}
-
 export function AppShell({ children, user, signOutAction }: { children: React.ReactNode; user?: ShellUser; signOutAction?: () => Promise<void> }) {
   const pathname = usePathname();
 
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const dark = useSyncExternalStore(subscribeTheme, () => document.documentElement.getAttribute("data-theme") === "catworld-dark", () => false);
+  const dark = useDarkMode();
   const [storageStatus, setStorageStatus] = useState<StorageStatus>(null);
 
   // O tema inicial é aplicado antes da pintura por um script no layout (sem "piscar"); aqui só lemos e alternamos.
