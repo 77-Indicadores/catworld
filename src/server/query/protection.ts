@@ -78,6 +78,8 @@ export type QueryCacheResult = {
   rowCount: number;
   truncated: boolean;
   executionTimeMs: number;
+  /** So o servidor usa (vira meta.warnings; nao vai em data): colunas que mudariam com normalize:true. */
+  legacyFormatColumns?: string[];
 };
 
 const cache = new Map<string, CacheEntry>();

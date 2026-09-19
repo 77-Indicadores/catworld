@@ -458,3 +458,18 @@ def test_query_payload_only_carries_normalize_when_requested():
     assert "normalize" not in bodies[0]
     assert bodies[1]["normalize"] is True
     assert bodies[0] == {"sql": "SELECT 1", "timeout": 60, "limit": 10, "offset": 0}
+
+
+def test_server_warnings_become_python_runtime_warnings():
+    """meta.warnings do servidor (ex: paginacao sem ORDER BY) chegam ao usuario do SDK sem bloquear a chamada."""
+    def handler(request):
+        return httpx.Response(200, json={
+            "data": {"rows": [{"a": 1}], "columns": ["a"], "rowCount": 1},
+            "meta": {"warnings": ["paginacao com offset sem ORDER BY"]},
+            "error": None,
+        })
+
+    with client_with_handler(handler) as client:
+        with pytest.warns(RuntimeWarning, match="paginacao com offset sem ORDER BY"):
+            result = client.query("SELECT 1", limit=10)
+    assert result.rows == [{"a": 1}]

@@ -66,6 +66,15 @@ export function normalizeValue(v: unknown, kind: ColumnKind, flavor: DriverFlavo
   }
 }
 
+/**
+ * Colunas cujo VALOR muda com `normalize: true` (formato legado x recomendado). Postgres ja entrega decimal e
+ * bigint como string; o SQL Server entrega decimal como numero e DATE/TIME como Date.
+ */
+export function legacyFormatColumns(kinds: Record<string, ColumnKind>, flavor: DriverFlavor): string[] {
+  const changes: ColumnKind[] = flavor === "pg" ? ["date", "binary"] : ["date", "time", "decimal", "binary"];
+  return Object.entries(kinds).filter(([, k]) => changes.includes(k)).map(([n]) => n);
+}
+
 /** Normaliza as linhas in-place-friendly: so colunas com tipo logico especial sao tocadas. */
 export function normalizeRows(
   rows: Record<string, unknown>[],

@@ -58,16 +58,37 @@ export default function SqlContractSettingsPage() {
   const [ok, setOk] = useState(false);
   const [stats, setStats] = useState<Stats | null>(null);
   const [pgIsolation, setPgIsolation] = useState<string | null>(null);
+  const [resultFormat, setResultFormat] = useState<"legacy" | "normalized">("legacy");
+  const [fmtSaving, setFmtSaving] = useState(false);
 
   useEffect(() => {
     fetch("/api/v1/settings/sql-contract")
       .then((r) => r.json())
       .then((j) => {
         if (j.error) setError(j.error.message ?? "Falha ao carregar");
-        else { setMode(j.data.mode); setSaved(j.data.mode); setStats(j.data.stats ?? null); setPgIsolation(j.data.pgIsolation ?? null); }
+        else { setMode(j.data.mode); setSaved(j.data.mode); setStats(j.data.stats ?? null); setPgIsolation(j.data.pgIsolation ?? null); setResultFormat(j.data.resultFormat === "normalized" ? "normalized" : "legacy"); }
       })
       .catch(() => setError("Falha ao carregar"));
   }, []);
+
+  async function saveFormat(next: "legacy" | "normalized") {
+    if (next === resultFormat) return;
+    setFmtSaving(true); setError("");
+    try {
+      const r = await fetch("/api/v1/settings/sql-contract", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ resultFormat: next }),
+      });
+      const j = await r.json();
+      if (j.error) throw new Error(j.error.message ?? "Falha ao salvar");
+      setResultFormat(next);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Falha ao salvar");
+    } finally {
+      setFmtSaving(false);
+    }
+  }
 
   async function save() {
     if (!mode) return;
@@ -194,6 +215,25 @@ export default function SqlContractSettingsPage() {
       <Panel>
         <div className="p-5 space-y-2 text-sm text-base-content/70">
           <h2 className="font-semibold text-sm text-base-content/70 uppercase tracking-wide">Formato do resultado</h2>
+          <p>Formato padrão para requisições que <strong>não</strong> enviam <code>normalize</code>:</p>
+          <div className="flex flex-wrap gap-2" role="group" aria-label="Formato padrão do resultado">
+            <button
+              type="button" disabled={fmtSaving} onClick={() => saveFormat("legacy")}
+              className={`btn btn-sm ${resultFormat === "legacy" ? "btn-primary" : "btn-ghost border border-base-300"}`}
+            >
+              Legado (deprecado)
+            </button>
+            <button
+              type="button" disabled={fmtSaving} onClick={() => saveFormat("normalized")}
+              className={`btn btn-sm ${resultFormat === "normalized" ? "btn-primary" : "btn-ghost border border-base-300"}`}
+            >
+              Normalizado (recomendado)
+            </button>
+          </div>
+          <p className="text-xs text-base-content/55">
+            Legado: tipos como o driver entrega (varia por backend); as respostas avisam em <code>meta.warnings</code>. Normalizado: datas
+            ISO, decimal e bigint como texto. Quem envia <code>normalize</code> explicitamente não é afetado.
+          </p>
           <p>
             A normalização de tipos (datas ISO, bigint e decimal como texto) é escolhida por requisição com
             <code className="mx-1">&quot;normalize&quot;: true</code>e não depende deste modo. O CSV de export aceita

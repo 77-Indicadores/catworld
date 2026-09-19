@@ -17,11 +17,12 @@ import { handleApiError, ok } from "@/server/http";
 import { audit } from "@/server/audit";
 import { getContractMode, getContractStats, invalidateContractModeCache } from "@/server/sql-contract/apply";
 import { getPgIsolationMode, invalidatePgIsolationModeCache } from "@/server/storage/pg-roles";
+import { getNormalizeDefault, invalidateNormalizeDefaultCache } from "@/server/sql-contract/format-default";
 
 export async function GET(r: NextRequest) {
   try {
     requireRole(await resolveActor(r), ["ADMIN"]);
-    return ok({ mode: await getContractMode(), modes: ["off", "shadow", "fallback", "strict"], pgIsolation: await getPgIsolationMode(), stats: getContractStats() });
+    return ok({ mode: await getContractMode(), modes: ["off", "shadow", "fallback", "strict"], pgIsolation: await getPgIsolationMode(), resultFormat: (await getNormalizeDefault()) ? "normalized" : "legacy", stats: getContractStats() });
   } catch (e) {
     return handleApiError(e);
   }
@@ -34,16 +35,18 @@ export async function PATCH(r: NextRequest) {
     const input = z.object({
       mode: z.enum(["off", "shadow", "fallback", "strict"]).optional(),
       pgIsolation: z.enum(["enforce", "off"]).optional(),
-    }).refine((v) => v.mode !== undefined || v.pgIsolation !== undefined, { message: "Informe mode e/ou pgIsolation" }).parse(await r.json());
+      resultFormat: z.enum(["legacy", "normalized"]).optional(),
+    }).refine((v) => v.mode !== undefined || v.pgIsolation !== undefined || v.resultFormat !== undefined, { message: "Informe mode, pgIsolation e/ou resultFormat" }).parse(await r.json());
     const put = (key: string, value: string) => prisma.$executeRawUnsafe(
       `INSERT INTO cw_system_settings (key, value, updated_at) VALUES ($1, $2, NOW())
        ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()`,
       key, value,
     );
     if (input.mode) { await put("sql_contract.mode", input.mode); invalidateContractModeCache(); }
+    if (input.resultFormat) { await put("result.normalize_default", input.resultFormat === "normalized" ? "true" : "false"); invalidateNormalizeDefaultCache(); }
     if (input.pgIsolation) { await put("pg_isolation.mode", input.pgIsolation); invalidatePgIsolationModeCache(); }
     await audit(actor, "SQL_CONTRACT_MODE_CHANGED", "settings", undefined, input);
-    return ok({ mode: await getContractMode(), pgIsolation: await getPgIsolationMode() });
+    return ok({ mode: await getContractMode(), pgIsolation: await getPgIsolationMode(), resultFormat: (await getNormalizeDefault()) ? "normalized" : "legacy" });
   } catch (e) {
     return handleApiError(e);
   }

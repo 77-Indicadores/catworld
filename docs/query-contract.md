@@ -10,18 +10,18 @@ Entrada:
 |---|---|---|
 | `sql` | — | 1–50 000 caracteres; T-SQL, somente leitura |
 | `datasetId` / `projectId` | — | escopo e **controle de acesso** (403 sem permissão). Sem escopo: nomes qualificados, só o que os grants alcançam |
-| `limit` | 10 000 | 1–10 000 (acima disso: 400 `VALIDATION_ERROR`) |
+| `limit` | 10 000 | 1–10 000 por página (acima disso: 400 `VALIDATION_ERROR`); vale também com `TOP n` |
 | `offset` | 0 | ≥ 0 |
 | `timeout` | 60 | 1–300 na entrada, mas **consultas paginadas são limitadas a 120 s** (aviso em `meta.warnings`); só o stream vai a 300 s |
 | `stream` | false | NDJSON, ver abaixo |
-| `normalize` | false | tipos normalizados (ver `sql-contract.md`) |
+| `normalize` | padrão configurável (`legacy`) | formato normalizado, recomendado (ver abaixo) |
 
 Saída (`data`): `{ columns, rows, rowCount, truncated, executionTimeMs }`.
 
 - `columns` e as chaves de cada linha são os **nomes finais**. Colunas repetidas na consulta (`SELECT a.Id, b.Id …`) ganham sufixo
   determinístico: `Id`, `Id_2`, `Id_3` (a 1ª mantém o nome; nunca colide com um nome já existente). Vale para os caminhos Postgres
   (storage e live). **SQL Server: o driver junta nomes repetidos num array; ainda não há tratamento** (não verificado por falta de instância).
-- `truncated`: `true` quando havia mais linhas além do `limit`. Um `TOP n` do próprio usuário nunca marca `truncated`.
+- `truncated`: `true` quando havia mais linhas além do `limit`, inclusive dentro do conjunto de um `TOP n`.
 - `rowCount` = linhas devolvidas nesta resposta.
 
 ## Cache
@@ -49,9 +49,41 @@ No stream, a linha final é `{"__error__":true,"message":"…","code":"QUERY_TIM
 - Erros antes de começar (validação, permissão, SQL inválido) voltam como JSON no envelope, com status 4xx.
 - Sem `truncated` e sem envelope.
 
-## Ainda em aberto (decisão pendente)
+## `TOP n`, `limit` e `offset` (igual no Postgres e no SQL Server)
 
-- `TOP n` + `offset`/`limit` no Postgres aplica o `offset` **antes** do `TOP` e não respeita o teto de 10 000 (o SQL Server aplica o
-  `TOP` primeiro e o teto sempre). Mudar quebra quem usa `TOP 50000` para passar do teto.
-- Formato sem `normalize` (decimal/bigint/data) difere entre backends.
-- Paginação por `offset` sem `ORDER BY` não é determinística.
+- `TOP n` limita o **conjunto**; `limit` e `offset` paginam **dentro** dele. `TOP 2` com `offset=1` devolve só a 2ª linha.
+- O teto de **10 000 linhas por página vale sempre**: `TOP 20000` devolve 10 000 com `truncated: true` (2ª página: `offset=10000`).
+  `truncated` é `true` quando há mais linhas dentro do conjunto além do `limit`.
+- Para ler mais que uma página de uma vez, use `"stream": true` (não tem teto de linhas).
+- **Mudança de comportamento (Postgres):** antes o `TOP n` virava o limite de fora — o `offset` valia *antes* dele e `TOP 50000`
+  devolvia 50 000 linhas de uma vez. Quem dependia disso deve usar `stream` ou paginar. A resposta avisa quando `TOP n > limit`.
+
+## Formato do resultado: legado × normalizado
+
+- **Normalizado** (`"normalize": true`) é o formato **recomendado**: datas ISO, `decimal`/`bigint` como texto, `time` como `HH:MM:SS`.
+  É igual em todos os backends.
+- **Legado** (sem `normalize`) é o formato do driver e varia por backend. Está **deprecado**: quando alguma coluna mudaria com
+  `normalize`, a resposta traz um aviso em `meta.warnings` com os nomes dessas colunas, e o cabeçalho `X-Result-Format: legacy`.
+- **Padrão configurável sem deploy:** `PATCH /api/v1/settings/sql-contract { "resultFormat": "normalized" }` (ou a tela Configurações >
+  Contrato de SQL) muda o formato das requisições que **não** enviam `normalize`. Quem envia `normalize` explicitamente
+  (`true` ou `false`) nunca é afetado. O padrão de fábrica continua `legacy`, para não quebrar ninguém; a migração é decisão do admin,
+  cliente a cliente. Vale para `/queries` e `/dataset-sources/:id/query` (o export usa `dateFormat=iso`).
+
+## Avisos (`meta.warnings`)
+
+Não bloqueiam; a resposta é a mesma de sempre com um campo a mais em `meta`. O SDK Python os emite como `RuntimeWarning`.
+
+| Aviso | Quando |
+|---|---|
+| paginação sem `ORDER BY` | `offset > 0` e a consulta não tem `ORDER BY` no nível de fora: a ordem não é garantida entre páginas (linhas podem repetir ou faltar) |
+| `TOP n` acima do limite | `TOP n` com `n > limit`: o resultado vem paginado |
+| formato legado | alguma coluna mudaria com `normalize: true` |
+| timeout limitado | `timeout > 120` em rota paginada |
+
+Escolha de projeto: paginação sem `ORDER BY` **avisa**, não retorna 400, porque exigi-lo quebraria clientes existentes (o
+`iter_query` do SDK pagina por `offset`). Se um dia virar erro, será por configuração, com aviso prévio.
+
+## Limitações conhecidas
+
+- SQL Server: colunas de mesmo nome ainda não são tratadas (driver junta em array); não verificado por falta de instância.
+- Alteração de dados feita fora do Catworld (direto no banco) só aparece depois do TTL do cache (5 min).

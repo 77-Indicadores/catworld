@@ -128,7 +128,7 @@ export async function queryColumns(connection: PgConnection, query: string): Pro
   });
 }
 
-import { mssqlKind, normalizeRows, pgKind, type ColumnKind } from "@/server/sql-contract/result";
+import { legacyFormatColumns, mssqlKind, normalizeRows, pgKind, type ColumnKind } from "@/server/sql-contract/result";
 import { dedupeColumnNames, rowsFromArrays } from "@/server/sql-contract/columns";
 
 export async function executePostgresReadOnly(connection: PgConnection, query: string, timeout = 30, limit = 10000, offset = 0, normalize = false) {
@@ -138,6 +138,7 @@ export async function executePostgresReadOnly(connection: PgConnection, query: s
     const started = Date.now();
     const result = await pgQueryArray(client, `SELECT * FROM (${statement}) cw_live_result LIMIT ${Math.min(Math.max(limit, 1), 10000) + 1} OFFSET ${Math.max(offset, 0)}`);
     const names = dedupeColumnNames(result.fields.map((f) => f.name));
+    const pgKinds = Object.fromEntries(result.fields.map((f, i) => [names[i]!, pgKind(f.dataTypeID)])) as Record<string, ColumnKind>;
     const sliced = rowsFromArrays(result.rows.slice(0, limit) as unknown[][], names);
     const rows = normalize
       ? normalizeRows(sliced, Object.fromEntries(result.fields.map((f, i) => [names[i]!, pgKind(f.dataTypeID)])) as Record<string, ColumnKind>, "pg")
@@ -148,6 +149,7 @@ export async function executePostgresReadOnly(connection: PgConnection, query: s
       rowCount: rows.length,
       truncated: result.rows.length > limit,
       executionTimeMs: Date.now() - started,
+      ...(normalize || legacyFormatColumns(pgKinds, "pg").length === 0 ? {} : { legacyFormatColumns: legacyFormatColumns(pgKinds, "pg") }),
     };
   });
 }

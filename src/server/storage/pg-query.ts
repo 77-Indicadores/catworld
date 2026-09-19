@@ -10,6 +10,7 @@ import { Query, type PoolClient } from "pg";
 import { validateReadOnlySql } from "@/server/security/sql-safety";
 import { ApiError, isQueryTimeout, publicQueryErrorMessage } from "@/server/http";
 import { dedupeColumnNames, rowsFromArrays } from "@/server/sql-contract/columns";
+import { legacyFormatColumns } from "@/server/sql-contract/result";
 import { MAX_RESULT_BYTES, approxRowBytes } from "@/server/query/protection";
 import { contractTranslate, getContractMode, runWithContract } from "@/server/sql-contract/apply";
 import { pgQuote, type PgStorageConnection } from "./pg-storage";
@@ -54,6 +55,7 @@ export async function executeReadOnlyPg(
   rowCount: number;
   truncated: boolean;
   executionTimeMs: number;
+  legacyFormatColumns?: string[];
 }> {
   const validated = validateReadOnlySql(sql);
   if (!validated.safe) throw new ApiError(400, "UNSAFE_SQL", validated.reason);
@@ -66,18 +68,13 @@ export async function executeReadOnlyPg(
   }
 
   // Monta query paginada
-  const effectiveLimit = topLimit ?? limit;
-  let paged: string;
-
-  if (topLimit !== null) {
-    // TOP N já foi extraído — adiciona LIMIT ao final
-    paged = `${statement} LIMIT ${topLimit}`; // TOP N do usuario: nunca "truncado"
-    if (offset > 0) paged += ` OFFSET ${offset}`;
-  } else if (offset > 0) {
-    paged = `SELECT * FROM (${statement}) AS _cw_q LIMIT ${effectiveLimit + 1} OFFSET ${offset}`;
-  } else {
-    paged = `SELECT * FROM (${statement}) AS _cw_q LIMIT ${effectiveLimit + 1}`;
-  }
+  // Contrato: `TOP n` limita o CONJUNTO; limit/offset paginam DENTRO dele (igual ao SQL Server, que aplica o TOP na
+  // subconsulta). O teto de 10000 por pagina vale sempre. Antes o TOP virava o LIMIT de fora e o offset valia ANTES dele.
+  const effectiveLimit = limit;
+  const inner = topLimit !== null ? `${statement} LIMIT ${topLimit}` : statement;
+  const paged = offset > 0
+    ? `SELECT * FROM (${inner}) AS _cw_q LIMIT ${effectiveLimit + 1} OFFSET ${offset}`
+    : `SELECT * FROM (${inner}) AS _cw_q LIMIT ${effectiveLimit + 1}`;
 
   const timeoutMs = Math.min(Math.max(timeout, 1), 120) * 1000;
 
@@ -142,12 +139,14 @@ export async function executeReadOnlyPg(
 
     const asObjects = rowsFromArrays(rows.slice(0, effectiveLimit), columns);
     const limitedRows = normalize ? normalizeRows(asObjects, kinds, "pg") : asObjects;
+    const legacyCols = legacyFormatColumns(kinds, "pg");
 
     return {
       columns,
       rows: limitedRows,
       rowCount: limitedRows.length,
-      truncated: topLimit === null && rows.length > effectiveLimit,
+      truncated: rows.length > effectiveLimit,
+      ...(normalize || legacyCols.length === 0 ? {} : { legacyFormatColumns: legacyCols }),
       executionTimeMs: Date.now() - started,
     };
   } finally {

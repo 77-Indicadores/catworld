@@ -45,6 +45,40 @@ d("pg-query (executando)", () => {
     expect(r.rows[0]).toEqual({ dia: "2026-01-31", dia_2: "2026-01-31", big: "9007199254740993" });
   });
 
+  // ---- contrato do TOP: limita o CONJUNTO; limit/offset paginam DENTRO dele; teto de pagina sempre vale ----
+  it("TOP n + offset: o TOP vale primeiro (igual ao SQL Server) — TOP 2 e offset 1 -> so o 2o", async () => {
+    const r = await executeReadOnlyPg(conn, "SELECT TOP 2 [id] FROM pq.t ORDER BY id", 30, 100, [], 1, false, null);
+    expect(r.rows).toEqual([{ id: 2 }]);
+    expect(r.truncated).toBe(false);
+  });
+
+  it("TOP 20 com limit 10: 1a pagina truncada, 2a completa, 3a vazia", async () => {
+    const sql = "SELECT TOP 20 g FROM generate_series(1, 100) AS g ORDER BY g";
+    const p1 = await executeReadOnlyPg(conn, sql, 30, 10, [], 0, false, null);
+    expect(p1.rows.map((x) => x.g)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(p1.truncated).toBe(true); // ha mais linhas DENTRO do conjunto do TOP
+    const p2 = await executeReadOnlyPg(conn, sql, 30, 10, [], 10, false, null);
+    expect(p2.rows.map((x) => x.g)).toEqual([11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
+    expect(p2.truncated).toBe(false);
+    const p3 = await executeReadOnlyPg(conn, sql, 30, 10, [], 20, false, null);
+    expect(p3.rowCount).toBe(0);
+  });
+
+  it("TOP acima do teto de 10000 nao passa dele (antes devolvia todas)", async () => {
+    const r = await executeReadOnlyPg(conn, "SELECT TOP 20000 g FROM generate_series(1, 30000) AS g ORDER BY g", 30, 10000, [], 0, false, null);
+    expect(r.rowCount).toBe(10000);
+    expect(r.truncated).toBe(true);
+  });
+
+  it("formato legado: informa as colunas que mudariam com normalize; com normalize nao informa", async () => {
+    const legacy = await executeReadOnlyPg(conn, "SELECT id, dia FROM pq.t ORDER BY id", 30, 100, [], 0, false, null);
+    expect(legacy.legacyFormatColumns).toEqual(["dia"]);
+    const norm = await executeReadOnlyPg(conn, "SELECT id, dia FROM pq.t ORDER BY id", 30, 100, [], 0, true, null);
+    expect(norm.legacyFormatColumns).toBeUndefined();
+    const plain = await executeReadOnlyPg(conn, "SELECT id, nome FROM pq.t ORDER BY id", 30, 100, [], 0, false, null);
+    expect(plain.legacyFormatColumns).toBeUndefined();
+  });
+
   it("estouro de tempo e reconhecido como QUERY_TIMEOUT (codigo 57014)", async () => {
     let err: unknown;
     try {

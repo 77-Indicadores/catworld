@@ -113,7 +113,7 @@ export async function queryColumnsMssql(connection: MssqlConnection, query: stri
   });
 }
 
-import { mssqlKind, normalizeRows, pgKind, type ColumnKind } from "@/server/sql-contract/result";
+import { legacyFormatColumns, mssqlKind, normalizeRows, pgKind, type ColumnKind } from "@/server/sql-contract/result";
 
 export async function executeMssqlReadOnly(connection: MssqlConnection, query: string, timeout = 30, limit = 10000, offset = 0, normalize = false) {
   const statement = safeStatementMssql(query);
@@ -128,6 +128,7 @@ export async function executeMssqlReadOnly(connection: MssqlConnection, query: s
       const clampedLimit = Math.min(Math.max(limit, 1), 10000);
       const result = await req.query(paginateMssql(statement, Math.max(offset, 0), clampedLimit + 1));
       const cols = result.recordset.columns as Record<string, { name: string; type?: { declaration?: string } }> | undefined;
+      const msKinds = Object.fromEntries(Object.entries(cols ?? {}).map(([n, c]) => [n, mssqlKind(c.type?.declaration)])) as Record<string, ColumnKind>;
       const sliced = result.recordset.slice(0, clampedLimit) as Record<string, unknown>[];
       const rows = normalize
         ? normalizeRows(sliced, Object.fromEntries(Object.entries(cols ?? {}).map(([n, c]) => [n, mssqlKind(c.type?.declaration)])) as Record<string, ColumnKind>, "mssql")
@@ -138,6 +139,7 @@ export async function executeMssqlReadOnly(connection: MssqlConnection, query: s
         rowCount: rows.length,
         truncated: result.recordset.length > clampedLimit,
         executionTimeMs: Date.now() - started,
+        ...(normalize || legacyFormatColumns(msKinds, "mssql").length === 0 ? {} : { legacyFormatColumns: legacyFormatColumns(msKinds, "mssql") }),
       };
     } finally {
       await pool.close().catch(() => undefined);

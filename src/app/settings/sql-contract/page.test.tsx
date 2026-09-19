@@ -13,7 +13,7 @@ beforeEach(() => {
     if (init?.method === "PATCH") return respond({ data: { mode: JSON.parse(String(init.body)).mode }, error: null });
     return respond({
       data: {
-        mode: "fallback", modes: ["off", "shadow", "fallback", "strict"], pgIsolation: "enforce",
+        mode: "fallback", modes: ["off", "shadow", "fallback", "strict"], pgIsolation: "enforce", resultFormat: "legacy",
         stats: {
           since: "2026-09-19T00:00:00.000Z", scope: "instancia",
           translated: { "storage-pg": 40, "live-pg": 3 },
@@ -47,6 +47,16 @@ describe("tela Contrato de SQL", () => {
     expect(screen.getByText("SELECT a::text FROM t")).toBeTruthy();
     expect(screen.getByText("5")).toBeTruthy();
     expect(screen.getByText("ativo")).toBeTruthy();
+  });
+
+  it("formato padrao do resultado: mostra o atual e troca para normalizado via PATCH", async () => {
+    render(<SqlContractSettingsPage />);
+    const normalized = await screen.findByRole("button", { name: "Normalizado (recomendado)" });
+    expect(screen.getByRole("button", { name: "Legado (deprecado)" }).className).toContain("btn-primary");
+    fireEvent.click(normalized);
+    await waitFor(() => expect(normalized.className).toContain("btn-primary"));
+    const patch = fetchMock.mock.calls.find((c) => (c[1] as RequestInit | undefined)?.method === "PATCH")!;
+    expect(JSON.parse(String((patch[1] as RequestInit).body))).toEqual({ resultFormat: "normalized" });
   });
 
   it("estrito mostra o aviso e salva via PATCH", async () => {

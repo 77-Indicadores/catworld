@@ -28,3 +28,14 @@ describe("contrato de resultado", () => {
     expect(mssqlKind("varchar")).toBe("other");
   });
 });
+
+describe("legacyFormatColumns (colunas que mudam com normalize)", () => {
+  it("Postgres: so date e binary (decimal/bigint ja chegam como string)", async () => {
+    const { legacyFormatColumns } = await import("./result");
+    expect(legacyFormatColumns({ a: "date", b: "decimal", c: "bigint", d: "binary", e: "other", f: "datetime" }, "pg").sort()).toEqual(["a", "d"]);
+  });
+  it("SQL Server: date, time, decimal e binary", async () => {
+    const { legacyFormatColumns } = await import("./result");
+    expect(legacyFormatColumns({ a: "date", b: "decimal", c: "bigint", d: "time", e: "other" }, "mssql").sort()).toEqual(["a", "b", "d"]);
+  });
+});

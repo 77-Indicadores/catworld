@@ -799,7 +799,13 @@ class CatworldClient:
             raise ConnectionError(f"Falha de conexão com o servidor: {exc}") from exc
 
         if response.is_success:
-            return response.json()
+            body = response.json()
+            # Avisos do servidor (paginacao sem ORDER BY, formato legado, timeout limitado...): nao bloqueiam.
+            meta = body.get("meta") if isinstance(body, dict) else None
+            if isinstance(meta, dict):
+                for message in meta.get("warnings") or []:
+                    warnings.warn(f"Catworld: {message}", RuntimeWarning, stacklevel=4)
+            return body
 
         try:
             body = response.json()

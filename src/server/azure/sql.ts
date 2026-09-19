@@ -1,5 +1,5 @@
 import * as Sentry from "@sentry/nextjs";
-import { mssqlKind, normalizeRows, pgKind, type ColumnKind } from "@/server/sql-contract/result";
+import { legacyFormatColumns, mssqlKind, normalizeRows, pgKind, type ColumnKind } from "@/server/sql-contract/result";
 import sql from "mssql";
 import { getStoragePool } from "@/server/storage/pool";
 import { quoteIdentifier } from "@/server/security/naming";
@@ -139,7 +139,7 @@ export async function executeReadOnly(principal: string, query: string, timeout 
       : `SELECT * FROM (${statement}) AS _cw_q ORDER BY (SELECT NULL) OFFSET ${offset} ROWS FETCH NEXT ${fetchLimit} ROWS ONLY`;
 
   try {
-    return await new Promise<{ columns: string[]; rows: Record<string, unknown>[]; rowCount: number; truncated: boolean; executionTimeMs: number }>((resolve, reject) => {
+    return await new Promise<{ columns: string[]; rows: Record<string, unknown>[]; rowCount: number; truncated: boolean; executionTimeMs: number; legacyFormatColumns?: string[] }>((resolve, reject) => {
       const request = new sql.Request(pool);
       // .timeout is a no-op in mssql v12; overrides.requestTimeout is the real field.
       (request as unknown as { timeout: number }).timeout = timeoutMs;
@@ -196,6 +196,7 @@ export async function executeReadOnly(principal: string, query: string, timeout 
             rowCount: Math.min(rows.length, limit),
             truncated,
             executionTimeMs: Date.now() - started,
+            ...(normalize || legacyFormatColumns(kinds, "mssql").length === 0 ? {} : { legacyFormatColumns: legacyFormatColumns(kinds, "mssql") }),
           });
         });
       });

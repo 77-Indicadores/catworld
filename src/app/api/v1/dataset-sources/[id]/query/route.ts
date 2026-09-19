@@ -8,34 +8,44 @@ import { ApiError, handleApiError, isQueryTimeout, ok, queryTimeoutError } from 
 import { executePostgresReadOnly, quotedPgTable } from "@/server/connections/postgres";
 import { executeMssqlReadOnly, quotedMssqlTable } from "@/server/connections/mssql";
 import { runWithContract } from "@/server/sql-contract/apply";
+import { getNormalizeDefault } from "@/server/sql-contract/format-default";
+import { paginationWarnings } from "@/server/sql-contract/query-shape";
 import { SqlContractError } from "@/server/sql-contract/translate";
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const actor = await resolveActor(request);
-    const input = z.object({ sql: z.string().min(1).max(50000).optional(), timeout: z.number().int().min(1).max(120).default(30), limit: z.number().int().min(1).max(10000).default(10000), offset: z.number().int().min(0).default(0), normalize: z.boolean().default(false) }).parse(await request.json());
+    const input = z.object({ sql: z.string().min(1).max(50000).optional(), timeout: z.number().int().min(1).max(120).default(30), limit: z.number().int().min(1).max(10000).default(10000), offset: z.number().int().min(0).default(0), normalize: z.boolean().optional() }).parse(await request.json());
     const source = await prisma.datasetSource.findUniqueOrThrow({ where: { id: (await params).id }, include: { dataset: true, connection: true, targetTable: true } });
     if (!await canAccess(actor, "READ", source.dataset.projectId, source.datasetId) && actor.role !== "ADMIN") throw new ApiError(403, "FORBIDDEN", "Sem permissao para ler a fonte");
     if (source.mode !== "live") throw new ApiError(400, "NOT_LIVE", "Fonte nao e live");
+    const normalize = input.normalize ?? await getNormalizeDefault();
     const isMssql = source.connection.provider === "mssql";
     const tableRef = isMssql ? quotedMssqlTable(source.sourceSchema!, source.sourceTable!) : quotedPgTable(source.sourceSchema!, source.sourceTable!);
     // Contrato de SQL: o usuario escreve T-SQL; origem Postgres recebe a traducao.
     // O SQL nativo da propria fonte (sourceSql / SELECT *) ja esta no dialeto da origem.
     const execute = async (translated: { sql: string; topLimit: number | null } | null) => {
-      const query = translated
+      let query = translated
         ? qualifySourceReference(translated.sql, source, isMssql)
         : source.sourceKind === "table" ? `SELECT * FROM ${tableRef}` : source.sourceSql!;
-      const limit = translated?.topLimit != null ? Math.min(translated.topLimit, 10000) : input.limit;
-      const result = isMssql
-        ? await executeMssqlReadOnly(source.connection, query, input.timeout, limit, input.offset, input.normalize)
-        : await executePostgresReadOnly(source.connection, query, input.timeout, limit, input.offset, input.normalize);
-      // TOP n pedido pelo usuario nao e truncamento (o corte e intencional)
-      return translated?.topLimit != null ? { ...result, truncated: false } : result;
+      // `TOP n` limita o CONJUNTO; limit/offset paginam dentro dele (igual ao SQL Server, que ja o traz no proprio SQL).
+      if (translated?.topLimit != null) query = `${query} LIMIT ${translated.topLimit}`;
+      return isMssql
+        ? await executeMssqlReadOnly(source.connection, query, input.timeout, input.limit, input.offset, normalize)
+        : await executePostgresReadOnly(source.connection, query, input.timeout, input.limit, input.offset, normalize);
     };
     const result = input.sql
       ? await runWithContract(input.sql, isMssql ? "mssql" : "postgres", isMssql ? "live-mssql" : "live-pg", "passthrough", execute)
       : await execute(null);
-    return ok(result);
+    // legacyFormatColumns e so do servidor: vira aviso de depreciacao, nunca entra em `data`.
+    const { legacyFormatColumns, ...data } = result as typeof result & { legacyFormatColumns?: string[] };
+    const warnings = [
+      ...(input.sql ? paginationWarnings(input.sql, input.limit, input.offset) : []),
+      ...(legacyFormatColumns?.length ? [`formato de resultado LEGADO (deprecado): as colunas [${legacyFormatColumns.join(", ")}] mudam com "normalize": true, que sera o padrao no futuro; envie "normalize": true (formato recomendado)`] : []),
+    ];
+    const res = ok(data, warnings.length ? { warnings } : undefined);
+    res.headers.set("X-Result-Format", normalize ? "normalized" : "legacy");
+    return res;
   } catch (e) {
     // Compatibilidade: todo erro com "code" continua virando QUERY_FAILED (comportamento anterior);
     // so o erro novo do contrato de SQL mantem o proprio codigo.
