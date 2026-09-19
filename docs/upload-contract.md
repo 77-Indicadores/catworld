@@ -6,4 +6,4 @@
 - `?action=confirm` e `/confirm`: validam WRITE no dataset de destino (inalterado).
 - Leitura (`GET /uploads`, `GET /uploads/:id`): so uploads de datasets visiveis ao ator (ADMIN/DATA_MANAGER e grants GLOBAL veem todos); uploads ainda sem dataset so aparecem para quem escreve em algum lugar.
 - Rotas em massa (`cancel-all`, `retry-failed`, `dismiss-failed`): ADMIN/DATA_MANAGER (inalterado).
-- Limites: `CATWORLD_UPLOAD_MAX_BYTES` (413), XLSX/XLS acima de `CATWORLD_XLSX_MAX_BYTES` (413), so csv/xlsx/xls (400).
+- Limites (Configuracoes > Worker, `upload.max_bytes` e `upload.xlsx_max_bytes`; padroes 500 MB e 40 MB): arquivo acima do limite geral = 413 `FILE_TOO_LARGE`; XLSX/XLS acima do limite de Excel = 413 `XLSX_TOO_LARGE`; so csv/xlsx/xls (400).

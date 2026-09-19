@@ -1,3 +1,8 @@
+# Catworld: a web e UM container de workers (supervisor). Quais workers rodam, o que cada um processa, quantos jobs
+# em paralelo etc. NÃO ficam aqui nem no .env: são configurados em Configurações > Worker (guardados no banco) e o
+# supervisor sobe/reinicia os processos. O .env só precisa de infraestrutura e segredos:
+# CATWORLD_DATABASE_URL, CATWORLD_ENCRYPTION_KEY, AUTH_SECRET (e CATWORLD_UPLOAD_DIR / CATWORLD_PUBLIC_ORIGIN).
+# Migrando de worker-uploads/worker-sync? Veja docs/worker-architecture.md (pare os serviços antigos antes de subir `workers`).
 services:
   web:
     build: .
@@ -10,40 +15,25 @@ services:
       - uploads:/data/uploads
     restart: unless-stopped
 
-  worker-uploads:
+  workers:
     build: .
-    command: ["./node_modules/.bin/tsx", "src/worker/index.ts"]
+    command: ["./node_modules/.bin/tsx", "src/supervisor/index.ts"]
     env_file: .env
     environment:
       CATWORLD_UPLOAD_DIR: /data/uploads
-      CATWORLD_WORKER_ID: worker-uploads
-      CATWORLD_WORKER_JOB_TYPES: "PREVIEW_UPLOAD,IMPORT_UPLOAD"
     volumes:
       - uploads:/data/uploads
     restart: unless-stopped
-    # Camada 2 (auditoria): le a pulsacao geral que o worker grava no banco a
-    # cada ~15s (independente de job especifico — ver src/worker/metrics.ts).
-    # Se travar de verdade (nao so um job), o Coolify reinicia sozinho.
+    # O reinício "com segurança" pela tela espera os jobs terminarem (prazo padrão de 10 min): dê tempo ao Docker
+    # para parar este container sem matar jobs no meio.
+    stop_grace_period: 11m
+    # Todos os workers dividem este limite de memória (soma dos processos). Se definir mem_limit, some o consumo de
+    # DuckDB/XLSX de cada perfil ativo.
+    # mem_limit: 4g
+    # Pulsação do supervisor (a cada ~10s, ver src/supervisor/db.ts). Travou de verdade (não só um job)? O Docker
+    # reinicia. Supervisor em standby (outro está ativo) também é saudável.
     healthcheck:
-      test: ["CMD", "node", "scripts/worker-healthcheck.mjs"]
-      interval: 30s
-      timeout: 10s
-      start_period: 30s
-      retries: 3
-
-  worker-sync:
-    build: .
-    command: ["./node_modules/.bin/tsx", "src/worker/index.ts"]
-    env_file: .env
-    environment:
-      CATWORLD_UPLOAD_DIR: /data/uploads
-      CATWORLD_WORKER_ID: worker-sync
-      CATWORLD_WORKER_JOB_TYPES: "SOURCE_REFRESH,DERIVED_REFRESH"
-    volumes:
-      - uploads:/data/uploads
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "node", "scripts/worker-healthcheck.mjs"]
+      test: ["CMD", "node", "scripts/worker-healthcheck.mjs", "--supervisor"]
       interval: 30s
       timeout: 10s
       start_period: 30s

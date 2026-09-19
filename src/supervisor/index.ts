@@ -10,6 +10,7 @@ import { hostname } from "node:os";
 import { resolve } from "node:path";
 import pg from "pg";
 import { prisma } from "@/server/db";
+import { env } from "@/server/env";
 import { Supervisor, type ChildHandle, type CoreProfile } from "./core";
 import { createCoreDb } from "./db";
 
@@ -48,6 +49,7 @@ async function acquireLeadership(): Promise<pg.Client | null> {
 }
 
 async function main() {
+  env(); // falha cedo se faltar env de infraestrutura e avisa (uma vez) sobre envs de worker legadas ignoradas
   console.log(`[supervisor] ${instanceId} iniciando`);
   let lock: pg.Client | null = null;
   while (!lock) {

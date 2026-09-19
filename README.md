@@ -23,11 +23,13 @@ npm run seed
 npm run dev
 ```
 
-Em outro terminal:
+Em outro terminal, o supervisor dos workers (lê os perfis do banco; configure-os em Configurações > Worker):
 
 ```powershell
-npm run worker
+npm run supervisor:dev
 ```
+
+Um worker avulso (sem supervisor): `npm run worker -- --profile worker-uploads`. Detalhes em `docs/worker-architecture.md`.
 
 O seed exige `CATWORLD_ADMIN_PASSWORD`. Não há fallback automático para mocks quando o banco está indisponível.
 

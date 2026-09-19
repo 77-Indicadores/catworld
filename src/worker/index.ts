@@ -660,6 +660,7 @@ async function releaseSelf() {
 
 /** Sai com mensagem clara (nunca sobe sem perfil): 2 = perfil ausente/inexistente, 3 = identidade em uso, 4 = desabilitado. */
 async function bootstrapProfile(): Promise<WorkerProfileRow> {
+  env(); // valida a infraestrutura e avisa (uma vez) sobre envs de worker legadas, que são ignoradas
   const name = parseProfileArg(process.argv);
   if (!name) {
     const names = await listProfileNames().catch(() => []);
