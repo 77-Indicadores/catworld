@@ -21,7 +21,10 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     if (source.mode !== "live") throw new ApiError(400, "NOT_LIVE", "Fonte nao e live");
     const normalize = input.normalize ?? await getNormalizeDefault();
     const isMssql = source.connection.provider === "mssql";
-    const tableRef = isMssql ? quotedMssqlTable(source.sourceSchema!, source.sourceTable!) : quotedPgTable(source.sourceSchema!, source.sourceTable!);
+    // So fonte do tipo TABELA tem schema/tabela: calcular sempre dava TypeError (500) em toda fonte live por consulta.
+    const tableRef = source.sourceKind === "table" && source.sourceSchema && source.sourceTable
+      ? (isMssql ? quotedMssqlTable(source.sourceSchema, source.sourceTable) : quotedPgTable(source.sourceSchema, source.sourceTable))
+      : "";
     // Contrato de SQL: o usuario escreve T-SQL; origem Postgres recebe a traducao.
     // O SQL nativo da propria fonte (sourceSql / SELECT *) ja esta no dialeto da origem.
     const execute = async (translated: { sql: string; topLimit: number | null } | null) => {

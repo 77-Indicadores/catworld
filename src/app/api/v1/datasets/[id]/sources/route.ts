@@ -2,7 +2,7 @@ import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/server/db";
 import { resolveActor } from "@/server/auth/actor";
-import { canAccess } from "@/server/auth/permissions";
+import { assertCanUseConnection, assertDatasetAccess } from "@/server/auth/permissions";
 import { ApiError, handleApiError, ok } from "@/server/http";
 import { createDatasetSource, createDatasetSources } from "@/server/connections/sources";
 
@@ -10,7 +10,10 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   try {
     const actor = await resolveActor(request);
     const datasetId = (await params).id;
-    if (!await canAccess(actor, "READ", undefined, datasetId) && actor.role !== "ADMIN") throw new ApiError(403, "FORBIDDEN", "Sem permissao para ler o dataset");
+    // canAccess(..., undefined, datasetId) ignorava grants de PROJETO; assertDatasetAccess usa o projectId do dataset.
+    const ds = await prisma.dataset.findUnique({ where: { id: datasetId }, select: { id: true, projectId: true } });
+    if (!ds) throw new ApiError(404, "DATASET_NOT_FOUND", "Dataset não encontrado");
+    await assertDatasetAccess(actor, "READ", ds);
     return ok(await prisma.datasetSource.findMany({
       where: { datasetId, active: true },
       include: { connection: { select: { id: true, name: true, provider: true } }, targetTable: { include: { columns: { orderBy: { ordinal: "asc" } } } } },
@@ -25,7 +28,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   try {
     const actor = await resolveActor(request);
     const datasetId = (await params).id;
-    if (!await canAccess(actor, "WRITE", undefined, datasetId) && actor.role !== "ADMIN") throw new ApiError(403, "FORBIDDEN", "Sem permissao para editar o dataset");
+    const ds = await prisma.dataset.findUnique({ where: { id: datasetId }, select: { id: true, projectId: true } });
+    if (!ds) throw new ApiError(404, "DATASET_NOT_FOUND", "Dataset não encontrado");
+    await assertDatasetAccess(actor, "WRITE", ds);
     const input = z.object({
       connectionId: z.string().uuid(),
       name: z.string().min(1).max(255).optional(),
@@ -42,6 +47,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       sourceSqlReconciliation: z.string().nullable().optional(),
       sourceGroupId: z.string().uuid().optional(),
     }).parse(await request.json());
+    await assertCanUseConnection(actor, input.connectionId, ds);
     if (input.sourceKind === "table" && input.sourceTables?.length) {
       return ok(await createDatasetSources({
         datasetId,

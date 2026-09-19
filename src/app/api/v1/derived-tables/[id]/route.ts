@@ -5,6 +5,7 @@ import { nextRefreshFromCron } from "@/server/connections/sources";
 import { resolveActor } from "@/server/auth/actor";
 import { assertDatasetAccess } from "@/server/auth/permissions";
 import { ApiError, handleApiError, ok } from "@/server/http";
+import { assertSqlSchemasAllowed } from "@/server/sql-contract/references";
 
 /** Carrega a derivada + dataset (para checar acesso). 404 se nao existir. */
 async function loadDerived(id: string) {
@@ -47,6 +48,8 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     if (body.querySql) {
       const safety = validateReadOnlySql(body.querySql);
       if (!safety.safe) throw new ApiError(400, "UNSAFE_SQL", safety.reason);
+      const owner = await prisma.dataset.findUnique({ where: { id: dataset.id }, select: { schemaName: true } });
+      await assertSqlSchemasAllowed(actor, body.querySql, owner?.schemaName ?? "");
     }
 
     const refreshCron = "refreshCron" in body ? body.refreshCron : dt.refreshCron;

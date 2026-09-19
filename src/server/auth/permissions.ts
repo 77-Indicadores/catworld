@@ -76,6 +76,28 @@ export async function resolveQueryScope(
   return { datasets: [], accessible, unrestricted: isAdmin };
 }
 
+/** Visibilidade de METADADOS de dataset (a mesma regra das listagens: visibleDatasetIds). */
+export async function canSeeDataset(actor: Actor, datasetId: string): Promise<boolean> {
+  const ids = await visibleDatasetIds(actor);
+  return ids === null || ids.includes(datasetId);
+}
+
+/**
+ * Uma conexao guarda a credencial de um banco de cliente; quem cria uma fonte roda SQL nela. Antes qualquer um
+ * com WRITE num dataset podia apontar uma fonte para QUALQUER conexao e ler o que ela alcanca.
+ *  - ADMIN e DATA_MANAGER (usuarios): livres;
+ *  - demais (tokens, ANALYST, VIEWER com WRITE): so conexoes que o PROJETO ja usa em alguma fonte
+ *    (setups existentes seguem funcionando; nao ha como "pular" para uma conexao nova).
+ */
+export async function assertCanUseConnection(actor: Actor, connectionId: string, dataset: { id: string; projectId: string }) {
+  if (actor.type === "user" && ["ADMIN", "DATA_MANAGER"].includes(actor.role)) return;
+  const inUse = await prisma.datasetSource.findFirst({
+    where: { connectionId, dataset: { projectId: dataset.projectId } },
+    select: { id: true },
+  });
+  if (!inUse) throw new ApiError(403, "CONNECTION_FORBIDDEN", "Sem permissão para usar esta conexão (peça a um administrador)");
+}
+
 export async function hasAnyWriteGrant(actor: Actor): Promise<boolean> {
   if (actor.type === "user" && ["ADMIN", "DATA_MANAGER"].includes(actor.role)) return true;
   const grants = await prisma.accessGrant.findMany({ where: actor.type === "user" ? { userId: actor.id } : { tokenId: actor.id } });

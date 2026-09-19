@@ -7,6 +7,7 @@ import { queueDerivedRefresh } from "@/server/connections/derived";
 import { resolveActor } from "@/server/auth/actor";
 import { assertDatasetAccess } from "@/server/auth/permissions";
 import { ApiError, handleApiError, ok } from "@/server/http";
+import { assertSqlSchemasAllowed } from "@/server/sql-contract/references";
 
 async function loadDataset(datasetId: string) {
   const dataset = await prisma.dataset.findUnique({ where: { id: datasetId }, select: { id: true, projectId: true } });
@@ -50,6 +51,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
     const safety = validateReadOnlySql(body.querySql);
     if (!safety.safe) throw new ApiError(400, "UNSAFE_SQL", safety.reason);
+    // O SQL roda depois com a conta administrativa do storage: nao pode alcancar dado que o autor nao le.
+    const owner = await prisma.dataset.findUnique({ where: { id: datasetId }, select: { schemaName: true } });
+    await assertSqlSchemasAllowed(actor, body.querySql, owner?.schemaName ?? "");
 
     const sqlName = body.sqlName?.trim()
       ? sqlIdentifier(body.sqlName.trim())
