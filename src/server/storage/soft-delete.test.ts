@@ -41,12 +41,18 @@ describe("PgStorageConnection.atomicSwap - soft delete por lista de chaves", () 
     expect(res).toEqual({ marked: 4 });
     const copy = copyOf();
     expect(copy.params).toEqual([before]);
-    expect(copy.sql).toContain('EXISTS (SELECT 1 FROM "sc"."keys" k WHERE k."id" = t."id")');
+    // chaves da origem entram por LEFT JOIN das distintas (uma passada), nunca por EXISTS correlacionado em CASE
+    expect(copy.sql).toContain('FROM "sc"."tgt" t LEFT JOIN (SELECT DISTINCT "id" FROM "sc"."keys") k ON k."id" = t."id"');
+    expect(copy.sql).not.toContain('EXISTS (SELECT 1 FROM "sc"."keys"');
     expect(copy.sql).toContain('t."cw_synced_at" < $1::timestamp');
-    expect(copy.sql).toContain('WHEN EXISTS (SELECT 1 FROM "sc"."keys" k WHERE k."id" = t."id") THEN NULL'); // desmarca
+    expect(copy.sql).toContain('WHEN k."id" IS NOT NULL THEN NULL'); // desmarca
     expect(copy.sql).toContain('COALESCE(t."cw_deleted_at", now())');
     expect(copy.sql).toContain('NOT EXISTS (SELECT 1 FROM "sc"."stg" s WHERE s."id" = t."id")');
     expect(copy.sql).not.toContain("1 = 0"); // nunca remove
+    // a contagem de "marcadas" usa o mesmo join
+    const count = pg.sqls.find(s => s.sql.includes("COUNT(*)::text AS n"))!;
+    expect(count.sql).toContain('FROM "sc"."tgt" t LEFT JOIN (SELECT DISTINCT "id" FROM "sc"."keys") k');
+    expect(count.sql).toContain('k."id" IS NULL');
   });
 
   it("sem keysTable (delta parcial): copia como esta, sem marcar nem contar", async () => {
@@ -97,6 +103,21 @@ describe("PgStorageConnection.atomicSwap - soft delete por lista de chaves", () 
     expect(pg.sqls[0]!.params).toEqual([before]);
   });
 
+  it("countMissingKeys usa join das chaves distintas, nunca NOT EXISTS correlacionado (evita SubPlan por linha)", async () => {
+    pg.query.mockImplementationOnce(async (sql: string, params?: unknown[]) => { pg.sqls.push({ sql, params }); return { rows: [{ live: "1", candidates: "0" }], rowCount: 1 }; });
+    const conn = new PgStorageConnection("t-sd-6b", "postgres://u:p@h/db");
+    await conn.countMissingKeys("sc", "tgt", "id", "keys", new Date());
+    expect(pg.sqls[0]!.sql).toContain('LEFT JOIN (SELECT DISTINCT "id" FROM "sc"."keys") k ON k."id" = t."id"');
+    expect(pg.sqls[0]!.sql).toContain('k."id" IS NULL');
+    expect(pg.sqls[0]!.sql).not.toContain("EXISTS");
+  });
+
+  it("analyzeTable roda ANALYZE na tabela indicada", async () => {
+    const conn = new PgStorageConnection("t-sd-6c", "postgres://u:p@h/db");
+    await conn.analyzeTable("sc", "keys");
+    expect(pg.sqls.at(-1)!.sql).toBe('ANALYZE "sc"."keys"');
+  });
+
   it("countRows so conta vivas quando a coluna existe", async () => {
     pg.query.mockImplementationOnce(async (sql: string, params?: unknown[]) => { pg.sqls.push({ sql, params }); return { rows: [{ x: 1 }], rowCount: 1 }; });
     const conn = new PgStorageConnection("t-sd-7", "postgres://u:p@h/db");
@@ -112,6 +133,18 @@ describe("carryPlan / guardas (compartilhados pg + mssql)", () => {
     expect(p.deletedAtExpr).toContain("WHEN t.[cw_synced_at] < @before THEN COALESCE(t.[cw_deleted_at], SYSUTCDATETIME())");
     expect(p.deletedAtExpr).toContain("THEN NULL");
     expect(p.markedWhere).toContain("t.[cw_deleted_at] IS NULL AND t.[cw_synced_at] < @before AND NOT EXISTS");
+  });
+  it("keysAsJoin: 'na lista' vira k.chave IS NOT NULL sobre LEFT JOIN das distintas (sem EXISTS correlacionado)", () => {
+    const p = carryPlan({ q, qStg: "s", key: '"id"', qSyncedAt: '"sa"', qDeletedAt: '"da"', now: "now()", fullSnapshot: false, qKeys: '"sc"."keys"', beforeParam: "$1::timestamp", keysAsJoin: true });
+    expect(p.keysJoin).toBe('LEFT JOIN (SELECT DISTINCT "id" FROM "sc"."keys") k ON k."id" = t."id"');
+    expect(p.deletedAtExpr).toContain('WHEN k."id" IS NOT NULL THEN NULL');
+    expect(p.markedWhere).toContain('t."da" IS NULL AND t."sa" < $1::timestamp AND k."id" IS NULL');
+    expect(`${p.syncedAtExpr} ${p.deletedAtExpr} ${p.markedWhere}`).not.toMatch(/EXISTS \(SELECT 1 FROM "sc"\."keys"/);
+  });
+  it("sem keysAsJoin (SQL Server): mantem o EXISTS e nao devolve keysJoin", () => {
+    const p = carryPlan({ q, qStg: "s", key: "[id]", qSyncedAt: "[a]", qDeletedAt: "[b]", now: "now()", fullSnapshot: false, qKeys: "[s].[keys]", beforeParam: "@b" });
+    expect(p.keysJoin).toBeUndefined();
+    expect(p.deletedAtExpr).toContain("WHEN EXISTS (SELECT 1 FROM [s].[keys] k WHERE k.[id] = t.[id]) THEN NULL");
   });
   it("sem keys e sem fullSnapshot: copia como esta", () => {
     const p = carryPlan({ q, qStg: "s", key: "[id]", qSyncedAt: "[a]", qDeletedAt: "[b]", now: "now()", fullSnapshot: false });

@@ -152,6 +152,42 @@ describe("refreshDatasetSource - deteccao de exclusoes (soft delete)", () => {
     expect(d.lastRemovedCount).toBe(0n);
   });
 
+  it("contagem de guarda FALHA (ex: statement timeout do storage): delta aplicado sem marcar, aviso KEYS_CHECK_FAILED, status completed", async () => {
+    setup(baseSource());
+    storage.countMissingKeys.mockRejectedValue(new Error("canceling statement due to statement timeout"));
+    await refreshDatasetSource(ID);
+    expect(storage.atomicSwap).toHaveBeenCalledTimes(1); // o delta entra mesmo assim
+    expect(swapOpts()).not.toHaveProperty("keysTable"); // sem a guarda, nada e marcado
+    const d = lastUpdate();
+    expect(d.lastStatus).toBe("completed");
+    expect(String(d.lastError)).toContain("KEYS_CHECK_FAILED");
+    expect(String(d.lastError)).toContain("statement timeout");
+    expect(d.lastRemovedCount).toBe(0n);
+    expect(d).not.toHaveProperty("lastKeysCheckAt");
+    expect(storage.dropTableIfExists.mock.calls.some(c => c[1] === KEYS_TABLE)).toBe(true); // tabela de chaves removida
+  });
+
+  it("atualiza as estatisticas da tabela de chaves antes da contagem; falha no ANALYZE nao derruba o refresh", async () => {
+    setup(baseSource());
+    const analyze = vi.fn().mockResolvedValue(undefined);
+    (storage as Record<string, unknown>).analyzeTable = analyze;
+    try {
+      await refreshDatasetSource(ID);
+      expect(analyze).toHaveBeenCalledWith("ds", KEYS_TABLE);
+      expect(analyze.mock.invocationCallOrder[0]).toBeLessThan(storage.countMissingKeys.mock.invocationCallOrder[0]!);
+      expect(swapOpts()).toMatchObject({ keysTable: KEYS_TABLE });
+
+      vi.clearAllMocks(); streams.calls.length = 0;
+      setup(baseSource());
+      analyze.mockRejectedValue(new Error("boom"));
+      await refreshDatasetSource(ID);
+      expect(lastUpdate().lastStatus).toBe("completed");
+      expect(swapOpts()).toMatchObject({ keysTable: KEYS_TABLE });
+    } finally {
+      delete (storage as Record<string, unknown>).analyzeTable;
+    }
+  });
+
   it("tabela pequena (<50 vivas): proporcao nao e avaliada, marca normalmente", async () => {
     setup(baseSource());
     storage.countMissingKeys.mockResolvedValue({ live: 10, candidates: 9 });

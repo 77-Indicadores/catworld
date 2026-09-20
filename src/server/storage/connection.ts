@@ -82,6 +82,12 @@ export interface StorageConnection {
   ): Promise<{ live: number; candidates: number }>;
 
   /**
+   * Opcional: atualiza as estatisticas do planner de uma tabela recem-carregada em massa (ex: a tabela de chaves),
+   * para o join seguinte escolher um bom plano. Sem implementacao no adapter = nada a fazer.
+   */
+  analyzeTable?(schema: string, table: string): Promise<void>;
+
+  /**
    * Troca atômica staging → target com janela de lock mínima em produção.
    *
    * fullSwap (sem keyColumn):

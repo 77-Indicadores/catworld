@@ -5,7 +5,7 @@
 
 import { Pool, type PoolClient, type PoolConfig } from "pg";
 import { CW_SYNCED_AT, CW_DELETED_AT, type ColDef, type ColInfo, type StorageConnection } from "./connection";
-import { absentFromStaging, carryPlan, missingKeysWhere } from "./delete-detection";
+import { absentFromStaging, carryPlan, keysJoinSql } from "./delete-detection";
 
 /**
  * Esconde linhas marcadas (cw_deleted_at) de leitores comuns via RLS. Reaplicado a cada swap (DROP TABLE perde a
@@ -355,20 +355,24 @@ export class PgStorageConnection implements StorageConnection {
           .map(c => (tgtCols.has(c.name) ? `t.${pgQuote(c.name)}` : `NULL`))
           .join(", ");
         const useKeys = !fullSnapshot && !!opts?.keysTable && !!opts?.keysBefore;
+        // keysAsJoin: "chave na lista" como LEFT JOIN (uma passada) e nao como EXISTS correlacionado dentro de CASE
+        // (SubPlan por linha: ~800k x ~800k sem indice estourava o statement_timeout — ver carryPlan).
         const plan = carryPlan({
           q: pgQuote, qStg, key, qSyncedAt, qDeletedAt, now: "now()", fullSnapshot,
           qKeys: useKeys ? `${qSc}.${pgQuote(opts!.keysTable!)}` : null, beforeParam: "$1::timestamp",
+          keysAsJoin: true,
         });
+        const keysJoin = plan.keysJoin ? ` ${plan.keysJoin}` : "";
         const params = useKeys ? [opts!.keysBefore!] : [];
         if (plan.markedWhere) {
           const m = await this._pool.query<{ n: string }>(
-            `SELECT COUNT(*)::text AS n FROM ${qTgt} t WHERE ${plan.markedWhere}`, params,
+            `SELECT COUNT(*)::text AS n FROM ${qTgt} t${keysJoin} WHERE ${plan.markedWhere}`, params,
           );
           marked = Number(m.rows[0]?.n ?? 0);
         }
         await this._pool.query(
           `INSERT INTO ${qMgd} (${colListWithMeta})
-           SELECT ${selectList}, ${plan.syncedAtExpr}, ${plan.deletedAtExpr} FROM ${qTgt} t
+           SELECT ${selectList}, ${plan.syncedAtExpr}, ${plan.deletedAtExpr} FROM ${qTgt} t${keysJoin}
            WHERE ${absentFromStaging(qStg, key)}`, params,
         );
       }
@@ -413,12 +417,22 @@ export class PgStorageConnection implements StorageConnection {
   ): Promise<{ live: number; candidates: number }> {
     const qTgt = `${pgQuote(schema)}.${pgQuote(table)}`;
     const qKeys = `${pgQuote(schema)}.${pgQuote(keysTable)}`;
-    const where = missingKeysWhere({ q: pgQuote, qKeys, key: pgQuote(keyColumn), beforeParam: "$1::timestamp" });
+    const key = pgQuote(keyColumn);
+    // LEFT JOIN das chaves distintas (uma passada), nao `NOT EXISTS` dentro do FILTER: la ele vira um SubPlan
+    // correlacionado avaliado por linha (sem anti-join possivel) e passava de 10 min em ~800k x ~800k chaves.
     const r = await this._pool.query<{ live: string; candidates: string }>(
-      `SELECT COUNT(*)::text AS live, COUNT(*) FILTER (WHERE ${where})::text AS candidates FROM ${qTgt} t WHERE t.${pgQuote(CW_DELETED_AT)} IS NULL`,
+      `SELECT COUNT(*)::text AS live,
+              COUNT(*) FILTER (WHERE t.${pgQuote(CW_SYNCED_AT)} < $1::timestamp AND k.${key} IS NULL)::text AS candidates
+       FROM ${qTgt} t ${keysJoinSql(qKeys, key)}
+       WHERE t.${pgQuote(CW_DELETED_AT)} IS NULL`,
       [before],
     );
     return { live: Number(r.rows[0]?.live ?? 0), candidates: Number(r.rows[0]?.candidates ?? 0) };
+  }
+
+  /** Atualiza as estatisticas do planner (a tabela acabou de ser carregada em massa e nunca foi analisada). */
+  async analyzeTable(schema: string, table: string): Promise<void> {
+    await this._pool.query(`ANALYZE ${pgQuote(schema)}.${pgQuote(table)}`);
   }
 
   /**

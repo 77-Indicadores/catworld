@@ -431,11 +431,17 @@ export async function refreshDatasetSource(datasetSourceId: string, opts?: { rec
         } else if (read.keys === 0n) {
           keysWarning = "KEYS_CHECK_EMPTY: deteccao de exclusoes ignorada: a origem retornou zero chaves (nenhuma linha foi marcada como excluida; as linhas alteradas foram aplicadas)";
         } else {
-          const cnt = await storageConn.countMissingKeys(schema, table, source.keyColumn!, keysTable, startedAt);
-          if (keysCheckExceeds(cnt, KEYS_CHECK_MAX_RATIO)) {
-            keysWarning = `KEYS_CHECK_UNSAFE: deteccao de exclusoes ignorada: ${cnt.candidates} de ${cnt.live} linhas vivas seriam marcadas (limite ${Math.round(KEYS_CHECK_MAX_RATIO * 100)}%); nenhuma foi marcada (as linhas alteradas foram aplicadas)`;
-          } else {
-            swapKeys = { keysTable, keysBefore: startedAt };
+          // Como na leitura das chaves: falhar em CONTAR (timeout do storage, rede) nao pode parar o fluxo de dados —
+          // sem a contagem de guarda a marcacao nao e segura, entao pula so a marcacao e aplica o delta.
+          try {
+            const cnt = await storageConn.countMissingKeys(schema, table, source.keyColumn!, keysTable, startedAt);
+            if (keysCheckExceeds(cnt, KEYS_CHECK_MAX_RATIO)) {
+              keysWarning = `KEYS_CHECK_UNSAFE: deteccao de exclusoes ignorada: ${cnt.candidates} de ${cnt.live} linhas vivas seriam marcadas (limite ${Math.round(KEYS_CHECK_MAX_RATIO * 100)}%); nenhuma foi marcada (as linhas alteradas foram aplicadas)`;
+            } else {
+              swapKeys = { keysTable, keysBefore: startedAt };
+            }
+          } catch (e) {
+            keysWarning = `KEYS_CHECK_FAILED: deteccao de exclusoes ignorada: ${e instanceof Error ? e.message : String(e)} (nenhuma linha foi marcada como excluida; as linhas alteradas foram aplicadas)`;
           }
         }
         if (keysWarning) console.warn(`[source-refresh] ${keysWarning} source=${source.id}`);
@@ -523,6 +529,9 @@ async function readSourceKeys(o: {
     await storageConn.bulkInsert(schema, keysTable, keyDef, batch);
     keys += BigInt(batch.length);
   }
+  // Tabela recem-carregada em massa nunca foi analisada: sem estatisticas o planner pode errar o tamanho e
+  // escolher um plano ruim para o join da contagem/merge. Best-effort — nao vale falhar a leitura por isso.
+  await storageConn.analyzeTable?.(schema, keysTable).catch(() => undefined);
   return { keys };
 }
 

@@ -111,6 +111,39 @@ d("soft delete (Postgres real)", () => {
     expect(await conn.countRows(SCHEMA, "t")).toBe(3n);
   });
 
+  it("lista de chaves com repeticoes: nao infla a contagem nem multiplica linhas do merge (join usa chaves distintas)", async () => {
+    await setup([["1", "x"], ["2", "x"], ["3", "x"], ["4", "x"]], [["1", "y"]], ["1", "1", "1", "2", "2"]);
+    const before = await conn.serverNow();
+    expect(await conn.countMissingKeys(SCHEMA, "t", "k", "kk", before)).toEqual({ live: 4, candidates: 2 }); // 3 e 4
+    const r = await withKeys();
+    expect(r.marked).toBe(2);
+    expect(await all()).toEqual(["1", "2", "3", "4"]); // nenhuma linha duplicada pelo join
+    expect(await marked()).toEqual(["3", "4"]);
+    expect(await live()).toEqual(["1", "2"]);
+  });
+
+  it("analyzeTable roda numa tabela de chaves recem-carregada", async () => {
+    await setup([["1", "x"]], [], ["1"]);
+    await expect(conn.analyzeTable(SCHEMA, "kk")).resolves.toBeUndefined();
+    const st = await q(`SELECT reltuples::int AS n FROM pg_class WHERE oid = '${SCHEMA}.kk'::regclass`);
+    expect(st.rows[0].n).toBeGreaterThanOrEqual(0); // ANALYZE preencheu as estatisticas (antes: -1)
+  });
+
+  it("escala: 60 mil linhas x 60 mil chaves sem indice marca so as ausentes e termina em segundos (o EXISTS por linha nao terminaria)", async () => {
+    await q(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE; CREATE SCHEMA ${SCHEMA};
+      CREATE TABLE ${SCHEMA}.t (k text, v text, cw_synced_at timestamp NOT NULL DEFAULT now() - interval '1 hour', cw_deleted_at timestamp NULL);
+      CREATE TABLE ${SCHEMA}.s (k text, v text);
+      CREATE TABLE ${SCHEMA}.kk (k text);
+      INSERT INTO ${SCHEMA}.t (k, v) SELECT 'S.1.' || i, 'x' FROM generate_series(1, 60000) i;
+      INSERT INTO ${SCHEMA}.kk SELECT 'S.1.' || i FROM generate_series(6, 60000) i`); // chaves 1..5 excluidas na origem
+    const t0 = Date.now();
+    const r = await withKeys();
+    expect(r.marked).toBe(5);
+    expect(await marked()).toEqual(["S.1.1", "S.1.2", "S.1.3", "S.1.4", "S.1.5"]);
+    expect((await q(`SELECT count(*)::int AS n FROM ${SCHEMA}.t`)).rows[0].n).toBe(60000);
+    expect(Date.now() - t0).toBeLessThan(20_000);
+  }, 60_000);
+
   it("fullSnapshot: ramo original marca (soft) toda chave ausente da staging", async () => {
     await setup([["1", "x"], ["2", "x"], ["3", "x"]], [["1", "y"]], null);
     const r = await swap({ fullSnapshot: true });
