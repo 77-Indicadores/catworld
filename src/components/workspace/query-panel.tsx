@@ -6,6 +6,7 @@ import { sql as sqlLang } from "@codemirror/lang-sql";
 import { apiErrorText, apiRequest, errorMessage, warningsOf } from "@/lib/api-client";
 import { useFeedback } from "@/components/ui/feedback";
 import { SchemaBrowser } from "./schema-browser";
+import { planInsert } from "./sql-insert";
 import { ResultGrid } from "./result-grid";
 import { formatInt } from "@/lib/present";
 import type { WorkspaceDataset } from "@/lib/workspace/types";
@@ -57,12 +58,11 @@ export function QueryPanel({ datasets, projectId }: { datasets: WorkspaceDataset
     const view = editorRef.current?.view;
     if (!view) return;
     const { from, to } = view.state.selection.main;
-    const doc = view.state.doc.toString();
-    const needsSpace = from > 0 && !/[\s(,.\[]$/.test(doc.slice(0, from));
-    const chunk = (needsSpace ? " " : "") + text;
+    // Clicar numa tabela logo depois de um FROM/JOIN que já tem tabela TROCA a referência (senão vira `FROM a.t1 a.t2`).
+    const plan = planInsert(view.state.doc.toString(), from, to, text);
     view.dispatch({
-      changes: { from, to, insert: chunk },
-      selection: EditorSelection.cursor(from + chunk.length),
+      changes: plan,
+      selection: EditorSelection.cursor(plan.from + plan.insert.length),
     });
     view.focus();
   }
