@@ -1,4 +1,5 @@
 import { buildClaimSql } from "./claim";
+import { isSourceBusyError } from "./source-failure";
 import { createWriteStream } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
@@ -398,7 +399,8 @@ async function fail(job: Claimed, error: unknown) {
   }
 
   const nextRefreshAt = await nextRefreshAtOnFailure(job, retry);
-  const sourceFailureUpdate = sourceRefreshFailureUpdate(job, message, retry, nextRefreshAt);
+  // 409 da trava mútua: outra rodada é dona da fonte e o status dela ("running") não pode ser sobrescrito por esta falha.
+  const sourceFailureUpdate = isSourceBusyError(error) ? null : sourceRefreshFailureUpdate(job, message, retry, nextRefreshAt);
   const derivedFailureUpdate = derivedRefreshFailureUpdate(job, message, retry, nextRefreshAt);
 
   await prisma.$transaction([
