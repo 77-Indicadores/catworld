@@ -10,6 +10,8 @@ export type WorkerProfileRow = {
   id: string;
   name: string;
   jobTypes: JobType[];
+  /** Faixa: só pega jobs destes pesos; vazio = qualquer peso. */
+  weights: number[];
   concurrency: number;
   pollMs: number;
   duckdbMemoryLimit: string;
@@ -109,6 +111,7 @@ export async function loadProfile(name: string): Promise<WorkerProfileRow | null
     id: p.id,
     name: p.name,
     jobTypes: assertKnownTypes(p.jobTypes),
+    weights: p.weights ?? [],
     concurrency: p.concurrency,
     pollMs: p.pollMs,
     duckdbMemoryLimit: p.duckdbMemoryLimit,

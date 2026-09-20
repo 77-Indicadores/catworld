@@ -34,8 +34,8 @@ export async function getSupervisorStatus(): Promise<SupervisorStatus> {
 
 export type ProfileLoad = { runningJobs: number; queuedJobs: number };
 
-/** Jobs em execução (pelo rótulo `<perfil>-N@host`) e na fila (pelos tipos do perfil), por perfil. */
-export async function getProfileLoad(profiles: { name: string; jobTypes: string[] }[]): Promise<Map<string, ProfileLoad>> {
+/** Jobs em execução (pelo rótulo `<perfil>-N@host`) e na fila (pelos tipos e pesos do perfil; pesos vazios = todos), por perfil. */
+export async function getProfileLoad(profiles: { name: string; jobTypes: string[]; weights?: number[] }[]): Promise<Map<string, ProfileLoad>> {
   const out = new Map<string, ProfileLoad>();
   for (const p of profiles) {
     // nome do perfil só tem [a-z0-9-]: seguro dentro de regex; o ^...-N@ evita casar o prefixo de outro perfil (a x a-b)
@@ -44,8 +44,10 @@ export async function getProfileLoad(profiles: { name: string; jobTypes: string[
       `^${p.name}-[0-9]+@`,
     );
     const [queued] = await prisma.$queryRawUnsafe<{ n: bigint }[]>(
-      `SELECT COUNT(*)::bigint AS n FROM cw_jobs WHERE status = 'QUEUED' AND type = ANY($1::text[])`,
+      `SELECT COUNT(*)::bigint AS n FROM cw_jobs WHERE status = 'QUEUED' AND type = ANY($1::text[])
+         AND (cardinality($2::int[]) = 0 OR weight = ANY($2::int[]))`,
       p.jobTypes,
+      p.weights ?? [],
     );
     out.set(p.name, { runningJobs: Number(running?.n ?? 0), queuedJobs: Number(queued?.n ?? 0) });
   }

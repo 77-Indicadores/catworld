@@ -52,3 +52,8 @@ export function presentCount(input: string | number | bigint | null | undefined,
   else if (abs >= 10_000n) compact = `${sg}${dec(n / 1e3)} mil`;
   return { exact, compact, title: `${exact} ${v === 1n ? unit.replace(/s$/, "") : unit}`, value: v };
 }
+
+/** Decimal curto em pt-BR (1 casa no máximo): `1,5`, `12`. Para estimativas (GB, etc.), não para contagens exatas. */
+export function fmtDecimal(n: number): string {
+  return n.toLocaleString("pt-BR", { maximumFractionDigits: 1 });
+}

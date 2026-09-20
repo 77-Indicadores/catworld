@@ -1,3 +1,4 @@
+import { buildClaimSql } from "./claim";
 import { createWriteStream } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
@@ -60,10 +61,7 @@ async function nap(ms: number) {
   while (state.canClaim && Date.now() < end) await new Promise(r => setTimeout(r, Math.min(500, Math.max(0, end - Date.now()))));
 }
 
-async function claim(lockedBy: string, maxHeavy: number, maxSyncsPerStorage: number, allowedTypes: string[] | null): Promise<Claimed | null> {
-  const typeFilter = allowedTypes && allowedTypes.length > 0
-    ? `AND j.type IN (${allowedTypes.map(t => `'${t.replace(/'/g, "''")}'`).join(",")})`
-    : "";
+async function claim(lockedBy: string, maxHeavy: number, maxSyncsPerStorage: number, allowedTypes: string[] | null, allowedWeights: number[]): Promise<Claimed | null> {
   // storage_server_id só é setado em jobs SOURCE_REFRESH (ver queueSourceRefresh em
   // sources.ts) — NULL pra qualquer outro tipo de job, que por isso nunca é gateado
   // por esse teto (a condição vira um no-op quando j.storage_server_id IS NULL).
@@ -71,24 +69,8 @@ async function claim(lockedBy: string, maxHeavy: number, maxSyncsPerStorage: num
   // sempre entra na fila (QUEUED) na hora de criar, o teto só decide quando ele pode
   // começar a rodar. Antes disso era enforçado (errado) na hora de enfileirar, o que
   // podia "perder a vaga" indefinidamente sem nunca sequer entrar na fila.
-  const rows = await prisma.$queryRawUnsafe<Claimed[]>(
-    `UPDATE cw_jobs
-     SET status='RUNNING',locked_at=NOW(),heartbeat_at=NOW(),locked_by=$1,attempts=attempts+1
-     WHERE id=(
-       SELECT j.id FROM cw_jobs j
-       WHERE j.status='QUEUED' AND j.available_at<=NOW()
-         ${typeFilter}
-         AND (j.weight<2 OR (SELECT COUNT(*) FROM cw_jobs WHERE status='RUNNING' AND weight=2)<$2)
-         AND (j.storage_server_id IS NULL OR (SELECT COUNT(*) FROM cw_jobs r WHERE r.status='RUNNING' AND r.storage_server_id=j.storage_server_id)<$3)
-       ORDER BY j.weight ASC,j.available_at ASC
-       LIMIT 1
-       FOR UPDATE SKIP LOCKED
-     )
-     RETURNING id,type,upload_id,payload_json,attempts,max_attempts,weight`,
-    lockedBy,
-    maxHeavy,
-    maxSyncsPerStorage,
-  );
+  // allowedWeights = faixa do perfil (vazio = qualquer peso). O SQL vive em ./claim.ts (testado em Postgres real).
+  const rows = await prisma.$queryRawUnsafe<Claimed[]>(buildClaimSql(allowedTypes), lockedBy, maxHeavy, maxSyncsPerStorage, allowedWeights);
   return rows[0] ?? null;
 }
 
@@ -594,13 +576,14 @@ async function recoverStale() {
 async function loop(concurrencyId: number) {
   const workerLabel = `${profile.name}-${concurrencyId}@${hostname()}`;
   const allowedTypes = [...profile.jobTypes];
-  console.log(`[worker] ${workerLabel} tipos: ${allowedTypes.join(", ")}`);
+  const allowedWeights = [...profile.weights];
+  console.log(`[worker] ${workerLabel} tipos: ${allowedTypes.join(", ")} · pesos: ${allowedWeights.length ? allowedWeights.join(",") : "todos"}`);
   while (state.canClaim) {
     let job: Claimed | null;
     try {
       const { getWorkerConfig } = await import("@/server/worker/config");
       const { maxHeavyJobs, maxSyncsPerStorage } = await getWorkerConfig();
-      job = await claim(workerLabel, maxHeavyJobs, maxSyncsPerStorage, allowedTypes);
+      job = await claim(workerLabel, maxHeavyJobs, maxSyncsPerStorage, allowedTypes, allowedWeights);
     } catch (e) {
       console.warn("[worker] claim falhou (transiente): %s", e instanceof Error ? e.message : e);
       await nap(profile.pollMs);

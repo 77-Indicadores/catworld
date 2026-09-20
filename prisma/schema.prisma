@@ -194,6 +194,8 @@ model DatasetSource {
   keyColumn       String?       @map("key_column") @db.VarChar(128)
   deltaColumn     String?       @map("delta_column") @db.VarChar(128)
   lastDeltaValue  String?       @map("last_delta_value") @db.Text
+  /// Duração média (EMA, ms) das execuções incrementais bem-sucedidas: classifica o job da fonte em rápido/longo (faixa).
+  avgRunMs        Int?          @map("avg_run_ms")
   reconciliationCron      String?   @map("reconciliation_cron") @db.VarChar(100)
   sourceSqlReconciliation String?   @map("source_sql_reconciliation") @db.Text
   nextReconciliationAt    DateTime? @map("next_reconciliation_at") @db.Timestamp(3)
@@ -409,6 +411,8 @@ model WorkerProfile {
   id                String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   name              String          @unique @db.VarChar(64)
   jobTypes          String[]        @map("job_types")
+  /// Faixa: só processa jobs destes "pesos" (0 e 1 = leves, 2 = pesados). Vazio = todos (comportamento anterior).
+  weights           Int[]           @default([])
   concurrency       Int             @default(1)
   pollMs            Int             @default(2000) @map("poll_ms")
   duckdbMemoryLimit String          @default("1GB") @map("duckdb_memory_limit") @db.VarChar(16)

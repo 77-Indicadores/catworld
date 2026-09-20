@@ -79,6 +79,39 @@ function isBoundedSourceRun(
   return true;
 }
 
+/**
+ * FAIXA (peso do job) de uma rodada de fonte — decide em qual worker ela roda (ver src/worker/claim.ts e as faixas em
+ * src/lib/worker-presets.ts): "fast" = peso 0 (faixa de syncs rápidos), "long" = peso 2 (faixa de syncs longos, gateada
+ * por max_heavy_jobs). Antes o peso vinha só de bounded/unbounded, e isso invertia o custo real: a incremental da ADL
+ * (janelada, "bounded", peso 0) levava ~5 min e passava na frente de tudo, enquanto as cópias completas de tabelas
+ * pequenas ("unbounded", peso 2) levavam ~4 s. Agora vale a duração observada.
+ *
+ * Ordem de decisão: reconciliação é sempre longa; com histórico, a média móvel da duração (>= LONG_RUN_MS = longa);
+ * sem histórico mas com contagem de linhas da última carga, o tamanho (>= LONG_ROWS_HINT = longa); sem nada, a regra
+ * antiga (bounded = rápida, unbounded = longa). `isBoundedSourceRun` continua valendo para o `fullSnapshot` (exclusões).
+ */
+export const LONG_RUN_MS = 2 * 60_000;
+export const LONG_ROWS_HINT = 500_000;
+export type SourceLane = "fast" | "long";
+
+export function classifySourceLane(
+  source: { sourceKind: string; deltaColumn: string | null; lastDeltaValue: string | null; keyColumn: string | null; avgRunMs?: number | null; lastRowCount?: bigint | number | null },
+  reconciliation: boolean,
+): SourceLane {
+  if (reconciliation) return "long";
+  if (source.avgRunMs != null) return source.avgRunMs >= LONG_RUN_MS ? "long" : "fast";
+  if (source.lastRowCount != null) return Number(source.lastRowCount) >= LONG_ROWS_HINT ? "long" : "fast";
+  return isBoundedSourceRun(source, reconciliation) ? "fast" : "long";
+}
+
+export const laneWeight = (lane: SourceLane): 0 | 2 => (lane === "long" ? 2 : 0);
+
+/** Média móvel exponencial (alpha 0,3) da duração das execuções incrementais bem-sucedidas; 1ª medição vira a média. */
+export function nextAvgRunMs(prev: number | null | undefined, elapsedMs: number): number {
+  const d = Math.max(0, Math.min(Math.round(elapsedMs), 2_000_000_000));
+  return prev == null ? d : Math.round(0.7 * prev + 0.3 * d);
+}
+
 /** `not: "running"` em SQL nao casa NULL; inclui lastStatus nulo explicitamente. */
 const NOT_RUNNING = { OR: [{ lastStatus: null }, { lastStatus: { not: "running" } }] };
 
@@ -94,7 +127,7 @@ export async function queueSourceRefresh(datasetSourceId: string, opts?: { recon
       }),
       prisma.datasetSource.findUniqueOrThrow({
         where: { id: datasetSourceId },
-        select: { sourceKind: true, deltaColumn: true, lastDeltaValue: true, keyColumn: true, dataset: { select: { storageServerId: true } } },
+        select: { sourceKind: true, deltaColumn: true, lastDeltaValue: true, keyColumn: true, avgRunMs: true, lastRowCount: true, dataset: { select: { storageServerId: true } } },
       }),
     ]);
     // Compara campos parseados, não a string exata — um job de reconciliação em fila
@@ -112,7 +145,7 @@ export async function queueSourceRefresh(datasetSourceId: string, opts?: { recon
       }
       return existing;
     }
-    const weight = isBoundedSourceRun(source, reconciliation) ? 0 : 2;
+    const weight = laneWeight(classifySourceLane(source, reconciliation));
     // Bucket "__default__" pro storage padrão (storageServerId null no dataset) —
     // nunca grava NULL aqui: NULL no Job.storageServerId é reservado pra "job não é
     // do tipo SOURCE_REFRESH" (ver claim() em worker/index.ts), não "storage padrão".
@@ -365,6 +398,7 @@ export async function refreshDatasetSource(datasetSourceId: string, opts?: { rec
   if (claimed.count === 0) {
     throw new ApiError(409, "SOURCE_REFRESH_IN_PROGRESS", "Já existe uma atualização em andamento para esta fonte (incremental ou reconciliação) — tente novamente em instantes");
   }
+  const runStartedAt = Date.now(); // duração real da rodada (a partir daqui, já com a trava), para classificar a faixa
   const stageCols = columns.map(c => ({ name: c.sqlName, sqlType: c.sqlType, nullable: true }));
   const keysTable = `cw_keys_${idPrefix}`;
 
@@ -470,6 +504,8 @@ export async function refreshDatasetSource(datasetSourceId: string, opts?: { rec
         lastRemovedCount: BigInt(swap.marked),
         lastRefreshedAt: new Date(),
         ...(keysApplied ? { lastKeysCheckAt: new Date() } : {}),
+        // Só rodadas incrementais entram na média: a reconciliação é sempre "longa" e distorceria a classificação.
+        ...(reconciliation ? {} : { avgRunMs: nextAvgRunMs(source.avgRunMs, Date.now() - runStartedAt) }),
         ...(reconciliation
           ? { nextReconciliationAt: nextRefreshFromCron(source.reconciliationCron), lastReconciliationAt: new Date() }
           : { nextRefreshAt: nextRefreshFromCron(source.refreshCron) }),

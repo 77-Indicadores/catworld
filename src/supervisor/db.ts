@@ -16,7 +16,7 @@ export function createCoreDb(instanceId: string): CoreDb & { failOrphanedCommand
       const out: CoreProfile[] = [];
       for (const r of rows) {
         try {
-          out.push({ id: r.id, name: r.name, enabled: r.enabled, revision: r.revision, jobTypes: assertKnownTypes(r.jobTypes), concurrency: r.concurrency });
+          out.push({ id: r.id, name: r.name, enabled: r.enabled, revision: r.revision, jobTypes: assertKnownTypes(r.jobTypes), weights: r.weights ?? [], concurrency: r.concurrency });
         } catch (e) {
           console.error(`[supervisor] perfil ${r.name} inválido, ignorado: ${e instanceof Error ? e.message : e}`);
         }

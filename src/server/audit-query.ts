@@ -54,6 +54,7 @@ export const AUDIT_EVENT_LABELS: Record<string, string> = {
   WORKER_PROFILE_CREATED: "Perfil de worker criado",
   WORKER_PROFILE_UPDATED: "Perfil de worker alterado",
   WORKER_PROFILE_DELETED: "Perfil de worker removido",
+  WORKER_PRESET_APPLIED: "Perfil de desempenho dos workers aplicado",
   WORKER_RESTART_REQUESTED: "Reinício de worker solicitado",
   WORKER_COMMAND_REQUESTED: "Comando de worker solicitado",
   WORKER_COMMAND_STARTED: "Comando de worker iniciado",

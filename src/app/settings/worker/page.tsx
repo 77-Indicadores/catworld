@@ -1,14 +1,16 @@
 "use client";
 import { useEffect, useState } from "react";
-import { CheckCircle2, RefreshCw, Zap } from "lucide-react";
+import { CheckCircle2, RefreshCw } from "lucide-react";
 import { PageHeader, Panel } from "@/components/ui/primitives";
 import { apiRequest, errorMessage } from "@/lib/api-client";
 import { WorkersSection } from "@/components/settings/workers-section";
+import { WorkerPresets } from "@/components/settings/worker-presets";
 
 type Settings = {
   max_heavy_jobs: number;
   max_syncs_per_storage: number;
   import_batch_delay_ms: number;
+  memory_limit_gb: number;
   upload_max_bytes: number;
   upload_xlsx_max_bytes: number;
   stop_timeout_ms: number;
@@ -16,49 +18,6 @@ type Settings = {
 };
 
 const MB = 1024 * 1024;
-
-type Preset = {
-  id: string;
-  label: string;
-  emoji: string;
-  description: string;
-  values: Pick<Settings, "max_heavy_jobs" | "max_syncs_per_storage" | "import_batch_delay_ms">;
-};
-
-const PRESETS: Preset[] = [
-  {
-    id: "economico",
-    label: "Econômico",
-    emoji: "🐢",
-    description: "Banco sob pressão — API sempre responsiva, syncs lentos.",
-    values: { max_heavy_jobs: 1, max_syncs_per_storage: 1, import_batch_delay_ms: 500 },
-  },
-  {
-    id: "balanceado",
-    label: "Balanceado",
-    emoji: "⚖️",
-    description: "Uso geral — boa performance sem sobrecarregar o banco.",
-    values: { max_heavy_jobs: 2, max_syncs_per_storage: 2, import_batch_delay_ms: 150 },
-  },
-  {
-    id: "maximo",
-    label: "Máximo",
-    emoji: "🚀",
-    description: "Banco robusto — processa tudo o mais rápido possível.",
-    values: { max_heavy_jobs: 4, max_syncs_per_storage: 4, import_batch_delay_ms: 0 },
-  },
-];
-
-function detectPreset(s: Settings): string {
-  for (const p of PRESETS) {
-    if (
-      p.values.max_heavy_jobs === s.max_heavy_jobs &&
-      p.values.max_syncs_per_storage === s.max_syncs_per_storage &&
-      p.values.import_batch_delay_ms === s.import_batch_delay_ms
-    ) return p.id;
-  }
-  return "custom";
-}
 
 function SliderField({
   label,
@@ -127,6 +86,8 @@ export default function WorkerPage() {
   const [saved, setSaved] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [customOpen, setCustomOpen] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
     apiRequest<Settings>("/api/v1/settings/worker")
@@ -139,11 +100,10 @@ export default function WorkerPage() {
     setSaved(false);
   }
 
-  function applyPreset(presetId: string) {
-    const p = PRESETS.find((p) => p.id === presetId);
-    if (!p) return;
-    setSettings((s) => s ? { ...s, ...p.values } : s);
-    setSaved(false);
+  /** Um preset foi aplicado no servidor: recarrega os campos abaixo para não ficarem com valores velhos. */
+  function reloadSettings() {
+    apiRequest<Settings>("/api/v1/settings/worker").then((r) => setSettings(r.data)).catch((e) => setError(errorMessage(e)));
+    setRefreshKey((k) => k + 1);
   }
 
   async function save(e: React.FormEvent) {
@@ -158,6 +118,7 @@ export default function WorkerPage() {
           max_heavy_jobs: settings.max_heavy_jobs,
           max_syncs_per_storage: settings.max_syncs_per_storage,
           import_batch_delay_ms: settings.import_batch_delay_ms,
+          memory_limit_gb: settings.memory_limit_gb,
           upload_max_bytes: settings.upload_max_bytes,
           upload_xlsx_max_bytes: settings.upload_xlsx_max_bytes,
           stop_timeout_ms: settings.stop_timeout_ms,
@@ -165,6 +126,7 @@ export default function WorkerPage() {
         }),
       });
       setSaved(true);
+      setRefreshKey((k) => k + 1); // o bloco de perfis relê e re-detecta o perfil em uso
     } catch (e) {
       setError(errorMessage(e));
     } finally {
@@ -192,15 +154,25 @@ export default function WorkerPage() {
     );
   }
 
-  const activePreset = detectPreset(settings);
-
   return (
     <div className="space-y-6">
       <PageHeader
         eyebrow="Configurações"
         title="Workers"
-        description="Quais workers rodam e o que cada um processa, com que intensidade e quando reiniciar. Tudo é configurado aqui; nenhuma variável de ambiente é usada."
+        description="Escolha um perfil de desempenho. Quem quiser controlar cada número abre “Personalizar”. Tudo é configurado aqui; nenhuma variável de ambiente é usada."
       />
+
+      <WorkerPresets refreshKey={refreshKey} onApplied={reloadSettings} onCustomize={() => setCustomOpen(true)} />
+
+      <details
+        open={customOpen}
+        onToggle={(e) => setCustomOpen((e.currentTarget as HTMLDetailsElement).open)}
+        className="group rounded-box border border-base-300 bg-base-100"
+      >
+        <summary className="cursor-pointer select-none px-5 py-3 text-sm font-semibold">
+          Personalizar <span className="ml-1 font-normal text-base-content/65">— workers, limites e proteções (para quem quer ajustar cada número)</span>
+        </summary>
+        <div className="space-y-6 border-t border-base-300 p-4">
 
       <WorkersSection />
 
@@ -212,45 +184,18 @@ export default function WorkerPage() {
       {error && <div className="alert alert-error alert-soft">{error}</div>}
 
       <form onSubmit={save} className="space-y-4">
-        {/* Presets */}
-        <Panel>
-          <div className="p-5 space-y-4">
-            <h2 className="font-semibold text-sm text-base-content/70 uppercase tracking-wide">Perfil</h2>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              {PRESETS.map((p) => (
-                <button
-                  key={p.id}
-                  type="button"
-                  onClick={() => applyPreset(p.id)}
-                  className={`flex flex-col items-start gap-1 rounded-xl border p-4 text-left transition-all ${
-                    activePreset === p.id
-                      ? "border-primary bg-primary/5 ring-1 ring-primary/30"
-                      : "border-base-300 bg-base-100 hover:border-primary/30 hover:bg-base-200"
-                  }`}
-                >
-                  <span className="text-2xl leading-none">{p.emoji}</span>
-                  <span className="font-semibold text-sm mt-1">{p.label}</span>
-                  <span className="text-xs text-base-content/65 leading-snug">{p.description}</span>
-                </button>
-              ))}
-            </div>
-            {activePreset === "custom" && (
-              <p className="text-xs text-base-content/65">
-                <Zap size={12} className="inline mr-1" />
-                Configuração personalizada — ajuste os controles abaixo.
-              </p>
-            )}
-          </div>
-        </Panel>
-
-        {/* Sliders */}
+        {/* Proteções (tetos globais) */}
         <Panel>
           <div className="p-5 space-y-6">
-            <h2 className="font-semibold text-sm text-base-content/70 uppercase tracking-wide">Controles</h2>
+            <h2 className="font-semibold text-sm text-base-content/70 uppercase tracking-wide">Proteções</h2>
+            <p className="text-xs text-base-content/65">
+              Tetos que valem para todos os workers juntos. Quantos jobs cada worker roda ao mesmo tempo são os <strong>slots</strong> (tabela acima);
+              o paralelismo real é o <strong>menor</strong> entre o slot e o teto.
+            </p>
 
             <SliderField
-              label="Jobs pesados simultâneos"
-              description="Imports e syncs de fonte (peso 2). Inclui uploads e SOURCE_REFRESH."
+              label="Teto de jobs pesados"
+              description="Imports e syncs completos (peso 2) ao mesmo tempo, somando todos os workers. Deixe pelo menos igual aos slots de sync, senão os syncs completos rodam um de cada vez."
               value={settings.max_heavy_jobs}
               onChange={(v) => set("max_heavy_jobs", v)}
               min={1} max={20}
@@ -259,23 +204,33 @@ export default function WorkerPage() {
             />
             <div className="divider my-0" />
             <SliderField
-              label="Syncs por storage"
-              description="Máximo de SOURCE_REFRESH simultâneos por servidor de armazenamento."
+              label="Leituras simultâneas por storage"
+              description="Quantos syncs de fonte podem ler o mesmo servidor ao mesmo tempo (protege ERPs e storages). Também limitado pelos slots de sync."
               value={settings.max_syncs_per_storage}
               onChange={(v) => set("max_syncs_per_storage", v)}
               min={1} max={20}
-              unit="syncs"
+              unit="leituras"
               marks={[1, 5, 10, 15, 20]}
             />
             <div className="divider my-0" />
             <SliderField
-              label="Pausa entre batches de import"
+              label="Pausa entre lotes de import"
               description="Intervalo entre cada lote de 50.000 linhas. 0 ms = velocidade máxima. Aumentar reduz consumo de DTU/CPU no banco."
               value={settings.import_batch_delay_ms}
               onChange={(v) => set("import_batch_delay_ms", v)}
               min={0} max={5000} step={50}
               unit="ms"
               marks={[0, 1000, 2500, 5000]}
+            />
+            <div className="divider my-0" />
+            <SliderField
+              label="Memória do container dos workers"
+              description="Só para AVISO: se a memória de pico estimada dos perfis passar deste valor, a tela avisa. 0 = não informado."
+              value={settings.memory_limit_gb}
+              onChange={(v) => set("memory_limit_gb", v)}
+              min={0} max={128}
+              unit="GB"
+              marks={[0, 32, 64, 96, 128]}
             />
           </div>
         </Panel>
@@ -331,14 +286,17 @@ export default function WorkerPage() {
         <div className="p-5 space-y-2">
           <h2 className="font-semibold text-sm text-base-content/70 uppercase tracking-wide">Como funciona</h2>
           <ul className="text-sm text-base-content/65 space-y-1 list-disc list-inside">
-            <li>Estes limites e o intervalo de busca/memória de cada worker valem em até 10 s, sem reiniciar. Tipos de job e paralelismo de um worker só valem depois de reiniciá-lo.</li>
+            <li><strong>Slots</strong> (tabela de workers): quantos jobs cada worker roda ao mesmo tempo. Só valem depois de reiniciar o worker. Os tetos abaixo valem em até 10 s, sem reiniciar.</li>
+            <li>O paralelismo real é o <strong>menor</strong> entre os slots e os tetos: um teto acima dos slots não tem efeito.</li>
             <li><strong>Reiniciar com segurança</strong> espera os jobs em andamento terminarem; <strong>reiniciar agora</strong> interrompe e os jobs recomeçam.</li>
-            <li><strong>Jobs pesados</strong>: imports e syncs pesam 2; o worker não inicia um novo se o limite for atingido.</li>
-            <li><strong>Syncs por storage</strong>: evita que um storage seja bombardeado com muitos syncs simultâneos.</li>
-            <li><strong>Pausa entre batches</strong>: reduz pico de DTU/CPU sem alterar o throughput médio de dados grandes.</li>
+            <li><strong>Teto de jobs pesados</strong>: imports e syncs completos pesam 2; o worker não inicia um novo se o teto for atingido.</li>
+            <li><strong>Leituras por storage</strong>: evita que um storage ou ERP seja bombardeado com muitos syncs simultâneos.</li>
+            <li><strong>Pausa entre lotes</strong>: reduz pico de DTU/CPU sem alterar o throughput médio de dados grandes.</li>
           </ul>
         </div>
       </Panel>
+        </div>
+      </details>
     </div>
   );
 }

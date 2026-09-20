@@ -3,7 +3,7 @@ import type { NextRequest } from "next/server";
 import { prisma } from "@/server/db";
 import { resolveActor, requireRole } from "@/server/auth/actor";
 import { handleApiError, ok } from "@/server/http";
-import { uncoveredJobTypes } from "@/server/worker/profiles";
+import { coverageWarnings } from "@/server/worker/profiles";
 import { getProfileLoad, getSupervisorStatus } from "@/server/worker/status";
 
 export async function GET(r: NextRequest) {
@@ -21,6 +21,7 @@ export async function GET(r: NextRequest) {
       id: p.id,
       name: p.name,
       jobTypes: p.jobTypes,
+      weights: p.weights,
       concurrency: p.concurrency,
       pollMs: p.pollMs,
       duckdbMemoryLimit: p.duckdbMemoryLimit,
@@ -29,10 +30,10 @@ export async function GET(r: NextRequest) {
       runtime: children.get(p.name) ?? null, // null = sem supervisor ou ainda não reconhecido
       ...load.get(p.name),
     }));
-    const uncovered = uncoveredJobTypes(profiles);
+    const warnings = coverageWarnings(profiles);
     return ok(
       { supervisor: { supervised: supervisor.supervised, instanceId: supervisor.instanceId, hostname: supervisor.hostname, pid: supervisor.pid, heartbeatAt: supervisor.heartbeatAt }, profiles: items, commands },
-      uncovered.length ? { warnings: [`Nenhum perfil habilitado processa: ${uncovered.join(", ")}. Esses jobs ficarão na fila.`] } : undefined,
+      warnings.length ? { warnings } : undefined,
     );
   } catch (e) {
     return handleApiError(e);

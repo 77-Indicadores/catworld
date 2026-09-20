@@ -15,7 +15,7 @@ export type ChildHandle = {
   onExit(cb: (code: number | null, signal: string | null) => void): void;
 };
 
-export type CoreProfile = { id: string; name: string; enabled: boolean; revision: number; jobTypes: string[]; concurrency: number };
+export type CoreProfile = { id: string; name: string; enabled: boolean; revision: number; jobTypes: string[]; concurrency: number; weights?: number[] };
 export type CoreCommand = { id: string; action: CommandAction; mode: CommandMode; profileId: string | null; timeoutMs: number };
 export type CoreConfig = { stopTimeoutMs: number; backoffMaxMs: number };
 
@@ -65,7 +65,7 @@ type Slot = {
   profile: CoreProfile;
   child: ChildHandle | null;
   state: SlotState;
-  spawned: { jobTypes: string[]; concurrency: number } | null;
+  spawned: { jobTypes: string[]; concurrency: number; weights?: number[] } | null;
   startedAt: number | null;
   spawnCount: number;
   crashes: number;
@@ -192,7 +192,7 @@ export class Supervisor {
     slot.termSent = false;
     slot.killAt = null;
     slot.spawnCount++;
-    slot.spawned = { jobTypes: [...slot.profile.jobTypes], concurrency: slot.profile.concurrency };
+    slot.spawned = { jobTypes: [...slot.profile.jobTypes], concurrency: slot.profile.concurrency, weights: [...(slot.profile.weights ?? [])] };
     child.onExit((code, signal) => this.onChildExit(slot, child, code, signal));
     this.log(`worker ${slot.profile.name} iniciado (pid ${child.pid})`);
     void this.deps.db.audit("WORKER_STARTED", slot.profile.name, { pid: child.pid ?? null, restarts: slot.spawnCount - 1 }, true).catch(() => undefined);

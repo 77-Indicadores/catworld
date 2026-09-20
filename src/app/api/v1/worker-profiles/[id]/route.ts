@@ -5,7 +5,7 @@ import { prisma } from "@/server/db";
 import { resolveActor, requireRole } from "@/server/auth/actor";
 import { audit } from "@/server/audit";
 import { ApiError, handleApiError, ok } from "@/server/http";
-import { needsRestart, profilePatchSchema, uncoveredJobTypes } from "@/server/worker/profiles";
+import { needsRestart, profilePatchSchema, coverageWarnings } from "@/server/worker/profiles";
 import { getSupervisorStatus } from "@/server/worker/status";
 
 const idSchema = z.string().uuid();
@@ -36,9 +36,7 @@ export async function PATCH(r: NextRequest, { params }: { params: Promise<{ id: 
     const updated = await prisma.workerProfile.update({ where: { id: before.id }, data: { ...patch, revision: { increment: 1 } } });
     await audit(actor, "WORKER_PROFILE_UPDATED", "worker_profile", updated.id, { name: updated.name, fields: Object.keys(patch) });
     const restartRequired = needsRestart(before, updated);
-    const warnings: string[] = [];
-    const uncovered = uncoveredJobTypes(await prisma.workerProfile.findMany());
-    if (uncovered.length) warnings.push(`Nenhum perfil habilitado processa: ${uncovered.join(", ")}.`);
+    const warnings = coverageWarnings(await prisma.workerProfile.findMany());
     return ok(updated, { restartRequired, ...(warnings.length ? { warnings } : {}) });
   } catch (e) {
     return handleApiError(e);
@@ -55,8 +53,8 @@ export async function DELETE(r: NextRequest, { params }: { params: Promise<{ id:
     if (running) throw new ApiError(409, "PROFILE_RUNNING", "O worker deste perfil está em execução. Desabilite o perfil, espere ele parar e então remova.");
     await prisma.workerProfile.delete({ where: { id: p.id } });
     await audit(actor, "WORKER_PROFILE_DELETED", "worker_profile", p.id, { name: p.name });
-    const uncovered = uncoveredJobTypes(await prisma.workerProfile.findMany());
-    return ok({ deleted: true }, uncovered.length ? { warnings: [`Nenhum perfil habilitado processa: ${uncovered.join(", ")}.`] } : undefined);
+    const warnings = coverageWarnings(await prisma.workerProfile.findMany());
+    return ok({ deleted: true }, warnings.length ? { warnings } : undefined);
   } catch (e) {
     return handleApiError(e);
   }

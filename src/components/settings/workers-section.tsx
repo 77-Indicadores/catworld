@@ -6,11 +6,12 @@ import { useApiAction, useFeedback } from "@/components/ui/feedback";
 import { apiRequest, errorMessage, warningsOf } from "@/lib/api-client";
 import { COMMAND_ACTION_LABEL, COMMAND_STATUS_LABEL, JOB_TYPE_LABEL, WORKER_STATE_LABEL } from "@/lib/labels";
 import type { Status } from "@/lib/types";
+import { weightsLabel } from "@/server/worker/profiles";
 import { Time } from "@/components/ui/time";
 
 type Runtime = { state: string; pid: number | null; restarts: number; lastExitCode: number | null; restartPending: boolean } | null;
 type Profile = {
-  id: string; name: string; jobTypes: string[]; concurrency: number; pollMs: number; duckdbMemoryLimit: string; enabled: boolean;
+  id: string; name: string; jobTypes: string[]; weights?: number[]; concurrency: number; pollMs: number; duckdbMemoryLimit: string; enabled: boolean;
   runtime: Runtime; runningJobs?: number; queuedJobs?: number;
 };
 type Command = { id: string; action: string; mode: string; status: string; requestedBy: string; requestedAt: string; resultJson: string | null };
@@ -145,7 +146,7 @@ export function WorkersSection() {
                       <div className="font-mono text-sm">{p.name}</div>
                       {p.runtime?.pid && <div className="text-[11px] text-base-content/65">pid {p.runtime.pid}{p.runtime.restarts ? ` · ${p.runtime.restarts} reinício(s)` : ""}</div>}
                     </td>
-                    <td data-label="Processa" className="max-w-64 text-xs">{p.jobTypes.map((t) => JOB_TYPE_LABEL[t]?.label ?? t).join(", ")}</td>
+                    <td data-label="Processa" className="max-w-64 text-xs">{p.jobTypes.map((t) => JOB_TYPE_LABEL[t]?.label ?? t).join(", ")}<span className="block text-base-content/70">{weightsLabel(p.weights)}</span></td>
                     <td data-label="Paralelo" className="text-sm">{p.concurrency}</td>
                     <td data-label="Estado">
                       <StatusBadge status={badge.status} label={badge.label} />
@@ -220,11 +221,18 @@ function safeError(json: string): string {
   }
 }
 
+const WEIGHTS_BY_LOAD = { all: [] as number[], light: [0, 1], heavy: [2] };
+function loadOf(weights: number[] | undefined): "all" | "light" | "heavy" {
+  const k = [...(weights ?? [])].sort().join(",");
+  return k === "0,1" ? "light" : k === "2" ? "heavy" : "all";
+}
+
 function ProfileDialog({ profile, onClose, onSaved }: { profile: Profile | null; onClose: () => void; onSaved: (restartRequired: boolean) => void }) {
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
   const [name, setName] = useState(profile?.name ?? "");
   const [types, setTypes] = useState<string[]>(profile?.jobTypes ?? []);
+  const [load, setLoad] = useState<"all" | "light" | "heavy">(loadOf(profile?.weights));
   const [concurrency, setConcurrency] = useState(profile?.concurrency ?? 1);
   const [pollMs, setPollMs] = useState(profile?.pollMs ?? 2000);
   const [memory, setMemory] = useState(profile?.duckdbMemoryLimit ?? "1GB");
@@ -240,7 +248,7 @@ function ProfileDialog({ profile, onClose, onSaved }: { profile: Profile | null;
     if (types.length === 0) { setError("Escolha ao menos um tipo de job."); return; }
     setSaving(true);
     try {
-      const body = { jobTypes: types, concurrency, pollMs, duckdbMemoryLimit: memory, enabled };
+      const body = { jobTypes: types, weights: WEIGHTS_BY_LOAD[load], concurrency, pollMs, duckdbMemoryLimit: memory, enabled };
       const r = profile
         ? await apiRequest(`/api/v1/worker-profiles/${profile.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })
         : await apiRequest("/api/v1/worker-profiles", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, ...body }) });
@@ -275,6 +283,15 @@ function ProfileDialog({ profile, onClose, onSaved }: { profile: Profile | null;
               ))}
             </div>
           </fieldset>
+          <label className="fieldset">
+            <span className="fieldset-legend">Cargas</span>
+            <select className="select w-full" value={load} onChange={(e) => setLoad(e.target.value as "all" | "light" | "heavy")}>
+              <option value="all">Todas</option>
+              <option value="light">Só leves (rápidas)</option>
+              <option value="heavy">Só pesadas (demoradas)</option>
+            </select>
+            <span className="label text-xs">Separa jobs rápidos dos demorados para um não travar o outro. Vale após reiniciar.</span>
+          </label>
           <div className="grid gap-4 sm:grid-cols-3">
             <label className="fieldset">
               <span className="fieldset-legend">Jobs em paralelo</span>

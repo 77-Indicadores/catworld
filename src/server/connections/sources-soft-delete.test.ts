@@ -83,6 +83,27 @@ const swapOpts = () => storage.atomicSwap.mock.calls[0]![4] as Record<string, un
 describe("refreshDatasetSource - deteccao de exclusoes (soft delete)", () => {
   beforeEach(() => { vi.clearAllMocks(); streams.calls.length = 0; });
 
+  it("grava a duração da rodada incremental (média móvel) para classificar a faixa; reconciliação NÃO entra na média", async () => {
+    setup(baseSource({ detectDeletions: false }));
+    await refreshDatasetSource(ID);
+    const inc = lastUpdate();
+    expect(typeof inc.avgRunMs).toBe("number");
+    expect(inc.avgRunMs as number).toBeGreaterThanOrEqual(0);
+
+    vi.clearAllMocks(); streams.calls.length = 0;
+    setup(baseSource({ detectDeletions: false, avgRunMs: 4000 }));
+    await refreshDatasetSource(ID, { reconciliation: true });
+    expect(lastUpdate()).not.toHaveProperty("avgRunMs");
+  });
+
+  it("com histórico, a média é ponderada (70/30) e não é zerada por uma rodada rápida", async () => {
+    setup(baseSource({ detectDeletions: false, avgRunMs: 300_000 }));
+    await refreshDatasetSource(ID);
+    const avg = lastUpdate().avgRunMs as number;
+    expect(avg).toBeGreaterThan(200_000);   // 0,7 x 300000 = 210000 (+ ~0 da rodada instantânea do mock)
+    expect(avg).toBeLessThanOrEqual(210_100);
+  });
+
   it("padrao desligado: nenhuma leitura extra, swap sem keysTable", async () => {
     setup(baseSource({ detectDeletions: false }));
     await refreshDatasetSource(ID);

@@ -4,7 +4,7 @@ import { prisma } from "@/server/db";
 import { resolveActor, requireRole } from "@/server/auth/actor";
 import { audit } from "@/server/audit";
 import { handleApiError, ok } from "@/server/http";
-import { profileCreateSchema, uncoveredJobTypes } from "@/server/worker/profiles";
+import { profileCreateSchema, coverageWarnings } from "@/server/worker/profiles";
 
 export async function GET(r: NextRequest) {
   try {
@@ -23,10 +23,10 @@ export async function POST(r: NextRequest) {
     const input = profileCreateSchema.parse(await r.json());
     // nome duplicado vira 409 CONFLICT pelo handleApiError (P2002)
     const created = await prisma.workerProfile.create({ data: input });
-    await audit(actor, "WORKER_PROFILE_CREATED", "worker_profile", created.id, { name: created.name, jobTypes: created.jobTypes, concurrency: created.concurrency });
+    await audit(actor, "WORKER_PROFILE_CREATED", "worker_profile", created.id, { name: created.name, jobTypes: created.jobTypes, weights: created.weights, concurrency: created.concurrency });
     const all = await prisma.workerProfile.findMany();
-    const uncovered = uncoveredJobTypes(all);
-    return ok(created, uncovered.length ? { warnings: [`Nenhum perfil habilitado processa: ${uncovered.join(", ")}.`] } : undefined, 201);
+    const warnings = coverageWarnings(all);
+    return ok(created, warnings.length ? { warnings } : undefined, 201);
   } catch (e) {
     return handleApiError(e);
   }

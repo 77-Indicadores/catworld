@@ -25,6 +25,8 @@ const FIELDS = {
   max_heavy_jobs:        { key: "worker.max_heavy_jobs",        def: WORKER_CONFIG_DEFAULTS.max_heavy_jobs,        min: 1,    max: 20 },
   max_syncs_per_storage: { key: "worker.max_syncs_per_storage", def: WORKER_CONFIG_DEFAULTS.max_syncs_per_storage, min: 1,    max: 20 },
   import_batch_delay_ms: { key: "worker.import_batch_delay_ms", def: WORKER_CONFIG_DEFAULTS.import_batch_delay_ms, min: 0,   max: 5000 },
+  // Só alimenta o AVISO de memória da tela (estimativa de pico x limite do container `workers`). 0 = não informado.
+  memory_limit_gb:       { key: "worker.memory_limit_gb",       def: 0,                                            min: 0,    max: 1024 },
   upload_max_bytes:      { key: "upload.max_bytes",             def: UPLOAD_LIMIT_DEFAULTS.max_bytes,              min: MB,   max: UPLOAD_HARD_CEILING_BYTES },
   upload_xlsx_max_bytes: { key: "upload.xlsx_max_bytes",        def: UPLOAD_LIMIT_DEFAULTS.xlsx_max_bytes,         min: MB,   max: UPLOAD_HARD_CEILING_BYTES },
   stop_timeout_ms:       { key: "worker.stop_timeout_ms",       def: SUPERVISOR_DEFAULTS.stop_timeout_ms,          min: 1000, max: 3_600_000 },
@@ -49,6 +51,7 @@ async function getSettings() {
     ...values,
     defaults: {
       ...WORKER_CONFIG_DEFAULTS,
+      memory_limit_gb: 0,
       upload_max_bytes: UPLOAD_LIMIT_DEFAULTS.max_bytes,
       upload_xlsx_max_bytes: UPLOAD_LIMIT_DEFAULTS.xlsx_max_bytes,
       stop_timeout_ms: SUPERVISOR_DEFAULTS.stop_timeout_ms,
