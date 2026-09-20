@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Download, Play, Table2 } from "lucide-react";
+import { BookOpen, Download, Play, Table2 } from "lucide-react";
 import CodeMirror, { EditorSelection, keymap, oneDark, Prec, type ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import { sql as sqlLang } from "@codemirror/lang-sql";
 import { apiErrorText, apiRequest, errorMessage, warningsOf } from "@/lib/api-client";
@@ -104,7 +104,7 @@ export function QueryPanel({ datasets, projectId }: { datasets: WorkspaceDataset
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
 
       {/* Toolbar */}
-      <div className="flex shrink-0 items-center gap-2 border-b border-base-300 bg-base-100 px-4 py-2">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-base-300 bg-base-100 px-4 py-2">
         <button
           onClick={execute}
           disabled={running}
@@ -114,6 +114,7 @@ export function QueryPanel({ datasets, projectId }: { datasets: WorkspaceDataset
           {running ? "Executando…" : "Executar"}
         </button>
         <button type="button" onClick={() => setShowBrowser((v) => !v)} aria-pressed={showBrowser} className="btn btn-ghost btn-sm gap-1.5"><Table2 size={13} />Tabelas</button>
+        <a href="/knowledge/linguagem-sql" target="_blank" rel="noopener" className="btn btn-ghost btn-sm gap-1.5" title="Guia da linguagem SQL com exemplos"><BookOpen size={13} />Guia SQL</a>
         {result && (
           <>
             <span className="text-xs text-base-content/65">{result.rows.length} linhas · {result.executionTimeMs} ms</span>
