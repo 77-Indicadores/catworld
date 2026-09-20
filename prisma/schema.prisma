@@ -198,10 +198,11 @@ model DatasetSource {
   sourceSqlReconciliation String?   @map("source_sql_reconciliation") @db.Text
   nextReconciliationAt    DateTime? @map("next_reconciliation_at") @db.Timestamp(3)
   lastReconciliationAt    DateTime? @map("last_reconciliation_at") @db.Timestamp(3)
-  scopeColumns            String?   @map("scope_columns") @db.Text
+  // Colunas scope_columns, keys_check_cron e next_keys_check_at ainda existem no banco (migration 202609200001),
+  // sem uso; serao removidas numa versao futura (expand/contract).
+  detectDeletions         Boolean   @default(false) @map("detect_deletions")
+  keysMinIntervalMinutes  Int?      @map("keys_min_interval_minutes")
   keysSql                 String?   @map("keys_sql") @db.Text
-  keysCheckCron           String?   @map("keys_check_cron") @db.VarChar(100)
-  nextKeysCheckAt         DateTime? @map("next_keys_check_at") @db.Timestamp(3)
   lastKeysCheckAt         DateTime? @map("last_keys_check_at") @db.Timestamp(3)
   lastRemovedCount        BigInt?   @map("last_removed_count")
   lastStatus      String?       @map("last_status") @db.VarChar(32)

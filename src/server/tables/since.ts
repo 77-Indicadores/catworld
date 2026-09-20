@@ -75,35 +75,8 @@ export function pgRowsPageSql(i: SincePageInput): string {
 
 export const REMOVED_CAP = 100_000;
 
-export type RemovedInput = Pick<SincePageInput, "qTarget" | "qDeleted" | "qKey" | "sinceLit"> & {
-  /** `schema.cw_tomb_<tabela>` ja citada; null/ausente = tabela sem lapide (so o formato legado). */
-  qTomb?: string | null;
-  qTombKey?: string;
-  qTombAt?: string;
-};
-
-/**
- * Chaves excluidas desde `since`: lapides (`cw_tomb_*`, deleted_at > since) UNIDAS as linhas legadas com
- * cw_deleted_at preenchido (tabelas ainda nao convertidas). Ordenadas por (quando, chave). Sem `LIMIT`.
- */
-export function removedKeysSql(i: RemovedInput): string {
-  const legacy = `SELECT ${i.qKey} AS k, ${i.qDeleted} AS d FROM ${i.qTarget} WHERE ${i.qDeleted} > ${i.sinceLit}`;
-  if (!i.qTomb) return `${legacy} ORDER BY d ASC, k ASC`;
-  const tomb = `SELECT ${i.qTombKey ?? '"cw_key"'} AS k, ${i.qTombAt ?? '"cw_deleted_at"'} AS d FROM ${i.qTomb} WHERE ${i.qTombAt ?? '"cw_deleted_at"'} > ${i.sinceLit}`;
-  return `SELECT k, d FROM (${tomb} UNION ALL ${legacy}) x ORDER BY d ASC, k ASC`;
-}
-
-export function pgRemovedSql(i: RemovedInput): string {
-  return `${removedKeysSql(i)} LIMIT ${REMOVED_CAP + 1}`;
-}
-
-/**
- * `since` mais antigo que a validade das lapides: exclusoes anteriores ao corte podem ja ter sido apagadas, entao
- * `removedKeys` pode estar incompleto e o consumidor deve ressincronizar (`meta.removedIncomplete`).
- * ttlDays 0 = lapides nunca expiram.
- */
-export function removedIncomplete(since: Date, ttlDays: number, now = new Date()): boolean {
-  return ttlDays > 0 && since.getTime() < now.getTime() - ttlDays * 86_400_000;
+export function pgRemovedSql(i: Pick<SincePageInput, "qTarget" | "qDeleted" | "qKey" | "sinceLit">): string {
+  return `SELECT ${i.qKey} AS k, ${i.qDeleted} AS d FROM ${i.qTarget} WHERE ${i.qDeleted} > ${i.sinceLit} ORDER BY ${i.qDeleted} ASC, ${i.qKey} ASC LIMIT ${REMOVED_CAP + 1}`;
 }
 
 export type PageRow = Record<string, unknown> & { __cw_synced_at: unknown; __cw_synced_txt: unknown; __cw_key?: unknown };

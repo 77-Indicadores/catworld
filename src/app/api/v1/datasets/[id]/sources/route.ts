@@ -4,7 +4,7 @@ import { prisma } from "@/server/db";
 import { resolveActor } from "@/server/auth/actor";
 import { assertCanUseConnection, assertDatasetAccess } from "@/server/auth/permissions";
 import { ApiError, handleApiError, ok } from "@/server/http";
-import { assertValidCron, createDatasetSource, createDatasetSources, exposeSource } from "@/server/connections/sources";
+import { assertDeleteDetection, assertValidCron, createDatasetSource, createDatasetSources, exposeSource } from "@/server/connections/sources";
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -45,15 +45,18 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       deltaColumn: z.string().max(128).nullable().optional(),
       reconciliationCron: z.string().max(100).nullable().optional(),
       sourceSqlReconciliation: z.string().nullable().optional(),
-      scopeColumns: z.array(z.string().min(1).max(128)).max(16).nullable().optional(),
-      keysCheckCron: z.string().max(100).nullable().optional(),
+      detectDeletions: z.boolean().optional(),
       keysSql: z.string().nullable().optional(),
+      keysMinIntervalMinutes: z.number().int().min(1).nullable().optional(),
       sourceGroupId: z.string().uuid().optional(),
     }).parse(await request.json());
     await assertCanUseConnection(actor, input.connectionId, ds);
     assertValidCron(input.refreshCron, "refreshCron");
     assertValidCron(input.reconciliationCron, "reconciliationCron");
-    assertValidCron(input.keysCheckCron, "keysCheckCron");
+    assertDeleteDetection({
+      mode: input.mode, sourceKind: input.sourceKind, keyColumn: input.keyColumn,
+      detectDeletions: input.detectDeletions, keysSql: input.keysSql?.trim() || null, keysMinIntervalMinutes: input.keysMinIntervalMinutes,
+    });
     if (input.sourceKind === "table" && input.sourceTables?.length) {
       return ok((await createDatasetSources({
         datasetId,
@@ -65,9 +68,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         keyColumn: input.keyColumn,
         deltaColumn: input.deltaColumn,
         reconciliationCron: input.reconciliationCron,
-        scopeColumns: input.scopeColumns,
-        keysCheckCron: input.keysCheckCron,
-        keysSql: input.keysSql,
+        detectDeletions: input.detectDeletions,
+        keysMinIntervalMinutes: input.keysMinIntervalMinutes,
         sourceGroupId: input.sourceGroupId,
       })).map(exposeSource), undefined, 201);
     }

@@ -9,7 +9,7 @@ Como a tela se comporta em relação às regras da API (revisão de UX/premissas
 - **Papéis:** o menu mostra Auditoria para ADMIN/DATA_MANAGER e Configurações só para ADMIN; o rodapé mostra usuário e papel reais e "Sair" encerra a sessão (evento `LOGOUT`).
 - **Auditoria:** `/audit` filtra por tipo, resultado, período, usuário e token, com paginação por cursor, IP e detalhe; a leitura da própria tela é auditada.
 - **Limites** em Configurações espelham a API: worker 1–20 / 1–20 / 0–5000 ms; retenção 1–3650 dias (versões 1–1000), com validação inline e aviso de que eventos de auditoria apagados não voltam.
-- **Fonte (criar/editar):** seção opcional "Detecção de exclusões" só com coluna-chave em modo extract: colunas de escopo (separadas por vírgula), cron de verificação de chaves (`CronPreview`) e, só em fonte por consulta, a consulta de chaves (obrigatória com o cron). Os erros `SCOPE_*`/`KEYS_*` da API aparecem como mensagem do formulário.
+- **Fonte (criar/editar):** seção opcional só com coluna-chave em modo extract: interruptor "Marcar como excluídas as linhas que somem da origem" (`detectDeletions`, com texto explicando que só a coluna-chave é lida e que nada é apagado), e, com ele ligado, a consulta de chaves (só fonte por consulta, obrigatória) e o "Intervalo mínimo entre leituras (min)" opcional. Os erros `DELETE_DETECTION_REQUIRES_KEY`/`KEYS_SQL_*`/`INVALID_KEYS_INTERVAL` da API aparecem como mensagem do formulário.
 - **Cron** (`CronPreview`): sempre UTC, próximas execuções e atalhos; inválido é recusado pela API (400).
 - **Erros de página:** `error.tsx` e `global-error.tsx` em português, com "Tentar novamente" e o código do erro; `dashboard/loading.tsx` para o carregamento.
 
@@ -26,7 +26,7 @@ Toda data, contagem e estado mostrado na tela passa por funções puras desta ca
 ## Espaço de trabalho
 
 - **Tipos e serializer únicos:** `src/lib/workspace/{types,serialize}.ts` (BigInt vira string, Date vira ISO); `present.ts` traduz fonte/derivada/tabela em frescor e origem.
-- **Detalhe da tabela** (`workspace/table-detail/`): blocos Frescor (última/próxima atualização, erros de todas as fontes, contagem exata), Origem (arquivo, conexão, `schema.tabela` ou SQL, chave, cron, colunas de escopo, cron e última verificação de chaves, linhas removidas na última atualização), Uso (nome SQL, URL OData, `since`) e Histórico.
+- **Detalhe da tabela** (`workspace/table-detail/`): blocos Frescor (última/próxima atualização, erros de todas as fontes, contagem exata), Origem (arquivo, conexão, `schema.tabela` ou SQL, chave, cron, "Detecção de exclusões: ativa" com a última leitura de chaves e as linhas marcadas como excluídas na última atualização), Uso (nome SQL, URL OData, `since`) e Histórico.
 - **Histórico:** `GET /api/v1/tables/:id/history?limit=1..50` (mesma autenticação das demais rotas; exige leitura do dataset) devolve versões e execuções. Usa as colunas aditivas `cw_uploads.created_by` e `cw_job_metrics.table_id`; registros antigos ficam sem esses campos e o bloco cai para `cw_jobs` retido.
 - **Dashboard e árvore:** lista "Precisa de atenção" (falhando, atrasada) e ponto de estado por tabela/dataset, com texto acessível (não só cor).
 - **Consulta SQL:** navegador de tabelas e colunas (clicar insere `schema.tabela` ou a coluna), NULL destacado, números à direita, "Mostrando as primeiras N de M linhas".

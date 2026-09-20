@@ -11,7 +11,6 @@
 | `upload.xlsx_max_bytes` | 40 MB | 1 MB-2 GB | próximo envio |
 | `worker.stop_timeout_ms` | 600000 (10 min) | 1 s-60 min | supervisor |
 | `worker.backoff_max_ms` | 60000 | 1-600 s | supervisor |
-| `retention.tombstone_days` | 30 | 0-3650 (0 = nunca expira) | próxima carga da fonte |
 | `sql_contract.mode` | fallback | off/shadow/fallback/strict | 30 s |
 | `result.normalize_default` | legacy | legacy/normalized | 30 s |
 | `pg_isolation.mode` | enforce | enforce/off | — |

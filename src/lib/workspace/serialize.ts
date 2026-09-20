@@ -5,7 +5,6 @@
  */
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/server/db";
-import { parseScopeColumns } from "@/server/connections/scope-columns";
 import type { WorkspaceDataset, WorkspaceProject, WorkspaceTable, WorkspaceUpload } from "./types";
 
 export const WORKSPACE_INCLUDE = {
@@ -88,10 +87,9 @@ export function serializeWorkspaceProject(p: WorkspaceProjectRow, lastUploads: M
               deltaColumn: t.source.deltaColumn,
               reconciliationCron: t.source.reconciliationCron,
               sourceSqlReconciliation: t.source.sourceSqlReconciliation,
-              scopeColumns: parseScopeColumns(t.source.scopeColumns),
-              keysCheckCron: t.source.keysCheckCron,
+              detectDeletions: t.source.detectDeletions,
               keysSql: t.source.keysSql,
-              nextKeysCheckAt: iso(t.source.nextKeysCheckAt),
+              keysMinIntervalMinutes: t.source.keysMinIntervalMinutes,
               lastKeysCheckAt: iso(t.source.lastKeysCheckAt),
               lastRemovedCount: big(t.source.lastRemovedCount),
               lastStatus: t.source.lastStatus,

@@ -6,9 +6,7 @@ import { sqlPool, ensureSchema } from "@/server/azure/sql";
 import { getStorageConnection, type StorageConnection } from "@/server/storage/connection";
 import { sqlIdentifier } from "@/server/security/naming";
 import { ApiError } from "@/server/http";
-import { normalizeScopeColumns, parseScopeColumns } from "./scope-columns";
-import { KEYS_CHECK_MAX_RATIO } from "@/server/storage/delete-detection";
-import { getTombstoneTtlDays } from "@/server/storage/tombstone-ttl";
+import { KEYS_CHECK_MAX_RATIO, keysCheckExceeds } from "@/server/storage/delete-detection";
 import { queryColumns, quotedPgTable, streamPostgresRows, tableColumns, type SourceColumn } from "./postgres";
 import { queryColumnsMssql, quotedMssqlTable, streamMssqlRows, tableColumnsMssql } from "./mssql";
 
@@ -31,39 +29,32 @@ export function nextRefreshFromCron(cronExpr: string | null | undefined, from = 
   }
 }
 
-export { parseScopeColumns, normalizeScopeColumns };
-
-/** Tabelas ja sem linhas no formato legado (soft delete) neste processo. */
-const LEGACY_CLEAN = new Set<string>();
-/** So para testes: esquece quais tabelas ja foram checadas. */
-export function resetLegacyCleanCache() { LEGACY_CLEAN.clear(); }
-
-/** Fonte como a API devolve: `scopeColumns` vira array (no banco e JSON em texto). */
-export function exposeSource<T extends { scopeColumns?: string | null }>(source: T): Omit<T, "scopeColumns"> & { scopeColumns: string[] | null } {
-  return { ...source, scopeColumns: parseScopeColumns(source.scopeColumns) };
+/** Fonte como a API devolve (hoje sem transformacao; ponto unico caso algum campo precise ser derivado). */
+export function exposeSource<T extends object>(source: T): T {
+  return source;
 }
 
 /**
- * Valida a deteccao de exclusoes (escopo e verificacao de chaves) contra o estado RESULTANTE da fonte.
- * Fonte live ignora tudo (os campos sao zerados). `knownColumns` (nomes SQL) valida o escopo quando conhecido.
+ * Valida a deteccao de exclusoes (soft delete) contra o estado RESULTANTE da fonte. Fonte live ignora tudo (os
+ * campos sao zerados pelo chamador). Exclusoes: exige chave; fonte por consulta exige `keysSql` (uma coluna);
+ * fonte por tabela nao aceita `keysSql` (as chaves sao lidas direto da tabela).
  */
 export function assertDeleteDetection(i: {
-  mode: string; sourceKind: string; keyColumn?: string | null; scopeColumns?: string[] | null;
-  keysCheckCron?: string | null; keysSql?: string | null;
-}, knownColumns?: string[]): void {
-  assertValidCron(i.keysCheckCron, "keysCheckCron");
+  mode: string; sourceKind: string; keyColumn?: string | null; detectDeletions?: boolean | null;
+  keysSql?: string | null; keysMinIntervalMinutes?: number | null;
+}): void {
   if (i.mode === "live") return;
-  const scope = normalizeScopeColumns(i.scopeColumns);
-  const hasKey = !!i.keyColumn?.trim();
-  if (scope && !hasKey) throw new ApiError(400, "SCOPE_REQUIRES_KEY", "Colunas de escopo exigem coluna-chave");
-  if (scope && knownColumns?.length) {
-    const unknown = scope.filter(c => !knownColumns.includes(c));
-    if (unknown.length) throw new ApiError(400, "SCOPE_COLUMN_UNKNOWN", `Coluna(s) de escopo inexistente(s) na fonte: ${unknown.join(", ")}`);
+  const interval = i.keysMinIntervalMinutes;
+  if (interval != null && (!Number.isInteger(interval) || interval < 1 || interval > 525_600)) {
+    throw new ApiError(400, "INVALID_KEYS_INTERVAL", "Intervalo minimo de leitura de chaves deve ser um inteiro entre 1 e 525600 minutos");
   }
-  if (i.keysCheckCron?.trim() && !hasKey) throw new ApiError(400, "KEYS_CHECK_REQUIRES_KEY", "Verificacao de chaves exige coluna-chave");
-  if (i.keysSql?.trim() && i.sourceKind !== "query") throw new ApiError(400, "KEYS_SQL_NOT_ALLOWED", "Consulta de chaves so existe em fontes por consulta (em tabela as chaves sao lidas direto da tabela)");
-  if (i.keysCheckCron?.trim() && i.sourceKind === "query" && !i.keysSql?.trim()) {
-    throw new ApiError(400, "KEYS_SQL_REQUIRED", "Fontes por consulta exigem a consulta de chaves (uma coluna, mesmo formato da coluna-chave) para habilitar a verificacao de chaves");
+  if (i.keysSql?.trim() && i.sourceKind !== "query") {
+    throw new ApiError(400, "KEYS_SQL_NOT_ALLOWED", "Consulta de chaves so existe em fontes por consulta (em tabela as chaves sao lidas direto da tabela)");
+  }
+  if (!i.detectDeletions) return;
+  if (!i.keyColumn?.trim()) throw new ApiError(400, "DELETE_DETECTION_REQUIRES_KEY", "Deteccao de exclusoes exige coluna-chave");
+  if (i.sourceKind === "query" && !i.keysSql?.trim()) {
+    throw new ApiError(400, "KEYS_SQL_REQUIRED", "Fontes por consulta exigem a consulta de chaves (uma coluna, mesmo formato da coluna-chave) para habilitar a deteccao de exclusoes");
   }
 }
 
@@ -188,9 +179,9 @@ export async function createDatasetSource(input: {
   deltaColumn?: string | null;
   reconciliationCron?: string | null;
   sourceSqlReconciliation?: string | null;
-  scopeColumns?: string[] | null;
-  keysCheckCron?: string | null;
+  detectDeletions?: boolean | null;
   keysSql?: string | null;
+  keysMinIntervalMinutes?: number | null;
   sourceGroupId?: string;
 }, opts?: { deferQueue?: boolean }) {
   const [dataset, connection] = await Promise.all([
@@ -212,10 +203,8 @@ export async function createDatasetSource(input: {
     ? (connection.provider === "mssql" ? await tableColumnsMssql(connection, input.sourceSchema!, input.sourceTable!) : await tableColumns(connection, input.sourceSchema!, input.sourceTable!))
     : (connection.provider === "mssql" ? await queryColumnsMssql(connection, input.sourceSql!) : await queryColumns(connection, input.sourceSql!));
   if (!columns.length) throw new ApiError(400, "EMPTY_SOURCE", "Fonte nao retornou colunas");
-  assertDeleteDetection(input, columns.map(c => c.sqlName));
-  const detect = input.mode === "extract";
-  const scopeColumns = detect ? normalizeScopeColumns(input.scopeColumns) : null;
-  const keysCheckCron = detect ? (input.keysCheckCron?.trim() || null) : null;
+  assertDeleteDetection(input);
+  const detect = input.mode === "extract" && !!input.detectDeletions;
 
   const displayName = input.sourceKind === "table" ? input.sourceTable! : input.name?.trim();
   if (!displayName) throw new ApiError(400, "INVALID_SOURCE", "Fonte por consulta exige um nome");
@@ -257,10 +246,9 @@ export async function createDatasetSource(input: {
       reconciliationCron: input.mode === "live" ? null : (input.reconciliationCron ?? null),
       sourceSqlReconciliation: input.sourceKind === "query" ? (input.sourceSqlReconciliation ?? null) : null,
       nextReconciliationAt: input.mode === "extract" ? nextRefreshFromCron(input.reconciliationCron) : null,
-      scopeColumns: scopeColumns ? JSON.stringify(scopeColumns) : null,
-      keysCheckCron,
+      detectDeletions: detect,
       keysSql: detect && input.sourceKind === "query" ? (input.keysSql?.trim() || null) : null,
-      nextKeysCheckAt: keysCheckCron ? nextRefreshFromCron(keysCheckCron) : null,
+      keysMinIntervalMinutes: detect ? (input.keysMinIntervalMinutes ?? null) : null,
       lastStatus: input.mode === "live" ? "ready" : "queued",
       nextRefreshAt: input.mode === "extract" ? nextRefreshFromCron(input.refreshCron) : null,
     },
@@ -285,9 +273,8 @@ export async function createDatasetSources(input: {
   keyColumn?: string | null;
   deltaColumn?: string | null;
   reconciliationCron?: string | null;
-  scopeColumns?: string[] | null;
-  keysCheckCron?: string | null;
-  keysSql?: string | null;
+  detectDeletions?: boolean | null;
+  keysMinIntervalMinutes?: number | null;
   sourceGroupId?: string;
 }) {
   const sourceGroupId = input.sourceGroupId ?? randomUUID();
@@ -305,9 +292,8 @@ export async function createDatasetSources(input: {
         keyColumn: input.keyColumn,
         deltaColumn: input.deltaColumn,
         reconciliationCron: input.reconciliationCron,
-        scopeColumns: input.scopeColumns,
-        keysCheckCron: input.keysCheckCron,
-        keysSql: input.keysSql,
+        detectDeletions: input.detectDeletions,
+        keysMinIntervalMinutes: input.keysMinIntervalMinutes,
         sourceGroupId,
       }, { deferQueue: true }));
     }
@@ -380,29 +366,10 @@ export async function refreshDatasetSource(datasetSourceId: string, opts?: { rec
     throw new ApiError(409, "SOURCE_REFRESH_IN_PROGRESS", "Já existe uma atualização em andamento para esta fonte (incremental ou reconciliação) — tente novamente em instantes");
   }
   const stageCols = columns.map(c => ({ name: c.sqlName, sqlType: c.sqlType, nullable: true }));
-  const scopeColumns = parseScopeColumns(source.scopeColumns);
   const keysTable = `cw_keys_${idPrefix}`;
 
   try {
     await storageConn.createSchemaIfNotExists(schema);
-    // Formato legado (soft delete): converte uma vez as linhas com cw_deleted_at em lapide + remocao fisica
-    // (idempotente: 0 linhas depois). Depois, expira lapides antigas (TTL). Mesma trava "running".
-    if (source.keyColumn) {
-      // O merge nunca mais grava cw_deleted_at: depois de limpa, a tabela nao precisa ser varrida de novo
-      // (o COUNT do legado era um scan completo a cada rodada). Lembra por processo; reinicio rechecaria uma vez.
-      const legacyKey = `${source.dataset.storageServerId ?? "default"}:${schema}.${table}`;
-      if (!LEGACY_CLEAN.has(legacyKey)) {
-        const converted = await storageConn.convertLegacyDeleted(schema, table, source.keyColumn);
-        if (converted) console.info(`[source-refresh] conversao de exclusoes legadas source=${source.id} linhas=${converted}`);
-        LEGACY_CLEAN.add(legacyKey);
-      }
-      try {
-        const ttl = await getTombstoneTtlDays();
-        if (ttl > 0) await storageConn.purgeTombstones(schema, table, ttl);
-      } catch (e) {
-        console.warn(`[source-refresh] purga de lapides falhou source=${source.id}: ${e instanceof Error ? e.message : String(e)}`);
-      }
-    }
     // Cria tabela staging com os tipos canônicos das colunas
     await storageConn.dropTableIfExists(schema, stage);
     await storageConn.createTable(schema, stage, stageCols);
@@ -433,44 +400,56 @@ export async function refreshDatasetSource(datasetSourceId: string, opts?: { rec
     // Chave nula/duplicada e checada sempre que ha keyColumn — inclusive na primeira
     // carga (full replace), para nao gravar uma chave inutilizavel.
     if (source.keyColumn) await assertKeyColumnSafe(storageConn, schema, stage, source.keyColumn);
-    if (scopeColumns && useKeyMerge) {
-      const unknown = scopeColumns.filter(c => !columns.some(col => col.sqlName === c));
-      if (unknown.length) throw new ApiError(400, "SCOPE_COLUMN_UNKNOWN", `Coluna(s) de escopo inexistente(s) na fonte: ${unknown.join(", ")}`);
-    }
     // fullSnapshot: só é seguro tratar "ausente da staging" como excluído na origem
     // quando a staging representa 100% do estado atual — mesma condição de
     // "unbounded" usada pra decidir o peso do job em queueSourceRefresh
     // (isBoundedSourceRun), fonte única de verdade pra não divergir.
     const fullSnapshot = !isBoundedSourceRun(source, reconciliation);
-    const swap = await storageConn.atomicSwap(schema, stage, table, stageCols, {
-      targetExists: hasTarget,
-      keyColumn: useKeyMerge ? source.keyColumn : null,
-      mergedName: useKeyMerge ? (reconciliation ? `cw_mgd_${idPrefix}_rc` : `cw_mgd_${idPrefix}`) : undefined,
-      fullSnapshot,
-      // Escopo so vale em incremental (numa rodada fullSnapshot todas as ausentes ja sao marcadas).
-      ...(scopeColumns && useKeyMerge && !fullSnapshot ? { scopeColumns } : {}),
-    });
 
-    // Verificacao de chaves: pega carona no incremental (mesma trava "running"), depois do merge.
-    // Falha aqui NAO derruba o merge ja concluido: vira aviso em lastError (status segue "completed").
-    let keysCheckWarning: string | null = null;
-    let keysRemoved = 0;
-    let keysCheckDone = false;
-    // Ja foi removido tudo que faltava se a staging e um snapshot completo (fullSnapshot): nada a verificar.
-    const keysCheckDue = !reconciliation && !fullSnapshot && useKeyMerge && !!source.keysCheckCron?.trim()
-      && (!source.nextKeysCheckAt || source.nextKeysCheckAt.getTime() <= Date.now());
-    if (keysCheckDue) {
-      try {
-        const res = await runKeysCheck({ source, columns, storageConn, schema, table, keysTable, isMssql, quoteCol });
-        keysCheckDone = true;
-        keysRemoved = res.marked;
-        console.info(`[source-refresh] keys check source=${source.id} keys=${res.keys} marked=${res.marked}`);
-      } catch (e) {
-        keysCheckWarning = `Verificacao de chaves: ${e instanceof ApiError ? `${e.code} - ` : ""}${e instanceof Error ? e.message : String(e)}`;
-        console.warn(`[source-refresh] keys check falhou source=${source.id}: ${keysCheckWarning}`);
-      } finally {
-        await storageConn.dropTableIfExists(schema, keysTable).catch(() => undefined);
+    // Deteccao de exclusoes (soft delete): passo do PROPRIO incremental — a lista completa de chaves da origem vai
+    // para uma tabela auxiliar e o merge (mesma transacao do swap) marca/desmarca. Opt-in; sem a flag, nada muda.
+    const keysDue = !!source.detectDeletions && !!source.keyColumn && useKeyMerge && !fullSnapshot
+      && (source.keysMinIntervalMinutes == null || !source.lastKeysCheckAt
+        || Date.now() - source.lastKeysCheckAt.getTime() >= source.keysMinIntervalMinutes * 60_000);
+    let keysWarning: string | null = null;
+    let keysApplied = false;
+    let swapKeys: { keysTable: string; keysBefore: Date } | null = null;
+    let swap: { marked: number };
+    try {
+      if (keysDue) {
+        const startedAt = await storageConn.serverNow();
+        // Falha ao LER as chaves (rede, consulta invalida) nao pode parar o fluxo de dados: como nas travas, pula a
+        // marcacao, aplica o delta e deixa o aviso visivel em lastError.
+        let read: Awaited<ReturnType<typeof readSourceKeys>> | null = null;
+        try {
+          read = await readSourceKeys({ source, columns, storageConn, schema, keysTable, isMssql, quoteCol });
+        } catch (e) {
+          keysWarning = `KEYS_READ_FAILED: deteccao de exclusoes ignorada: ${e instanceof ApiError ? `${e.code} - ` : ""}${e instanceof Error ? e.message : String(e)} (nenhuma linha foi marcada como excluida; as linhas alteradas foram aplicadas)`;
+        }
+        if (!read) {
+          // aviso ja definido acima
+        } else if (read.keys === 0n) {
+          keysWarning = "KEYS_CHECK_EMPTY: deteccao de exclusoes ignorada: a origem retornou zero chaves (nenhuma linha foi marcada como excluida; as linhas alteradas foram aplicadas)";
+        } else {
+          const cnt = await storageConn.countMissingKeys(schema, table, source.keyColumn!, keysTable, startedAt);
+          if (keysCheckExceeds(cnt, KEYS_CHECK_MAX_RATIO)) {
+            keysWarning = `KEYS_CHECK_UNSAFE: deteccao de exclusoes ignorada: ${cnt.candidates} de ${cnt.live} linhas vivas seriam marcadas (limite ${Math.round(KEYS_CHECK_MAX_RATIO * 100)}%); nenhuma foi marcada (as linhas alteradas foram aplicadas)`;
+          } else {
+            swapKeys = { keysTable, keysBefore: startedAt };
+          }
+        }
+        if (keysWarning) console.warn(`[source-refresh] ${keysWarning} source=${source.id}`);
       }
+      swap = await storageConn.atomicSwap(schema, stage, table, stageCols, {
+        targetExists: hasTarget,
+        keyColumn: useKeyMerge ? source.keyColumn : null,
+        mergedName: useKeyMerge ? (reconciliation ? `cw_mgd_${idPrefix}_rc` : `cw_mgd_${idPrefix}`) : undefined,
+        fullSnapshot,
+        ...(swapKeys ?? {}),
+      });
+      keysApplied = !!swapKeys;
+    } finally {
+      if (keysDue) await storageConn.dropTableIfExists(schema, keysTable).catch(() => undefined);
     }
 
     const finalRowCount = await storageConn.countRows(schema, table);
@@ -481,12 +460,10 @@ export async function refreshDatasetSource(datasetSourceId: string, opts?: { rec
       data: {
         lastStatus: "completed",
         lastRowCount: finalRowCount,
-        lastError: keysCheckWarning,
-        lastRemovedCount: BigInt((swap?.removed ?? 0) + keysRemoved),
+        lastError: keysWarning,
+        lastRemovedCount: BigInt(swap.marked),
         lastRefreshedAt: new Date(),
-        ...(keysCheckDue
-          ? { nextKeysCheckAt: nextRefreshFromCron(source.keysCheckCron), ...(keysCheckDone ? { lastKeysCheckAt: new Date() } : {}) }
-          : {}),
+        ...(keysApplied ? { lastKeysCheckAt: new Date() } : {}),
         ...(reconciliation
           ? { nextReconciliationAt: nextRefreshFromCron(source.reconciliationCron), lastReconciliationAt: new Date() }
           : { nextRefreshAt: nextRefreshFromCron(source.refreshCron) }),
@@ -512,16 +489,15 @@ export async function refreshDatasetSource(datasetSourceId: string, opts?: { rec
 }
 
 /**
- * Le SO as chaves da origem (tabela: `SELECT <chave> FROM <tabela>`; consulta: `keysSql`, uma coluna) para uma
- * tabela auxiliar no storage e REMOVE (com lapide) as linhas ausentes dela. `startedAt` vem do relogio do
- * storage (o mesmo de cw_synced_at) e a guarda `cw_synced_at < startedAt` protege linhas carregadas depois.
- * Nao loga valores de chave. A tabela auxiliar e removida pelo chamador (finally).
+ * Le SO as chaves da origem (tabela: `SELECT <chave> FROM <tabela>`; consulta: `keysSql`, exatamente uma coluna)
+ * para a tabela auxiliar `keysTable` no storage (coluna com o nome da chave). Nao loga valores de chave. A tabela
+ * auxiliar e removida pelo chamador (finally).
  */
-async function runKeysCheck(o: {
-  source: { id: string; keyColumn: string | null; sourceKind: string; sourceSchema: string | null; sourceTable: string | null; keysSql: string | null; connection: Parameters<typeof streamPostgresRows>[0] };
-  columns: SourceColumn[]; storageConn: StorageConnection; schema: string; table: string; keysTable: string; isMssql: boolean; quoteCol: (c: string) => string;
-}): Promise<{ keys: bigint; marked: number }> {
-  const { source, columns, storageConn, schema, table, keysTable, isMssql, quoteCol } = o;
+async function readSourceKeys(o: {
+  source: { keyColumn: string | null; sourceKind: string; sourceSchema: string | null; sourceTable: string | null; keysSql: string | null; connection: Parameters<typeof streamPostgresRows>[0] };
+  columns: SourceColumn[]; storageConn: StorageConnection; schema: string; keysTable: string; isMssql: boolean; quoteCol: (c: string) => string;
+}): Promise<{ keys: bigint }> {
+  const { source, columns, storageConn, schema, keysTable, isMssql, quoteCol } = o;
   const keyColumn = source.keyColumn!;
   const keyCol = columns.find(c => c.sqlName === keyColumn) ?? columns.find(c => c.originalName === keyColumn);
   if (!keyCol) throw new ApiError(400, "KEY_COLUMN_UNKNOWN", `Coluna-chave "${keyColumn}" nao existe na fonte`);
@@ -532,8 +508,7 @@ async function runKeysCheck(o: {
     if (!source.keysSql?.trim()) throw new ApiError(400, "KEYS_SQL_REQUIRED", "Fonte sem consulta de chaves configurada");
     keysQuery = source.keysSql;
   }
-  const keyDef = [{ name: keyCol.sqlName, sqlType: keyCol.sqlType, nullable: true }];
-  const startedAt = await storageConn.serverNow();
+  const keyDef = [{ name: keyColumn, sqlType: keyCol.sqlType, nullable: true }];
   await storageConn.dropTableIfExists(schema, keysTable);
   await storageConn.createTable(schema, keysTable, keyDef);
   let keys = 0n;
@@ -548,12 +523,7 @@ async function runKeysCheck(o: {
     await storageConn.bulkInsert(schema, keysTable, keyDef, batch);
     keys += BigInt(batch.length);
   }
-  if (keys === 0n) throw new ApiError(409, "KEYS_CHECK_UNSAFE", "Verificacao de chaves abortada: a origem retornou zero chaves (nada foi removido)");
-  const res = await storageConn.markMissingKeysDeleted(schema, table, keyCol.sqlName, keysTable, startedAt, { maxRatio: KEYS_CHECK_MAX_RATIO });
-  if (res.aborted) {
-    throw new ApiError(409, "KEYS_CHECK_UNSAFE", `Verificacao de chaves abortada: ${res.candidates} de ${res.live} linhas vivas seriam removidas (limite ${Math.round(KEYS_CHECK_MAX_RATIO * 100)}%); nada foi removido`);
-  }
-  return { keys, marked: res.marked };
+  return { keys };
 }
 
 /** Garante que a keyColumn na staging não tem nulos nem duplicatas antes do merge por upsert */

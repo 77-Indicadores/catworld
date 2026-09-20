@@ -5,7 +5,7 @@
 
 import sql from "mssql";
 import { CW_SYNCED_AT, CW_DELETED_AT, type ColDef, type ColInfo, type StorageConnection } from "./connection";
-import { deleteMissingKeysSql, keysCheckExceeds, mergeRemovalPlan, missingKeysWhere, tombstoneTableName, KEYS_CHECK_MAX_RATIO, TOMB_AT, TOMB_KEY, type MarkMissingKeysOpts, type MarkMissingKeysResult } from "./delete-detection";
+import { absentFromStaging, carryPlan, missingKeysWhere } from "./delete-detection";
 
 // ─── URL parsing ──────────────────────────────────────────────────────────────
 
@@ -194,8 +194,13 @@ export class MssqlStorageConnection implements StorageConnection {
 
   async countRows(schema: string, table: string): Promise<bigint> {
     const p = await this.rawPool();
+    // Conta so linhas vivas (marcadas como excluidas na origem nao contam); sem a coluna, todas.
+    const has = await p.request().query(
+      `SELECT 1 AS x FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = N'${esc(schema)}' AND TABLE_NAME = N'${esc(table)}' AND COLUMN_NAME = N'${esc(CW_DELETED_AT)}'`,
+    );
+    const where = has.recordset.length > 0 ? ` WHERE ${mssqlQuote(CW_DELETED_AT)} IS NULL` : "";
     const result = await p.request().query(
-      `SELECT COUNT_BIG(*) AS n FROM ${mssqlQuote(schema)}.${mssqlQuote(table)}`,
+      `SELECT COUNT_BIG(*) AS n FROM ${mssqlQuote(schema)}.${mssqlQuote(table)}${where}`,
     );
     return BigInt(String(result.recordset[0]?.n ?? "0"));
   }
@@ -273,8 +278,8 @@ export class MssqlStorageConnection implements StorageConnection {
     staging: string,
     target: string,
     cols: ColDef[],
-    opts?: { targetExists?: boolean; keyColumn?: string | null; mergedName?: string; fullSnapshot?: boolean; scopeColumns?: string[] },
-  ): Promise<{ removed: number }> {
+    opts?: { targetExists?: boolean; keyColumn?: string | null; mergedName?: string; fullSnapshot?: boolean; keysTable?: string; keysBefore?: Date },
+  ): Promise<{ marked: number }> {
     const p = await this.rawPool();
     const qSc = mssqlQuote(schema);
     const qStg = `${qSc}.${mssqlQuote(staging)}`;
@@ -328,7 +333,7 @@ export class MssqlStorageConnection implements StorageConnection {
         ).catch(() => {});
         throw e;
       }
-      return { removed: 0 };
+      return { marked: 0 };
     }
 
     // ── mergeSwap: materializa resultado final em temp, depois DDL breve ─────────
@@ -348,47 +353,47 @@ export class MssqlStorageConnection implements StorageConnection {
       `IF OBJECT_ID(N'${esc(schema)}.${esc(mergedName)}','U') IS NOT NULL DROP TABLE ${qMgd}`,
     );
 
-    const tombName = tombstoneTableName(target);
-    const qTomb = `${qSc}.${mssqlQuote(tombName)}`;
-    let plan: ReturnType<typeof mergeRemovalPlan> | null = null;
-    let removed = 0;
+    let marked = 0;
 
     try {
       await p.request().query(`CREATE TABLE ${qMgd} (${colDefsWithMeta})`);
 
       if (targetExists) {
-        // Copia rows de target cujo key NÃO aparece em staging (fora de tx). Se ha remocao
-        // (fullSnapshot ou escopo), a ausência na staging significa "excluído na origem": a
-        // linha NAO e copiada (remocao fisica) e vira lapide na transacao do swap. Sem
-        // remocao (delta parcial), ausência só significa "não mudou neste lote": copia como esta.
+        // Copia rows de target cujo key NÃO aparece em staging (fora de tx). Linhas ausentes sao SEMPRE
+        // preservadas (soft delete): so o carimbo cw_deleted_at muda.
+        //  - fullSnapshot=true: ausência = "excluído na origem": carimba na primeira rodada (idempotente).
+        //  - keysTable (deteccao de exclusoes): chave na lista => desmarca; fora da lista e sincronizada
+        //    antes de keysBefore => marca. Ver carryPlan.
+        //  - senao (delta parcial): preserva como está — ausência só significa "não mudou neste lote".
         // Schema drift: colunas novas da origem (ausentes no target) entram como NULL;
         // colunas so do target sao descartadas.
         const tgtColsRes = await p.request().query(
-          `SELECT c.name AS column_name FROM sys.columns c WHERE c.object_id = OBJECT_ID(N'${esc(schema)}.${esc(target)}',N'U')`,
+          `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = N'${esc(schema)}' AND TABLE_NAME = N'${esc(target)}'`,
         );
-        const tgtCols = new Set((tgtColsRes.recordset as { column_name: string }[]).map(r => r.column_name));
+        const tgtCols = new Set((tgtColsRes.recordset as { COLUMN_NAME: string }[]).map(r => r.COLUMN_NAME));
         const selectList = cols
           .map(c => (tgtCols.has(c.name) ? `t.${mssqlQuote(c.name)}` : `NULL`))
           .join(", ");
-        // Escopo: linha ausente da staging cuja tupla de escopo existe na staging = excluida na
-        // origem. Coluna de escopo ausente no target (schema drift): nao avalia, preserva.
-        const scopeCols = opts?.scopeColumns?.length && opts.scopeColumns.every(c => tgtCols.has(c)) ? opts.scopeColumns : null;
-        plan = mergeRemovalPlan({
-          dialect: "mssql", q: mssqlQuote, qTgt, qStg, qTomb, key, qDeletedAt, now: "SYSUTCDATETIME()", fullSnapshot, scopeColumns: scopeCols,
+        const useKeys = !fullSnapshot && !!opts?.keysTable && !!opts?.keysBefore;
+        const plan = carryPlan({
+          q: mssqlQuote, qStg, key, qSyncedAt, qDeletedAt, now: "SYSUTCDATETIME()", fullSnapshot,
+          qKeys: useKeys ? `${qSc}.${mssqlQuote(opts!.keysTable!)}` : null, beforeParam: "@before",
         });
-        const copyReq = p.request();
+        const withBefore = (req: sql.Request) => (useKeys ? req.input("before", sql.DateTime2, opts!.keysBefore!) : req);
+        if (plan.markedWhere) {
+          const mReq = withBefore(p.request());
+          setReqTimeout(mReq, 7_200_000);
+          const m = await mReq.query(`SELECT COUNT_BIG(*) AS n FROM ${qTgt} t WHERE ${plan.markedWhere} OPTION (MAXDOP 1)`);
+          marked = Number(String(m.recordset[0]?.n ?? "0"));
+        }
+        const copyReq = withBefore(p.request());
         setReqTimeout(copyReq, 7_200_000);
         await copyReq.query(
           `INSERT INTO ${qMgd} (${colListWithMeta})
-           SELECT ${selectList}, t.${qSyncedAt}, t.${qDeletedAt} FROM ${qTgt} t
-           ${plan.copyJoin}
-           WHERE ${plan.copyWhere}
+           SELECT ${selectList}, ${plan.syncedAtExpr}, ${plan.deletedAtExpr} FROM ${qTgt} t
+           WHERE ${absentFromStaging(qStg, key)}
            OPTION (MAXDOP 1)`,
         );
-        if (plan.active) {
-          const keyCol = cols.find(c => c.name === keyColumn);
-          await this.ensureTombstoneTable(schema, target, keyCol?.sqlType ?? "NVARCHAR(MAX)");
-        }
       }
 
       // Copia todos os rows de staging (novos / atualizados) — sempre "vivas": carimba
@@ -413,11 +418,6 @@ export class MssqlStorageConnection implements StorageConnection {
         // tem retry (até 5 tentativas), então um timeout mais generoso aqui
         // reduz falsos positivos sem esconder um lock realmente preso.
         setReqTimeout(req, 120_000);
-        if (plan) {
-          // Lapides na MESMA transacao da remocao: revive chaves que voltaram; registra as removidas.
-          if (plan.active || await this.tableExists(schema, tombName)) await req.query(plan.revive);
-          if (plan.active) removed = (await req.query(plan.insert)).rowsAffected[0] ?? 0;
-        }
         if (targetExists) await req.query(`DROP TABLE ${qTgt}`);
         await req.query(`EXEC sp_rename N'${esc(schema)}.${esc(mergedName)}', N'${esc(target)}'`);
         await tx.commit();
@@ -425,7 +425,7 @@ export class MssqlStorageConnection implements StorageConnection {
         await tx.rollback().catch(() => undefined);
         throw e;
       }
-      return { removed };
+      return { marked };
     } finally {
       // best-effort: remove staging (ainda existe se não foi renomeada) e merged (idem)
       await p.request().query(
@@ -443,80 +443,19 @@ export class MssqlStorageConnection implements StorageConnection {
     return (r.recordset as { v: Date }[])[0]!.v;
   }
 
-  async ensureTombstoneTable(schema: string, table: string, keySqlType: string): Promise<void> {
-    const p = await this.rawPool();
-    const name = tombstoneTableName(table);
-    await p.request().query(
-      `IF OBJECT_ID(N'${esc(schema)}.${esc(name)}','U') IS NULL
-       CREATE TABLE ${mssqlQuote(schema)}.${mssqlQuote(name)} (${mssqlQuote(TOMB_KEY)} ${canonicalToMssql(keySqlType)} NULL, ${mssqlQuote(TOMB_AT)} DATETIME2 NOT NULL)`,
-    );
-  }
-
-  async markMissingKeysDeleted(
-    schema: string, table: string, keyColumn: string, keysTable: string, before: Date, opts?: MarkMissingKeysOpts,
-  ): Promise<MarkMissingKeysResult> {
+  async countMissingKeys(
+    schema: string, table: string, keyColumn: string, keysTable: string, before: Date,
+  ): Promise<{ live: number; candidates: number }> {
     const p = await this.rawPool();
     const qTgt = `${mssqlQuote(schema)}.${mssqlQuote(table)}`;
     const qKeys = `${mssqlQuote(schema)}.${mssqlQuote(keysTable)}`;
-    const qTomb = `${mssqlQuote(schema)}.${mssqlQuote(tombstoneTableName(table))}`;
     const where = missingKeysWhere({ q: mssqlQuote, qKeys, key: mssqlQuote(keyColumn), beforeParam: "@before" });
-    const countReq = p.request().input("before", sql.DateTime2, before);
-    setRequestTimeout(countReq, 7_200_000);
-    const c = await countReq.query(
-      `SELECT COUNT_BIG(*) AS live, SUM(CASE WHEN ${where} THEN 1 ELSE 0 END) AS candidates FROM ${qTgt} t OPTION (MAXDOP 1)`,
+    const req = p.request().input("before", sql.DateTime2, before);
+    setRequestTimeout(req, 7_200_000);
+    const r = await req.query(
+      `SELECT COUNT_BIG(*) AS live, SUM(CASE WHEN ${where} THEN 1 ELSE 0 END) AS candidates FROM ${qTgt} t WHERE t.${mssqlQuote(CW_DELETED_AT)} IS NULL OPTION (MAXDOP 1)`,
     );
-    const row = (c.recordset as { live: number | string | null; candidates: number | null }[])[0];
-    const live = Number(row?.live ?? 0);
-    const candidates = Number(row?.candidates ?? 0);
-    if (keysCheckExceeds({ candidates, live }, opts?.maxRatio ?? KEYS_CHECK_MAX_RATIO)) return { marked: 0, candidates, live, aborted: true };
-    if (candidates === 0) return { marked: 0, candidates, live, aborted: false };
-    const keyCol = (await this.listColumns(schema, keysTable)).find(k => k.name === keyColumn);
-    await this.ensureTombstoneTable(schema, table, keyCol?.sqlType ?? "NVARCHAR(MAX)");
-    const delReq = p.request().input("before", sql.DateTime2, before);
-    setRequestTimeout(delReq, 7_200_000);
-    const res = await delReq.query(
-      deleteMissingKeysSql({ dialect: "mssql", q: mssqlQuote, qTgt, qTomb, key: mssqlQuote(keyColumn), where }),
-    );
-    return { marked: res.rowsAffected[0] ?? 0, candidates, live, aborted: false };
-  }
-
-  async convertLegacyDeleted(schema: string, table: string, keyColumn: string): Promise<number> {
-    if (!(await this.tableExists(schema, table))) return 0;
-    const cols = await this.listColumns(schema, table);
-    const keyCol = cols.find(c => c.name === keyColumn);
-    if (!keyCol || !cols.some(c => c.name === CW_DELETED_AT)) return 0;
-    const p = await this.rawPool();
-    const qTgt = `${mssqlQuote(schema)}.${mssqlQuote(table)}`;
-    const qTomb = `${mssqlQuote(schema)}.${mssqlQuote(tombstoneTableName(table))}`;
-    const qDel = mssqlQuote(CW_DELETED_AT);
-    const n = await p.request().query(`SELECT COUNT_BIG(*) AS n FROM ${qTgt} WHERE ${qDel} IS NOT NULL`);
-    if (Number(n.recordset[0]?.n ?? 0) === 0) return 0;
-    await this.ensureTombstoneTable(schema, table, keyCol.sqlType);
-    const tx = new sql.Transaction(p);
-    await tx.begin();
-    try {
-      const req = new sql.Request(tx);
-      setRequestTimeout(req, 7_200_000);
-      const key = mssqlQuote(keyColumn);
-      await req.query(
-        `INSERT INTO ${qTomb} (${mssqlQuote(TOMB_KEY)}, ${mssqlQuote(TOMB_AT)}) SELECT t.${key}, t.${qDel} FROM ${qTgt} t WHERE t.${qDel} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM ${qTomb} k WHERE k.${mssqlQuote(TOMB_KEY)} = t.${key})`,
-      );
-      const del = await req.query(`DELETE FROM ${qTgt} WHERE ${qDel} IS NOT NULL`);
-      await tx.commit();
-      return del.rowsAffected[0] ?? 0;
-    } catch (e) {
-      await tx.rollback().catch(() => undefined);
-      throw e;
-    }
-  }
-
-  async purgeTombstones(schema: string, table: string, olderThanDays: number): Promise<number> {
-    const tomb = tombstoneTableName(table);
-    if (olderThanDays <= 0 || !(await this.tableExists(schema, tomb))) return 0;
-    const p = await this.rawPool();
-    const res = await p.request().input("d", sql.Int, Math.floor(olderThanDays)).query(
-      `DELETE FROM ${mssqlQuote(schema)}.${mssqlQuote(tomb)} WHERE ${mssqlQuote(TOMB_AT)} < DATEADD(day, -@d, SYSUTCDATETIME())`,
-    );
-    return res.rowsAffected[0] ?? 0;
+    const row = (r.recordset as { live: number | string | null; candidates: number | null }[])[0];
+    return { live: Number(row?.live ?? 0), candidates: Number(row?.candidates ?? 0) };
   }
 }

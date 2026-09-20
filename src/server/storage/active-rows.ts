@@ -3,7 +3,7 @@ import { CW_DELETED_AT, type StorageConnection } from "./connection";
 /**
  * Linhas excluídas na origem ficam na tabela com `cw_deleted_at` preenchido (soft delete,
  * marcado pela reconciliação). Quem lê a tabela como "estado atual" (export, OData) precisa
- * escondê-las; só a API `rows?since=` as entrega, via `removedKeys`.
+ * escondê-las (filtro PERMANENTE: no MSSQL é a única barreira; no Postgres soma-se à RLS cw_hide_deleted); só a API `rows?since=` as entrega, via `removedKeys`.
  *
  * Devolve o predicado `<cw_deleted_at> IS NULL` já citado para o provider, ou null quando a
  * tabela não tem a coluna (dados anteriores à feature). O resultado é cacheado por poucos

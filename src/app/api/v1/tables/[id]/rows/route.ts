@@ -7,9 +7,7 @@ import { executeLiveReadOnly, liveQuotedTable, type LiveConnection } from "@/ser
 import { getStorageConnection } from "@/server/storage/connection";
 import { ApiError, handleApiError, ok } from "@/server/http";
 import { quoteIdentifier } from "@/server/security/naming";
-import { tombstoneTableName } from "@/server/storage/delete-detection";
-import { getTombstoneTtlDays } from "@/server/storage/tombstone-ttl";
-import { decodeCursor, pgRemovedSql, pgRowsPageSql, removedIncomplete, removedKeysSql, REMOVED_CAP, settleFirstPage, shapeRowsPage, TIE_CAP, type Cursor, type PageRow } from "@/server/tables/since";
+import { decodeCursor, pgRemovedSql, pgRowsPageSql, REMOVED_CAP, settleFirstPage, shapeRowsPage, TIE_CAP, type Cursor, type PageRow } from "@/server/tables/since";
 
 /** Formata Date como literal SQL seguro (ISO, sem interpolação de input livre). */
 function sqlDateLiteral(d: Date): string {
@@ -86,13 +84,6 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       const sinceLit = `'${sqlDateLiteral(since)}'`;
       const qSyncedAt = conn.q("cw_synced_at");
       const qDeletedAt = conn.q("cw_deleted_at");
-      // Exclusoes na origem: chaves removidas ficam em `cw_tomb_<tabela>` (lapide; ver docs/source-contract.md),
-      // unidas as linhas legadas com cw_deleted_at (tabelas ainda nao convertidas).
-      const tombName = tombstoneTableName(table.sqlName);
-      const qTomb = keyColumn && await conn.tableExists(table.dataset.schemaName, tombName) ? `${qSchema}.${conn.q(tombName)}` : null;
-      const tombCols = { qTomb, qTombKey: conn.q("cw_key"), qTombAt: conn.q("cw_deleted_at") };
-      // `since` mais antigo que a validade das lapides: removedKeys pode estar incompleto (consumidor deve ressincronizar).
-      const removedIncompleteFlag = keyColumn ? removedIncomplete(since, await getTombstoneTtlDays()) : false;
 
       if (conn.provider === "postgres") {
         // Paginacao sem perda: ordem (cw_synced_at, chave) + cursor; nextSince conservador. (Ver since.ts.)
@@ -123,7 +114,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         if (qKey) {
           removedKeys = [];
           if (!cursor) {
-            const removed = await conn.query<{ k: unknown; d: unknown }>(pgRemovedSql({ qTarget, qDeleted: qDeletedAt, qKey, sinceLit, ...tombCols }));
+            const removed = await conn.query<{ k: unknown; d: unknown }>(pgRemovedSql({ qTarget, qDeleted: qDeletedAt, qKey, sinceLit }));
             removedTruncated = removed.length > REMOVED_CAP;
             for (const r of removed.slice(0, REMOVED_CAP)) {
               removedKeys.push(r.k);
@@ -143,7 +134,6 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
           hasMore: shaped.hasMore,
           ...(shaped.nextCursor ? { nextCursor: shaped.nextCursor } : {}),
           ...(removedTruncated ? { removedTruncated: true } : {}),
-          ...(removedIncompleteFlag ? { removedIncomplete: true } : {}),
           ...(shaped.tieGroupTruncated ? { tieGroupTruncated: true } : {}),
         });
       }
@@ -177,7 +167,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       if (keyColumn) {
         const qKey = conn.q(keyColumn);
         const removedFetched = await runReadOnly(
-          removedKeysSql({ qTarget, qDeleted: qDeletedAt, qKey, sinceLit, ...tombCols }),
+          `SELECT ${qKey} AS k, ${qDeletedAt} AS d FROM ${qTarget} WHERE ${qDeletedAt} > ${sinceLit} ${pageClause(qDeletedAt)}`,
           limit + 1,
         ) as { k: unknown; d: unknown }[];
         mssqlRemovedTruncated = removedFetched.length > limit;
@@ -200,7 +190,6 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         nextSince: nextSince.toISOString(),
         hasMore: mssqlHasMore || mssqlRemovedTruncated,
         ...(mssqlRemovedTruncated ? { removedTruncated: true } : {}),
-        ...(removedIncompleteFlag ? { removedIncomplete: true } : {}),
       });
     }
 

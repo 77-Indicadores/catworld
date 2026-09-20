@@ -19,10 +19,9 @@ export type WorkspaceSource = {
   deltaColumn: string | null;
   reconciliationCron: string | null;
   sourceSqlReconciliation: string | null;
-  scopeColumns: string[] | null;
-  keysCheckCron: string | null;
+  detectDeletions: boolean;
   keysSql: string | null;
-  nextKeysCheckAt: string | null;
+  keysMinIntervalMinutes: number | null;
   lastKeysCheckAt: string | null;
   lastRemovedCount: string | null;
   active: boolean;

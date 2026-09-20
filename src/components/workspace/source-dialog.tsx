@@ -30,6 +30,10 @@ function StepItem({ active, done, label }: { active: boolean; done: boolean; lab
   return <span className={`flex items-center gap-2 rounded-full px-3 py-1 text-xs ${active ? "bg-primary text-primary-content" : done ? "bg-success/10 text-success" : "bg-base-200 text-base-content/65"}`}>{done ? <CheckCircle2 size={13} /> : null}{label}</span>;
 }
 
+const DETECT_HINT = "Lê apenas a coluna-chave da origem a cada atualização e marca (sem apagar) as linhas que não existem mais lá. Linhas marcadas nunca aparecem para quem consome os dados.";
+const KEYS_SQL_HINT = "Consulta que lista TODAS as chaves da origem: uma coluna, mesmo formato da coluna-chave.";
+const KEYS_INTERVAL_HINT = "Limita o custo: a leitura de chaves roda no máximo uma vez neste intervalo. Vazio = a cada atualização.";
+
 export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onComplete: () => void }) {
   const ref = useRef<HTMLDialogElement>(null);
   const [step, setStep] = useState<Step>("origin");
@@ -54,15 +58,15 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
   const [incrementalEnabled, setIncrementalEnabled] = useState(false);
   const [keyColumn, setKeyColumn] = useState("");
   const [deltaColumn, setDeltaColumn] = useState("");
-  const [scopeColumns, setScopeColumns] = useState("");
-  const [keysCheckCron, setKeysCheckCron] = useState("");
+  const [detectDeletions, setDetectDeletions] = useState(false);
   const [keysSql, setKeysSql] = useState("");
+  const [keysMinInterval, setKeysMinInterval] = useState("");
   const [incrementalColumns, setIncrementalColumns] = useState<Column[]>([]);
   const [loadingIncrementalColumns, setLoadingIncrementalColumns] = useState(false);
 
   async function open() {
     setStep("origin"); setError(""); setColumns([]); setSelectedTables([]); setQueryStatus("idle"); setQueryTestedSql(""); setTableSearch(""); setRefreshCron("");
-    setIncrementalEnabled(false); setKeyColumn(""); setDeltaColumn(""); setIncrementalColumns([]); setScopeColumns(""); setKeysCheckCron(""); setKeysSql("");
+    setIncrementalEnabled(false); setKeyColumn(""); setDeltaColumn(""); setIncrementalColumns([]); setDetectDeletions(false); setKeysSql(""); setKeysMinInterval("");
     ref.current?.showModal();
     setLoadingMeta(true);
     try {
@@ -160,15 +164,15 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
   }
 
   async function create() {
-    if (keysCheckCron.trim() && sourceKind === "query" && !keysSql.trim()) {
-      setError("Informe a consulta de chaves para habilitar a verificação de chaves."); return;
+    if (detectDeletions && incrementalEnabled && sourceKind === "query" && !keysSql.trim()) {
+      setError("Informe a consulta de chaves para marcar exclusões."); return;
     }
     setLoading(true); setError("");
     const detect = mode === "extract" && incrementalEnabled && !!keyColumn.trim();
-    const scopeList = scopeColumns.split(",").map((c) => c.trim()).filter(Boolean);
+    const intervalNum = Number(keysMinInterval);
     const detection = {
-      scopeColumns: detect && scopeList.length ? scopeList : null,
-      keysCheckCron: detect ? (keysCheckCron.trim() || null) : null,
+      detectDeletions: detect && detectDeletions,
+      keysMinIntervalMinutes: detect && detectDeletions && keysMinInterval.trim() && Number.isInteger(intervalNum) && intervalNum >= 1 ? intervalNum : null,
     };
     try {
       await apiRequest(`/api/v1/datasets/${datasetId}/sources`, {
@@ -193,7 +197,7 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
           refreshCron: mode === "live" ? null : (refreshCron.trim() || null),
           keyColumn: mode === "extract" && incrementalEnabled ? (keyColumn.trim() || null) : null,
           ...detection,
-          keysSql: detect && detection.keysCheckCron ? keysSql.trim() : null,
+          keysSql: detection.detectDeletions ? keysSql.trim() : null,
         }),
       });
       ref.current?.close();
@@ -343,16 +347,21 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
 
               {incrementalEnabled && keyColumn.trim() && (
                 <div className="grid gap-4 lg:grid-cols-2">
-                  <Field label="Colunas de escopo (opcional)" hint="Separadas por vírgula. Quando um grupo (mesmos valores nessas colunas) é relido, as chaves desse grupo que não vieram são marcadas como excluídas." wide>
-                    <input className="input w-full font-mono text-sm" placeholder="ex: coluna_a, coluna_b" value={scopeColumns} onChange={(e) => setScopeColumns(e.target.value)} />
-                  </Field>
-                  <Field label="Verificação de chaves (cron UTC, opcional)" hint="Lê só a coluna-chave da origem e marca as ausentes como excluídas. Roda dentro da primeira atualização agendada depois do horário." wide>
-                    <input className="input w-full font-mono text-sm" placeholder="ex: 0 3 * * *  —  vazio = desativada" value={keysCheckCron} onChange={(e) => setKeysCheckCron(e.target.value)} />
-                    {keysCheckCron.trim() && <CronPreview cron={keysCheckCron} onPick={setKeysCheckCron} />}
-                  </Field>
-                  {sourceKind === "query" && (
-                    <Field label="Consulta de chaves" hint="Obrigatória se a verificação de chaves estiver ativa: uma única coluna, com os mesmos valores da coluna-chave." wide>
+                  <label className="flex cursor-pointer items-start gap-3 lg:col-span-2">
+                    <input type="checkbox" className="toggle toggle-sm mt-0.5" checked={detectDeletions} onChange={(e) => setDetectDeletions(e.target.checked)} />
+                    <span>
+                      <span className="label-text font-medium">Marcar como excluídas as linhas que somem da origem</span>
+                      <span className="mt-0.5 block text-xs text-base-content/65">{DETECT_HINT}</span>
+                    </span>
+                  </label>
+                  {detectDeletions && sourceKind === "query" && (
+                    <Field label="Consulta de chaves" hint={KEYS_SQL_HINT} wide>
                       <textarea className="textarea h-24 w-full font-mono text-sm" value={keysSql} onChange={(e) => setKeysSql(e.target.value)} spellCheck={false} />
+                    </Field>
+                  )}
+                  {detectDeletions && (
+                    <Field label="Intervalo mínimo entre leituras (min, opcional)" hint={KEYS_INTERVAL_HINT} wide>
+                      <input type="number" min={1} className="input w-full font-mono text-sm" placeholder="vazio = a cada atualização" value={keysMinInterval} onChange={(e) => setKeysMinInterval(e.target.value)} />
                     </Field>
                   )}
                 </div>

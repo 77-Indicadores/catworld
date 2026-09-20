@@ -10,7 +10,7 @@ const HOUR_AHEAD = new Date(Date.now() + 3600_000).toISOString();
 
 const source = (over: Partial<WorkspaceSource> = {}): WorkspaceSource => ({
   id: "s1", name: "vendas", mode: "extract", sourceKind: "table", sourceGroupId: null, sourceSchema: "dbo", sourceTable: "vendas", sourceSql: null,
-  refreshCron: "0 * * * *", keyColumn: "id", deltaColumn: "atualizado_em", reconciliationCron: null, sourceSqlReconciliation: null, scopeColumns: null, keysCheckCron: null, keysSql: null, nextKeysCheckAt: null, lastKeysCheckAt: null, lastRemovedCount: null, active: true,
+  refreshCron: "0 * * * *", keyColumn: "id", deltaColumn: "atualizado_em", reconciliationCron: null, sourceSqlReconciliation: null, detectDeletions: false, keysSql: null, keysMinIntervalMinutes: null, lastKeysCheckAt: null, lastRemovedCount: null, active: true,
   lastStatus: "completed", lastRowCount: "1487197", lastError: null, lastRefreshedAt: NOW, nextRefreshAt: HOUR_AHEAD,
   connection: { id: "c1", name: "dev-live" }, ...over,
 });
@@ -87,6 +87,16 @@ describe("OriginBlock", () => {
     render(<OriginBlock table={table({ source: source({ mode: "live", refreshCron: null }), lastUpload: null })} datasetName="DS" derived={null} />);
     expect(screen.getByText(/não copia os dados/)).toBeInTheDocument();
     expect(screen.queryByText("Chave")).toBeNull();
+  });
+  it("detecção de exclusões ativa mostra última leitura de chaves e linhas marcadas", () => {
+    const s = source({ detectDeletions: true, lastKeysCheckAt: NOW, lastRemovedCount: "1234" });
+    render(<OriginBlock table={table({ source: s, lastUpload: null })} datasetName="DS" derived={null} />);
+    expect(screen.getByText(/Detecção de exclusões: ativa/)).toBeInTheDocument();
+    expect(screen.getByText(/Linhas marcadas como excluídas na última atualização: 1\.234/)).toBeInTheDocument();
+  });
+  it("sem detecção de exclusões não mostra as linhas de exclusão", () => {
+    render(<OriginBlock table={table({ source: source(), lastUpload: null })} datasetName="DS" derived={null} />);
+    expect(screen.queryByText(/Detecção de exclusões/)).toBeNull();
   });
   it("derivada mostra o SQL", () => {
     render(<OriginBlock table={table({ lastUpload: null })} datasetName="DS" derived={derived} />);
