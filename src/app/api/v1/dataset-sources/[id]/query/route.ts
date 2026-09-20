@@ -4,7 +4,7 @@ import * as Sentry from "@sentry/nextjs";
 import { prisma } from "@/server/db";
 import { resolveActor } from "@/server/auth/actor";
 import { canAccess } from "@/server/auth/permissions";
-import { ApiError, handleApiError, isQueryTimeout, ok, queryTimeoutError } from "@/server/http";
+import { ApiError, handleApiError, isQueryTimeout, ok, publicQueryErrorMessage, queryTimeoutError } from "@/server/http";
 import { executePostgresReadOnly, quotedPgTable } from "@/server/connections/postgres";
 import { executeMssqlReadOnly, quotedMssqlTable } from "@/server/connections/mssql";
 import { runWithContract } from "@/server/sql-contract/apply";
@@ -54,9 +54,18 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     // so o erro novo do contrato de SQL mantem o proprio codigo.
     if (e instanceof SqlContractError) return handleApiError(e);
     if (isQueryTimeout(e)) return handleApiError(queryTimeoutError());
+    // Erro de conexao com a ORIGEM (host, firewall, login) nunca vai ao cliente: 502 generico (detalhe so no Sentry/log).
+    if (e instanceof Error && publicQueryErrorMessage(e.message) !== e.message) {
+      Sentry.captureException(e);
+      return handleApiError(new ApiError(502, "SOURCE_UNAVAILABLE", publicQueryErrorMessage(e.message)));
+    }
+    // Erro do driver Postgres da origem: continua QUERY_FAILED (compatibilidade), com a mensagem saneada.
+    if (e instanceof ApiError && e.code === "POSTGRES_QUERY_FAILED") return handleApiError(new ApiError(400, "QUERY_FAILED", publicQueryErrorMessage(e.message)));
+    // ApiError (403, NOT_LIVE, UNSAFE_SQL...) ja traz status/codigo proprios: nao reembalar como QUERY_FAILED.
+    if (e instanceof ApiError) return handleApiError(e);
     if (e instanceof Error && "code" in e) {
       Sentry.captureException(e);
-      return handleApiError(new ApiError(400, "QUERY_FAILED", e.message));
+      return handleApiError(new ApiError(400, "QUERY_FAILED", publicQueryErrorMessage(e.message)));
     }
     return handleApiError(e);
   }

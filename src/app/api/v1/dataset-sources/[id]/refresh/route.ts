@@ -20,6 +20,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       return ok({ cancelled: true });
     }
 
+    if (!source.active) throw new ApiError(404, "SOURCE_NOT_FOUND", "Fonte nao encontrada");
+    if (source.mode !== "extract") throw new ApiError(400, "INVALID_SOURCE_MODE", "Apenas fontes extract podem ser atualizadas");
     const body = await request.json().catch(() => ({}));
     const reconciliation = body?.reconciliation === true;
     return ok(await queueSourceRefresh(source.id, { reconciliation }), undefined, 202);

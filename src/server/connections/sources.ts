@@ -49,6 +49,9 @@ function isBoundedSourceRun(
   return true;
 }
 
+/** `not: "running"` em SQL nao casa NULL; inclui lastStatus nulo explicitamente. */
+const NOT_RUNNING = { OR: [{ lastStatus: null }, { lastStatus: { not: "running" } }] };
+
 export async function queueSourceRefresh(datasetSourceId: string, opts?: { reconciliation?: boolean }) {
   const reconciliation = !!opts?.reconciliation;
   // Use Postgres advisory lock to prevent race condition where two workers both see "no existing job"
@@ -75,7 +78,7 @@ export async function queueSourceRefresh(datasetSourceId: string, opts?: { recon
     });
     if (existing) {
       if (existing.status === "QUEUED") {
-        await prisma.datasetSource.update({ where: { id: datasetSourceId }, data: { lastStatus: "queued", lastError: null } });
+        await prisma.datasetSource.updateMany({ where: { id: datasetSourceId, ...NOT_RUNNING }, data: { lastStatus: "queued", lastError: null } });
       }
       return existing;
     }
@@ -86,7 +89,8 @@ export async function queueSourceRefresh(datasetSourceId: string, opts?: { recon
     const storageBucket = source.dataset.storageServerId ?? "__default__";
     const [job] = await prisma.$transaction([
       prisma.job.create({ data: { type: "SOURCE_REFRESH", payloadJson: JSON.stringify({ datasetSourceId, reconciliation }), maxAttempts: 3, weight, storageServerId: storageBucket } }),
-      prisma.datasetSource.update({ where: { id: datasetSourceId }, data: { lastStatus: "queued", lastError: null } }),
+      // Nao sobrescreve uma fonte "running" (derrubaria a trava mutua do refresh).
+      prisma.datasetSource.updateMany({ where: { id: datasetSourceId, ...NOT_RUNNING }, data: { lastStatus: "queued", lastError: null } }),
     ]);
     return job;
   });
@@ -146,7 +150,7 @@ export async function createDatasetSource(input: {
   reconciliationCron?: string | null;
   sourceSqlReconciliation?: string | null;
   sourceGroupId?: string;
-}) {
+}, opts?: { deferQueue?: boolean }) {
   const [dataset, connection] = await Promise.all([
     prisma.dataset.findUnique({ where: { id: input.datasetId }, include: { project: true } }),
     prisma.connection.findUnique({ where: { id: input.connectionId } }),
@@ -167,8 +171,19 @@ export async function createDatasetSource(input: {
     : (connection.provider === "mssql" ? await queryColumnsMssql(connection, input.sourceSql!) : await queryColumns(connection, input.sourceSql!));
   if (!columns.length) throw new ApiError(400, "EMPTY_SOURCE", "Fonte nao retornou colunas");
 
-  const displayName = input.sourceKind === "table" ? input.sourceTable! : input.name!;
+  const displayName = input.sourceKind === "table" ? input.sourceTable! : input.name?.trim();
+  if (!displayName) throw new ApiError(400, "INVALID_SOURCE", "Fonte por consulta exige um nome");
   const tableName = sqlIdentifier(displayName);
+  // Conflito checado ANTES de tocar o catalogo: o unique de targetTableId so estouraria
+  // no create, depois de o upsert/replaceColumnCatalog ja ter sobrescrito a tabela existente.
+  const existingTable = await prisma.datasetTable.findUnique({
+    where: { datasetId_sqlName: { datasetId: dataset.id, sqlName: tableName } },
+    select: { id: true },
+  });
+  if (existingTable) {
+    const taken = await prisma.datasetSource.findFirst({ where: { targetTableId: existingTable.id }, select: { id: true } });
+    if (taken) throw new ApiError(409, "SOURCE_ALREADY_EXISTS", `Ja existe uma fonte para a tabela "${tableName}" neste dataset`);
+  }
   const table = await prisma.datasetTable.upsert({
     where: { datasetId_sqlName: { datasetId: dataset.id, sqlName: tableName } },
     update: { name: displayName },
@@ -176,7 +191,9 @@ export async function createDatasetSource(input: {
   });
   await replaceColumnCatalog(table.id, columns, 0n);
 
-  const source = await prisma.datasetSource.create({
+  let source;
+  try {
+  source = await prisma.datasetSource.create({
     data: {
       datasetId: dataset.id,
       connectionId: connection.id,
@@ -199,7 +216,12 @@ export async function createDatasetSource(input: {
     },
     include: { connection: true, targetTable: { include: { columns: { orderBy: { ordinal: "asc" } } } } },
   });
-  if (input.mode === "extract") await queueSourceRefresh(source.id);
+  } catch (e) {
+    // Tabela recem-criada por este pedido nao deve ficar orfa se a fonte nao foi criada.
+    if (!existingTable) await prisma.datasetTable.delete({ where: { id: table.id } }).catch(() => undefined);
+    throw e;
+  }
+  if (input.mode === "extract" && !opts?.deferQueue) await queueSourceRefresh(source.id);
   return source;
 }
 
@@ -212,24 +234,35 @@ export async function createDatasetSources(input: {
   refreshCron?: string | null;
   keyColumn?: string | null;
   deltaColumn?: string | null;
+  reconciliationCron?: string | null;
   sourceGroupId?: string;
 }) {
   const sourceGroupId = input.sourceGroupId ?? randomUUID();
-  const sources = [];
-  for (const table of input.sourceTables) {
-    sources.push(await createDatasetSource({
-      datasetId: input.datasetId,
-      connectionId: input.connectionId,
-      mode: input.mode,
-      sourceKind: "table",
-      sourceSchema: input.sourceSchema,
-      sourceTable: table,
-      refreshCron: input.refreshCron,
-      keyColumn: input.keyColumn,
-      deltaColumn: input.deltaColumn,
-      sourceGroupId,
-    }));
+  const sources: Awaited<ReturnType<typeof createDatasetSource>>[] = [];
+  try {
+    for (const table of input.sourceTables) {
+      sources.push(await createDatasetSource({
+        datasetId: input.datasetId,
+        connectionId: input.connectionId,
+        mode: input.mode,
+        sourceKind: "table",
+        sourceSchema: input.sourceSchema,
+        sourceTable: table,
+        refreshCron: input.refreshCron,
+        keyColumn: input.keyColumn,
+        deltaColumn: input.deltaColumn,
+        reconciliationCron: input.reconciliationCron,
+        sourceGroupId,
+      }, { deferQueue: true }));
+    }
+  } catch (e) {
+    // Tudo-ou-nada: desfaz as fontes ja criadas (nada foi enfileirado ainda).
+    for (const s of sources) {
+      await prisma.datasetSource.delete({ where: { id: s.id } }).catch(() => undefined);
+    }
+    throw e;
   }
+  if (input.mode === "extract") for (const s of sources) await queueSourceRefresh(s.id);
   return sources;
 }
 
@@ -284,20 +317,20 @@ export async function refreshDatasetSource(datasetSourceId: string, opts?: { rec
   // sem segurar transação/lock aberto pela duração inteira do refresh (que pode levar
   // minutos com uma origem grande).
   const claimed = await prisma.datasetSource.updateMany({
-    where: { id: source.id, lastStatus: { not: "running" } },
+    where: { id: source.id, ...NOT_RUNNING },
     data: { lastStatus: "running", lastError: null },
   });
   if (claimed.count === 0) {
     throw new ApiError(409, "SOURCE_REFRESH_IN_PROGRESS", "Já existe uma atualização em andamento para esta fonte (incremental ou reconciliação) — tente novamente em instantes");
   }
-  await storageConn.createSchemaIfNotExists(schema);
-
-  // Cria tabela staging com os tipos canônicos das colunas
   const stageCols = columns.map(c => ({ name: c.sqlName, sqlType: c.sqlType, nullable: true }));
-  await storageConn.dropTableIfExists(schema, stage);
-  await storageConn.createTable(schema, stage, stageCols);
 
   try {
+    await storageConn.createSchemaIfNotExists(schema);
+    // Cria tabela staging com os tipos canônicos das colunas
+    await storageConn.dropTableIfExists(schema, stage);
+    await storageConn.createTable(schema, stage, stageCols);
+
     const STREAM_BATCH = 1000;
     for await (const rows of (isMssql ? streamMssqlRows(source.connection, query, STREAM_BATCH) : streamPostgresRows(source.connection, query, STREAM_BATCH))) {
       const bulkRows = rows.map(row => columns.map(c => convertSourceValue(row[c.originalName], c.sqlType)));
@@ -321,7 +354,9 @@ export async function refreshDatasetSource(datasetSourceId: string, opts?: { rec
     // filtro de data etc.) fica embutido no próprio SQL cadastrado pelo usuário.
     const hasTarget = await storageConn.tableExists(schema, table);
     const useKeyMerge = !!source.keyColumn && hasTarget;
-    if (useKeyMerge) await assertKeyColumnSafe(storageConn, schema, stage, source.keyColumn!);
+    // Chave nula/duplicada e checada sempre que ha keyColumn — inclusive na primeira
+    // carga (full replace), para nao gravar uma chave inutilizavel.
+    if (source.keyColumn) await assertKeyColumnSafe(storageConn, schema, stage, source.keyColumn);
     // fullSnapshot: só é seguro tratar "ausente da staging" como excluído na origem
     // quando a staging representa 100% do estado atual — mesma condição de
     // "unbounded" usada pra decidir o peso do job em queueSourceRefresh

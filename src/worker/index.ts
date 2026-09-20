@@ -37,8 +37,19 @@ type Claimed = { id: string; type: string; upload_id: string | null; payload_jso
 // Identidade e config deste processo: o perfil (banco), escolhido por `--profile <nome>` — sem variável de ambiente.
 let profile: WorkerProfileRow;
 const state = new WorkerState();
-process.on("SIGTERM", () => { state.stopping = true; });
-process.on("SIGINT", () => { state.stopping = true; });
+// SIGTERM/SIGINT ("reiniciar agora", ou prazo do reinicio seguro estourado): para de pegar job e devolve ja os jobs em
+// andamento para a fila (releaseSelf); o processo sai em seguida, sem esperar o job (worker-architecture.md).
+let terminating = false;
+function onTerminate() {
+  state.stopping = true;
+  if (terminating) return;
+  terminating = true;
+  void releaseSelf()
+    .catch((e) => console.error("[worker] releaseSelf no encerramento falhou: %s", e instanceof Error ? e.message : e))
+    .finally(() => process.exit(0));
+}
+process.on("SIGTERM", onTerminate);
+process.on("SIGINT", onTerminate);
 // O supervisor conversa por IPC: {type:"drain"} = para de pegar job novo, termina os em andamento e sai.
 process.on("message", (m) => { if ((m as { type?: string } | null)?.type === "drain") state.draining = true; });
 process.on("disconnect", () => { state.draining = true; }); // supervisor morreu: não fica órfão

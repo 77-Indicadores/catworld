@@ -12,7 +12,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@/server/db", () => ({ prisma: { $queryRaw: mocks.queryRaw, $queryRawUnsafe: mocks.settings } }));
-vi.mock("@/server/azure/sql", () => ({ checkSql: mocks.checkSql }));
+vi.mock("@/server/health/storage-probe", () => ({ probeStorage: mocks.checkSql }));
 vi.mock("@/server/auth/actor", () => ({ resolveActor: mocks.resolveActor }));
 vi.mock("@sentry/nextjs", () => ({ withScope: (fn: (s: unknown) => void) => fn({ setTag() {}, setContext() {} }), captureException() {}, flush: async () => true }));
 
@@ -151,5 +151,15 @@ describe("degradacao controlada do worker", () => {
     const cfg = await getWorkerConfig();
     expect(cfg.maxHeavyJobs).toBe(2);
     expect(cfg.maxSyncsPerStorage).toBe(3);
+  });
+});
+
+describe("health/status autenticado", () => {
+  it("falha do storage devolve codigo generico, nunca String(err)", async () => {
+    mocks.resolveActor.mockResolvedValue({ type: "user" });
+    mocks.checkSql.mockRejectedValue(DB_ERROR);
+    const body = await (await status({ headers: new Headers() } as never)).json();
+    expect(body.sql).toEqual({ ok: false, error: "STORAGE_UNAVAILABLE" });
+    expect(JSON.stringify(body)).not.toMatch(/db-interno|ENOTFOUND/);
   });
 });

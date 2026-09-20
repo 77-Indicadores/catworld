@@ -45,7 +45,7 @@ export async function PATCH(r: NextRequest) {
     if (input.mode) { await put("sql_contract.mode", input.mode); invalidateContractModeCache(); }
     if (input.resultFormat) { await put("result.normalize_default", input.resultFormat === "normalized" ? "true" : "false"); invalidateNormalizeDefaultCache(); }
     if (input.pgIsolation) { await put("pg_isolation.mode", input.pgIsolation); invalidatePgIsolationModeCache(); }
-    await audit(actor, "SQL_CONTRACT_MODE_CHANGED", "settings", undefined, input);
+    await audit(actor, "SQL_CONTRACT_MODE_CHANGED", "settings", undefined, { method: "PATCH", fields: Object.keys(input) });
     return ok({ mode: await getContractMode(), pgIsolation: await getPgIsolationMode(), resultFormat: (await getNormalizeDefault()) ? "normalized" : "legacy" });
   } catch (e) {
     return handleApiError(e);

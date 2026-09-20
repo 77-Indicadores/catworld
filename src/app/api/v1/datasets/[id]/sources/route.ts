@@ -60,8 +60,12 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         refreshCron: input.refreshCron,
         keyColumn: input.keyColumn,
         deltaColumn: input.deltaColumn,
+        reconciliationCron: input.reconciliationCron,
         sourceGroupId: input.sourceGroupId,
       }), undefined, 201);
+    }
+    if (input.sourceKind === "query" && !input.name?.trim()) {
+      throw new ApiError(400, "INVALID_SOURCE", "Fonte por consulta exige um nome");
     }
     return ok(await createDatasetSource({ datasetId, ...input }), undefined, 201);
   } catch (e) {

@@ -68,10 +68,15 @@ export function createCoreDb(instanceId: string): CoreDb & { failOrphanedCommand
 
     /** No boot: comandos que estavam em andamento quando o supervisor anterior morreu não continuam. */
     async failOrphanedCommands(): Promise<number> {
-      return prisma.$executeRawUnsafe(
+      const rows = await prisma.$queryRawUnsafe<{ id: string; action: string; mode: string }[]>(
         `UPDATE cw_system_commands SET status = 'FAILED', finished_at = NOW(), result_json = '{"error":"supervisor_restart"}'
-         WHERE status IN ('ACCEPTED','DRAINING','APPLYING')`,
+         WHERE status IN ('ACCEPTED','DRAINING','APPLYING')
+         RETURNING id, action, mode`,
       );
+      for (const r of rows) {
+        await this.audit("WORKER_COMMAND_FAILED", r.id, { action: r.action, mode: r.mode, error: "supervisor_restart" }, false).catch(() => undefined);
+      }
+      return rows.length;
     },
 
     async heartbeat(children: ChildSummary[]): Promise<void> {

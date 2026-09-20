@@ -214,19 +214,25 @@ export async function executeReadOnlyPgStream(
       try {
         client = await conn._pool.connect();
         await beginReadOnly(client, { timeoutMs, role, schemas });
-        const result = await client.query({ text: statement, rowMode: "array" });
-        const columns = dedupeColumnNames(result.fields.map((f) => f.name));
-        const streamKinds: Record<string, ColumnKind> = normalize
-          ? Object.fromEntries(result.fields.map((f, i) => [columns[i]!, pgKind(f.dataTypeID)]))
-          : {};
-        safeEnqueue(encoder.encode(JSON.stringify({ __columns__: columns }) + "\n"));
+        // Cursor no servidor: le em lotes em vez de materializar o resultado inteiro no Node.
+        await client.query(`DECLARE cw_stream_cur NO SCROLL CURSOR FOR ${statement}`);
         let rowCount = 0;
-        for (const arr of result.rows as unknown[][]) {
-          if (closed) break; // cliente desconectou — não vale a pena continuar serializando
-          const row = rowsFromArrays([arr], columns)[0]!;
-          if (normalize) normalizeRows([row], streamKinds, "pg");
-          safeEnqueue(encoder.encode(JSON.stringify(row) + "\n"));
-          rowCount++;
+        let columns: string[] | null = null;
+        let streamKinds: Record<string, ColumnKind> = {};
+        while (!closed) {
+          const batch = await client.query({ text: "FETCH FORWARD 1000 FROM cw_stream_cur", rowMode: "array" });
+          if (columns === null) {
+            columns = dedupeColumnNames(batch.fields.map((f) => f.name));
+            if (normalize) streamKinds = Object.fromEntries(batch.fields.map((f, i) => [columns![i]!, pgKind(f.dataTypeID)]));
+            safeEnqueue(encoder.encode(JSON.stringify({ __columns__: columns }) + "\n"));
+          }
+          if (batch.rows.length === 0) break;
+          for (const arr of batch.rows as unknown[][]) {
+            const row = rowsFromArrays([arr], columns)[0]!;
+            if (normalize) normalizeRows([row], streamKinds, "pg");
+            safeEnqueue(encoder.encode(JSON.stringify(row) + "\n"));
+            rowCount++;
+          }
         }
         safeEnqueue(encoder.encode(JSON.stringify({ __done__: true, rowCount, executionTimeMs: Date.now() - started }) + "\n"));
       } catch (err) {

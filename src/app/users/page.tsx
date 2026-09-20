@@ -7,6 +7,7 @@ import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { CreateUserDialog, EditUserDialog } from "@/components/management/user-dialogs";
 import { ManageGrantsDialog } from "@/components/management/manage-grants-dialog";
 import { resolveActor, requireRole } from "@/server/auth/actor";
+import { auditPageRead } from "@/server/audit-request";
 
 export const dynamic = "force-dynamic";
 
@@ -30,7 +31,9 @@ const columns: DataTableColumn<Row>[] = [
 ];
 
 export default async function UsersPage() {
-  requireRole(await resolveActor(), ["ADMIN"]);
+  const actor = await resolveActor();
+  requireRole(actor, ["ADMIN"]);
+  auditPageRead(actor, "/users");
   const rows = await prisma.user.findMany({ orderBy: { name: "asc" } });
 
   return (

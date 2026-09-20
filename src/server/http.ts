@@ -50,11 +50,13 @@ export async function handleApiError(error: unknown, context?: Record<string, un
     });
   }
   if (error instanceof SyntaxError && /JSON|Unexpected (token|end)|Expected /i.test(error.message)) {
+    auditRequestFailed(400, "INVALID_JSON");
     return fail(400, "INVALID_JSON", "O corpo da requisição não é um JSON válido.");
   }
   // Violacao de unicidade do Prisma (P2002) e conflito do CLIENTE (409), nao falha do servidor.
   if (typeof error === "object" && error !== null && (error as { code?: unknown }).code === "P2002") {
     const target = (error as { meta?: { target?: unknown } }).meta?.target;
+    auditRequestFailed(409, "CONFLICT");
     return fail(409, "CONFLICT", "Já existe um registro com esses dados.", { fields: Array.isArray(target) ? target : undefined });
   }
   auditRequestFailed(500, "INTERNAL_ERROR");

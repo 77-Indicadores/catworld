@@ -4,7 +4,8 @@ import sql from "mssql";
 import { getStoragePool } from "@/server/storage/pool";
 import { quoteIdentifier } from "@/server/security/naming";
 import { validateReadOnlySql } from "@/server/security/sql-safety";
-import { ApiError, publicQueryErrorMessage } from "@/server/http";
+import { ApiError, isQueryTimeout, publicQueryErrorMessage } from "@/server/http";
+import { hasTopLevelOrderBy, maskLiterals } from "@/server/sql-contract/query-shape";
 import { MAX_RESULT_BYTES, approxRowBytes } from "@/server/query/protection";
 
 /** Returns the default storage pool (StorageServer with isDefault=true). */
@@ -131,12 +132,7 @@ export async function executeReadOnly(principal: string, query: string, timeout 
   // sem precisar de uma segunda query só de contagem; a linha extra é
   // descartada abaixo e nunca chega ao chamador.
   const fetchLimit = limit + 1;
-  const hasCte = /^\s*WITH\b/i.test(statement);
-  const paged = hasTopLevelOrderBy(statement)
-    ? `${statement} OFFSET ${offset} ROWS FETCH NEXT ${fetchLimit} ROWS ONLY`
-    : hasCte
-      ? `${statement} ORDER BY (SELECT NULL) OFFSET ${offset} ROWS FETCH NEXT ${fetchLimit} ROWS ONLY`
-      : `SELECT * FROM (${statement}) AS _cw_q ORDER BY (SELECT NULL) OFFSET ${offset} ROWS FETCH NEXT ${fetchLimit} ROWS ONLY`;
+  const { paged, clientSkip } = buildPagedStatement(statement, offset, fetchLimit);
 
   try {
     return await new Promise<{ columns: string[]; rows: Record<string, unknown>[]; rowCount: number; truncated: boolean; executionTimeMs: number; legacyFormatColumns?: string[] }>((resolve, reject) => {
@@ -155,6 +151,8 @@ export async function executeReadOnly(principal: string, query: string, timeout 
       const rows: Record<string, unknown>[] = [];
       let approxBytes = 0;
       let tooLarge = false;
+      let enough = false;
+      let skipped = 0;
       let settled = false;
       const finish = (fn: () => void) => { if (!settled) { settled = true; fn(); } };
 
@@ -164,8 +162,11 @@ export async function executeReadOnly(principal: string, query: string, timeout 
       });
 
       request.on("row", (row: Record<string, unknown>) => {
-        if (tooLarge) return;
+        if (tooLarge || enough) return;
+        // Consulta com TOP/OFFSET proprios dentro de CTE nao pode ser embrulhada: o offset e aplicado aqui.
+        if (skipped < clientSkip) { skipped++; return; }
         rows.push(row);
+        if (clientSkip >= 0 && rows.length >= fetchLimit && paged === statement) { enough = true; request.cancel(); return; }
         approxBytes += approxRowBytes(row);
         if (approxBytes > MAX_RESULT_BYTES) {
           tooLarge = true;
@@ -175,7 +176,9 @@ export async function executeReadOnly(principal: string, query: string, timeout 
 
       request.on("error", (err: Error) => {
         finish(() => {
-          if (tooLarge) {
+          if (enough) {
+            resolveDone();
+          } else if (tooLarge) {
             reject(new ApiError(
               413,
               "RESULT_TOO_LARGE",
@@ -187,8 +190,7 @@ export async function executeReadOnly(principal: string, query: string, timeout 
         });
       });
 
-      request.on("done", () => {
-        finish(() => {
+      const resolveDone = () => {
           const truncated = rows.length > limit;
           resolve({
             columns: columns.length ? columns : Object.keys(rows[0] ?? {}),
@@ -198,8 +200,8 @@ export async function executeReadOnly(principal: string, query: string, timeout 
             executionTimeMs: Date.now() - started,
             ...(normalize || legacyFormatColumns(kinds, "mssql").length === 0 ? {} : { legacyFormatColumns: legacyFormatColumns(kinds, "mssql") }),
           });
-        });
-      });
+      };
+      request.on("done", () => finish(resolveDone));
 
       request.query(paged);
     });
@@ -292,7 +294,7 @@ export async function executeReadOnlyStream(
 
       request.on("error", (err: Error) => {
         Sentry.addBreadcrumb({ category: "db.query", message: "executeReadOnlyStream failed", level: "error", data: { sql: statement, principal, schemas } });
-        safeEnqueue(encoder.encode(JSON.stringify({ __error__: true, message: publicQueryErrorMessage(err.message) }) + "\n"));
+        safeEnqueue(encoder.encode(JSON.stringify({ __error__: true, message: publicQueryErrorMessage(err.message), ...(isQueryTimeout(err) ? { code: "QUERY_TIMEOUT" } : {}) }) + "\n"));
         safeClose();
       });
 
@@ -325,17 +327,35 @@ function extractUnqualifiedTableRefs(sql: string): string[] {
   return [...new Set(results)];
 }
 
-function hasTopLevelOrderBy(sql: string): boolean {
-  let depth = 0;
-  let i = 0;
-  let found = false;
-  while (i < sql.length) {
-    if (sql[i] === "(") depth++;
-    else if (sql[i] === ")") depth--;
-    else if (depth === 0 && /^ORDER\s+BY\b/i.test(sql.slice(i))) found = true;
-    i++;
+/** Conteudo do nivel de fora (profundidade 0) com literais/comentarios mascarados; o de dentro de parenteses vira espaco. */
+function topLevelOnly(sqlText: string): string {
+  const m = maskLiterals(sqlText);
+  let depth = 0, out = "";
+  for (const c of m) {
+    if (c === "(") { depth++; out += " "; }
+    else if (c === ")") { depth = Math.max(0, depth - 1); out += " "; }
+    else out += depth === 0 || c === "\n" ? c : " ";
   }
-  return found;
+  return out;
+}
+
+/**
+ * Monta a consulta paginada. `clientSkip` >= 0 so quando o offset precisa ser aplicado no Node (CTE com TOP/OFFSET proprio,
+ * que nao da para embrulhar nem acrescentar OFFSET); nos demais casos e -1.
+ */
+export function buildPagedStatement(statement: string, offset: number, fetchLimit: number): { paged: string; clientSkip: number } {
+  const flat = topLevelOnly(statement);
+  const hasCte = /^\s*WITH\b/i.test(statement);
+  const ownPaging = /\bTOP\b/i.test(flat) || /\bOFFSET\b/i.test(flat);
+  const page = `OFFSET ${offset} ROWS FETCH NEXT ${fetchLimit} ROWS ONLY`;
+  if (ownPaging) {
+    // TOP n / OFFSET proprios: acrescentar OFFSET/FETCH seria SQL invalido; o conjunto vira subconsulta e o offset vale dentro dele.
+    if (hasCte) return { paged: statement, clientSkip: offset };
+    return { paged: `SELECT * FROM (${statement}) AS _cw_q ORDER BY (SELECT NULL) ${page}`, clientSkip: -1 };
+  }
+  if (hasTopLevelOrderBy(statement)) return { paged: `${statement} ${page}`, clientSkip: -1 };
+  if (hasCte) return { paged: `${statement} ORDER BY (SELECT NULL) ${page}`, clientSkip: -1 };
+  return { paged: `SELECT * FROM (${statement}) AS _cw_q ORDER BY (SELECT NULL) ${page}`, clientSkip: -1 };
 }
 
 function qualifyTable(sql: string, table: string, schema: string): string {

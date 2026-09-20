@@ -12,10 +12,11 @@ Filtros opcionais: `eventType`, `success=true|false`, `userId`, `tokenId`, `sinc
 | `AUTH_FAILED` | 401 (token invalido/sessao ausente) | no maximo 1 por IP a cada 10s |
 | `LOGIN_SUCCESS` / `LOGIN_FAILED` / `LOGOUT` | autenticacao | motivo (`unknown_user`, `bad_password`, `inactive`, `invalid_input`); email so em falha/sucesso, **nunca a senha** |
 | `JOB_COMPLETED` / `JOB_FAILED` | worker: upload, refresh de fonte/derivada, cleanup | `{jobId, type, worker, durationMs, attempts, willRetry, error(500 chars)}`; recurso = upload/fonte/derivada |
-| `WORKER_PROFILE_CREATED/UPDATED/DELETED` | perfil de worker criado/alterado/removido (ADMIN) | nome, tipos, campos alterados |
+| `WORKER_PROFILE_CREATED/UPDATED/DELETED` | perfil de worker criado/alterado/removido (ADMIN); alterado tambem quando PARAR/INICIAR muda `enabled` (supervisor) | nome, tipos, campos alterados |
 | `WORKER_RESTART_REQUESTED`, `WORKER_COMMAND_REQUESTED/CANCELLED` | comando de reiniciar/parar/iniciar pedido ou cancelado na tela | ação, modo, perfil, prazo |
 | `WORKER_STARTED`, `WORKER_CRASHED` | supervisor sobe / perde um worker (ator `system:supervisor`) | pid, reinícios; código de saída, tempo de vida, próxima tentativa |
-| `WORKER_COMMAND_STARTED/COMPLETED/FAILED` | supervisor executa um comando | ação, modo, `forced` se passou do prazo |
+| `WORKER_COMMAND_STARTED/COMPLETED/FAILED` | supervisor executa um comando (FAILED tambem para comandos orfaos: `supervisor_restart`) | ação, modo, `forced` se passou do prazo |
+| `PROJECT_CREATED` | projeto criado | `{method, fields}` |
 | `QUERY_EXECUTED` | consulta SQL | rowCount, tempo |
 | `SQL_CONTRACT_MODE_CHANGED`, `UPLOAD_IMPORT_PERF` | eventos especificos | — |
 

@@ -40,7 +40,7 @@ async function authorise(request: NextRequest, id: string) {
   const actor = await resolveActor(request);
   const source = await prisma.datasetSource.findUniqueOrThrow({
     where: { id },
-    select: { datasetId: true, sourceKind: true, sourceSqlReconciliation: true, dataset: { select: { projectId: true } } },
+    select: { datasetId: true, sourceKind: true, mode: true, reconciliationCron: true, sourceSqlReconciliation: true, dataset: { select: { projectId: true } } },
   });
   if (actor.role !== "ADMIN" && !await canAccess(actor, "WRITE", source.dataset.projectId, source.datasetId)) {
     throw new ApiError(403, "FORBIDDEN", "Sem permissão para modificar esta fonte");
@@ -63,7 +63,13 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
 
     const effectiveReconciliationCron = input.mode === "live" ? null : input.reconciliationCron;
     const effectiveReconciliationSql = input.sourceSqlReconciliation !== undefined ? input.sourceSqlReconciliation : source.sourceSqlReconciliation;
-    if (effectiveReconciliationCron && source.sourceKind === "query" && !effectiveReconciliationSql?.trim()) {
+    // Valida contra o estado resultante (mesclado): PATCH {sourceSqlReconciliation:null}
+    // com cron ja gravado tambem precisa falhar.
+    const resultingMode = input.mode ?? source.mode;
+    const resultingReconciliationCron = resultingMode === "live"
+      ? null
+      : (input.reconciliationCron !== undefined ? input.reconciliationCron : source.reconciliationCron);
+    if (resultingReconciliationCron?.trim() && source.sourceKind === "query" && !effectiveReconciliationSql?.trim()) {
       throw new ApiError(400, "RECONCILIATION_SQL_REQUIRED", "Fontes por consulta exigem uma consulta de reconciliacao (sem filtro de data) para habilitar o cron de reconciliacao");
     }
     const nextReconciliationAt = effectiveReconciliationCron !== undefined

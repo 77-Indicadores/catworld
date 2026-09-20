@@ -12,6 +12,7 @@ import { resolveActor, requireRole } from "@/server/auth/actor";
 import { handleApiError, ok, ApiError } from "@/server/http";
 import { getStorageConnection } from "@/server/storage/connection";
 import type { StorageConnection, ColDef } from "@/server/storage/connection";
+import { stableOrderBy } from "@/server/odata/stable-order";
 
 const bodySchema = z.object({ targetStorageServerId: z.string().uuid() });
 
@@ -48,10 +49,14 @@ async function copySchema(
     const srcT = src.q(table);
     const colList = cols.map(c => src.q(c.name)).join(", ");
 
+    // OFFSET so e seguro com ordem total: ctid no Postgres; no SQL Server, todas as colunas ordenaveis.
+    const orderBy = src.provider === "sqlserver"
+      ? (stableOrderBy(cols.map(c => ({ name: c.name, sqlType: c.sqlType })), (n) => src.q(n)) ?? "(SELECT NULL)")
+      : "ctid";
     // mssql usa OFFSET/FETCH, postgres usa LIMIT/OFFSET
     const page = (off: number) => src.provider === "sqlserver"
-      ? `SELECT ${colList} FROM ${srcQ}.${srcT} ORDER BY (SELECT NULL) OFFSET ${off} ROWS FETCH NEXT ${BATCH} ROWS ONLY`
-      : `SELECT ${colList} FROM ${srcQ}.${srcT} LIMIT ${BATCH} OFFSET ${off}`;
+      ? `SELECT ${colList} FROM ${srcQ}.${srcT} ORDER BY ${orderBy} OFFSET ${off} ROWS FETCH NEXT ${BATCH} ROWS ONLY`
+      : `SELECT ${colList} FROM ${srcQ}.${srcT} ORDER BY ${orderBy} LIMIT ${BATCH} OFFSET ${off}`;
 
     while (true) {
       const rows = await src.query<Record<string, unknown>>(page(offset));

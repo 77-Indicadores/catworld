@@ -277,7 +277,7 @@ export class Supervisor {
         await this.startCommand(cmd, now);
       } catch (e) {
         await this.deps.db.updateCommand(cmd.id, "FAILED", { error: e instanceof Error ? e.message : String(e) });
-        await this.deps.db.audit("WORKER_COMMAND_FAILED", cmd.id, { action: cmd.action }, false).catch(() => undefined);
+        await this.deps.db.audit("WORKER_COMMAND_FAILED", cmd.id, { action: cmd.action, mode: cmd.mode, profileId: cmd.profileId, error: e instanceof Error ? e.message : String(e) }, false).catch(() => undefined);
       }
     }
   }
@@ -310,6 +310,7 @@ export class Supervisor {
       const slot = this.slotById(cmd.profileId);
       if (!slot) throw new Error("perfil não encontrado");
       await this.deps.db.setProfileEnabled(slot.profile.id, false);
+      await this.deps.db.audit("WORKER_PROFILE_UPDATED", slot.profile.name, { name: slot.profile.name, fields: ["enabled"], enabled: false, via: cmd.id }, true).catch(() => undefined);
       slot.profile = { ...slot.profile, enabled: false };
       if (!slot.child) {
         await this.deps.db.updateCommand(cmd.id, "DONE", { note: "já estava parado" });
@@ -325,6 +326,7 @@ export class Supervisor {
       const slot = this.slotById(cmd.profileId);
       if (!slot) throw new Error("perfil não encontrado");
       await this.deps.db.setProfileEnabled(slot.profile.id, true);
+      await this.deps.db.audit("WORKER_PROFILE_UPDATED", slot.profile.name, { name: slot.profile.name, fields: ["enabled"], enabled: true, via: cmd.id }, true).catch(() => undefined);
       slot.profile = { ...slot.profile, enabled: true };
       slot.backoffUntil = null;
       if (!slot.child && !this.shuttingDown) this.spawnSlot(slot, now);

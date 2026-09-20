@@ -18,6 +18,7 @@ import { resolveActor, requireRole } from "@/server/auth/actor";
 import { handleApiError, ok, ApiError } from "@/server/http";
 import { getStoragePool } from "@/server/storage/pool";
 import { quoteIdentifier } from "@/server/security/naming";
+import { stableOrderBy } from "@/server/odata/stable-order";
 
 const bodySchema = z.object({ targetStorageServerId: z.string().uuid() });
 
@@ -114,6 +115,10 @@ export async function POST(r: NextRequest, { params }: { params: Promise<{ id: s
       const selectCols = nonIdentity.map((c) => quoteIdentifier(c.col)).join(", ");
       const insertCols = selectCols;
 
+      // Paginacao por OFFSET so e segura com ordem total: identity (chave) ou, sem ela, todas as colunas ordenaveis.
+      const identityCol = cols.find((c) => c.is_identity);
+      const orderBy = identityCol ? quoteIdentifier(identityCol.col) : (stableOrderBy(cols.map((c) => ({ name: c.col, sqlType: c.type })), quoteIdentifier) ?? "(SELECT NULL)");
+
       let offset = 0;
       const batchSize = 2000;
       let totalRows = 0;
@@ -121,7 +126,7 @@ export async function POST(r: NextRequest, { params }: { params: Promise<{ id: s
       while (true) {
         const batchRes = await srcPool.request()
           .query<Record<string, unknown>>(
-            `SELECT ${selectCols} FROM ${qFull} ORDER BY (SELECT NULL) OFFSET ${offset} ROWS FETCH NEXT ${batchSize} ROWS ONLY`,
+            `SELECT ${selectCols} FROM ${qFull} ORDER BY ${orderBy} OFFSET ${offset} ROWS FETCH NEXT ${batchSize} ROWS ONLY`,
           );
 
         const rows = batchRes.recordset;

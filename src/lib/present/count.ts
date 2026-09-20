@@ -45,8 +45,10 @@ export function presentCount(input: string | number | bigint | null | undefined,
   const exact = `${neg ? "-" : ""}${group(abs.toString())}`;
   const n = Number(abs);
   let compact = exact;
-  if (abs >= 1_000_000_000n) compact = `${neg ? "-" : ""}${dec(n / 1e9)} bi`;
-  else if (abs >= 1_000_000n) compact = `${neg ? "-" : ""}${dec(n / 1e6)} mi`;
-  else if (abs >= 10_000n) compact = `${neg ? "-" : ""}${dec(n / 1e3)} mil`;
+  const sg = neg ? "-" : "";
+  // Arredondar a 1 casa pode dar 1000 da unidade menor (999.950 -> "1000 mil"): sobe para a unidade seguinte.
+  if (abs >= 999_950_000n) compact = `${sg}${dec(n / 1e9)} bi`;
+  else if (abs >= 999_950n) compact = `${sg}${dec(n / 1e6)} mi`;
+  else if (abs >= 10_000n) compact = `${sg}${dec(n / 1e3)} mil`;
   return { exact, compact, title: `${exact} ${v === 1n ? unit.replace(/s$/, "") : unit}`, value: v };
 }

@@ -115,7 +115,7 @@ export async function queryColumnsMssql(connection: MssqlConnection, query: stri
 
 import { legacyFormatColumns, mssqlKind, normalizeRows, pgKind, type ColumnKind } from "@/server/sql-contract/result";
 
-export async function executeMssqlReadOnly(connection: MssqlConnection, query: string, timeout = 30, limit = 10000, offset = 0, normalize = false) {
+export async function executeMssqlReadOnly(connection: MssqlConnection, query: string, timeout = 30, limit = 10000, offset = 0, normalize = false, orderBy?: string) {
   const statement = safeStatementMssql(query);
   const clampedTimeout = Math.min(Math.max(timeout, 1), 120) * 1000;
   const tunnel = await resolveEffectiveTarget(connection, 1433);
@@ -126,7 +126,7 @@ export async function executeMssqlReadOnly(connection: MssqlConnection, query: s
       const req = pool.request();
       const started = Date.now();
       const clampedLimit = Math.min(Math.max(limit, 1), 10000);
-      const result = await req.query(paginateMssql(statement, Math.max(offset, 0), clampedLimit + 1));
+      const result = await req.query(paginateMssql(statement, Math.max(offset, 0), clampedLimit + 1, orderBy));
       const cols = result.recordset.columns as Record<string, { name: string; type?: { declaration?: string } }> | undefined;
       const msKinds = Object.fromEntries(Object.entries(cols ?? {}).map(([n, c]) => [n, mssqlKind(c.type?.declaration)])) as Record<string, ColumnKind>;
       const sliced = result.recordset.slice(0, clampedLimit) as Record<string, unknown>[];
@@ -161,17 +161,19 @@ function probeStatementMssql(statement: string): string {
   return `SELECT TOP 0 * FROM (${statement}) cw_source_probe`;
 }
 
-function paginateMssql(statement: string, offset: number, batchSize: number): string {
+/** `orderBy` (opcional, sem a palavra ORDER BY) deve referenciar colunas da SELECT final; sem ele a ordem entre paginas nao e garantida. */
+function paginateMssql(statement: string, offset: number, batchSize: number, orderBy?: string): string {
+  const order = orderBy?.trim() ? orderBy : "(SELECT NULL)";
   const trimmed = statement.trimStart();
   if (/^with\b/i.test(trimmed)) {
     // CTEs can't be used inside FROM (...) — inject a terminal CTE for pagination
     const split = splitFinalSelect(trimmed);
     if (split) {
       const prefix = split.prefix.replace(/,\s*$/, "");
-      return `${prefix}, cw_page AS (${split.finalSelect}) SELECT * FROM cw_page ORDER BY (SELECT NULL) OFFSET ${offset} ROWS FETCH NEXT ${batchSize} ROWS ONLY`;
+      return `${prefix}, cw_page AS (${split.finalSelect}) SELECT * FROM cw_page ORDER BY ${order} OFFSET ${offset} ROWS FETCH NEXT ${batchSize} ROWS ONLY`;
     }
   }
-  return `SELECT * FROM (${statement}) cw_extract_result ORDER BY (SELECT NULL) OFFSET ${offset} ROWS FETCH NEXT ${batchSize} ROWS ONLY`;
+  return `SELECT * FROM (${statement}) cw_extract_result ORDER BY ${order} OFFSET ${offset} ROWS FETCH NEXT ${batchSize} ROWS ONLY`;
 }
 
 function splitFinalSelect(sql: string): { prefix: string; finalSelect: string } | null {

@@ -226,6 +226,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
 
   const upload = await prisma.upload.findUniqueOrThrow({ where: { id: uploadId }, include: { dataset: true, table: true } });
   if (!upload.dataset) throw new Error("Dataset não definido");
+  if (upload.table && upload.table.datasetId !== upload.dataset.id) throw new Error("Tabela do upload não pertence ao dataset de destino");
 
   let mapping = (upload.mappingJson
     ? JSON.parse(upload.mappingJson)

@@ -21,9 +21,14 @@ const als = new AsyncLocalStorage<Store>();
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 /** POSTs que so leem/testam (nao mudam estado): nao contam como escrita. */
 const READ_ONLY_POST = /\/(queries(\/export)?|query|test)$|^\/api\/v1\/(queries|connections\/test)/;
-const DATA_READ = /^\/api\/odata\/|^\/api\/v1\/tables\/[^/]+\/rows$|^\/api\/v1\/queries(\/export)?$|^\/api\/v1\/dataset-sources\/[^/]+\/query$/;
+const DATA_READ = /^\/api\/odata\/|^\/api\/v1\/tables\/[^/]+\/(rows|export|history)$|^\/api\/v1\/queries(\/export)?$|^\/api\/v1\/dataset-sources\/[^/]+\/query$/;
 const ADMIN_READ = /^\/api\/v1\/(tokens|users|database-users|connections|storage-servers|audit-events|settings|workers|worker-profiles|system)(\/|$)/;
 const THROTTLE_MS = 60_000;
+
+/** IP do cliente da requisicao em curso (contexto de auditoria), usado por `audit()` para eventos de dominio. */
+export function getAuditIp(): string | null {
+  return als.getStore()?.ip ?? null;
+}
 
 export function clientIp(request: { headers: Headers }): string | null {
   const fwd = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();

@@ -21,7 +21,7 @@ export const CW_DELETED_AT = "cw_deleted_at";
 
 export type ColDef = {
   name: string;
-  /** Tipo canônico: BIGINT | DECIMAL(18,4) | DATE | DATETIME2 | TIME | NVARCHAR(MAX) */
+  /** Tipo canônico: BIGINT | DECIMAL(18,4) | DATE | DATETIME2 | TIME | NVARCHAR(MAX) | CHAR(32) (só _cw_rh) */
   sqlType: string;
   nullable: boolean;
 };

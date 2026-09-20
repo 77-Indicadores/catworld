@@ -6,6 +6,7 @@ import { withPg, quotedPgTable } from "@/server/connections/postgres";
 import { executeLiveReadOnly, isMssqlConnection, liveCount, liveQuoteIdent, liveQuotedTable, type LiveConnection } from "@/server/connections/live";
 import { assertDatasetAccess } from "@/server/auth/permissions";
 import { planODataQuery, type ODataQueryPlan } from "@/server/odata/query-options";
+import { stableOrderBy, UNSTABLE_ORDER_WARNING } from "@/server/odata/stable-order";
 import { getStorageConnection } from "@/server/storage/connection";
 import type { PgStorageConnection } from "@/server/storage/pg-storage";
 import { ApiError, handleApiError } from "@/server/http";
@@ -236,9 +237,15 @@ async function queryLiveTable(
   countCacheKey: string,
   plan: ODataQueryPlan,
 ): Promise<{ rows: Record<string, unknown>[]; totalCount: number | null }> {
-  if (isMssqlConnection(live.connection)) return queryLiveMssql(live, cols, top, skip, needCount, countCacheKey);
+  if (isMssqlConnection(live.connection)) return queryLiveMssql(live, cols, top, skip, needCount, countCacheKey, plan);
   const whereSql = plan.where ? ` WHERE ${plan.where}` : "";
-  const orderSql = plan.orderBy ? ` ORDER BY ${plan.orderBy}` : "";
+  // Sem $orderby, OFFSET nao e deterministico: tabela => ctid; consulta => todas as colunas ordenaveis. $orderby recebe desempate.
+  const tieBreak = live.sourceKind === "table"
+    ? "ctid"
+    : stableOrderBy(cols.map((c) => ({ name: c.originalName, sqlType: c.sqlType })), (n) => `"${n.replaceAll('"', '""')}"`);
+  if (!tieBreak && !plan.orderBy) plan.warnings.push(UNSTABLE_ORDER_WARNING);
+  const orderList = [plan.orderBy, tieBreak].filter(Boolean).join(", ");
+  const orderSql = orderList ? ` ORDER BY ${orderList}` : "";
   const colList = cols.map((c) => {
     const orig  = `"${c.originalName.replaceAll('"', '""')}"`;
     const alias = `"${c.sqlName.replaceAll('"', '""')}"`;
@@ -294,6 +301,7 @@ async function queryLiveMssql(
   skip: number,
   needCount: boolean,
   countCacheKey: string,
+  plan: ODataQueryPlan,
 ): Promise<{ rows: Record<string, unknown>[]; totalCount: number | null }> {
   const q = (n: string) => liveQuoteIdent(live.connection, n);
   const colList = cols.map((c) => (c.originalName === c.sqlName ? q(c.originalName) : `${q(c.originalName)} AS ${q(c.sqlName)}`)).join(", ");
@@ -310,7 +318,11 @@ async function queryLiveMssql(
       setCachedCount(countCacheKey, totalCount);
     }
   }
-  const data = await executeLiveReadOnly(live.connection, `SELECT ${colList} FROM ${baseExpr}`, 60, top, skip);
+  // A ordem vale sobre os ALIAS da SELECT final (o executor embrulha a consulta e pagina por fora).
+  const order = stableOrderBy(cols.map((c) => ({ name: c.sqlName, sqlType: c.sqlType })), q);
+  if (!order) plan.warnings.push(UNSTABLE_ORDER_WARNING);
+  if (top === 0) return { rows: [], totalCount };
+  const data = await executeLiveReadOnly(live.connection, `SELECT ${colList} FROM ${baseExpr}`, 60, top, skip, false, order ?? undefined);
   return { rows: data.rows.map((row) => normalizeRow(row as Record<string, unknown>, typeMap)), totalCount };
 }
 
@@ -397,7 +409,11 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const selectParam = url.searchParams.get("$select");
     const countParam  = url.searchParams.get("$count");
 
-    const top  = Math.min(Math.max(1, isNaN(rawTop)  ? 1000 : rawTop),  10_000);
+    const topWarnings: string[] = [];
+    const wantedTop = isNaN(rawTop) ? 1000 : rawTop;
+    // $top=0 e valido (so contagem/metadados): antes virava 1 linha. Ajustes de limite agora sao avisados.
+    const top  = Math.min(Math.max(0, wantedTop), 10_000);
+    if (top !== wantedTop) topWarnings.push(`$top=${wantedTop} ajustado para ${top} (maximo 10000 por pagina; siga @odata.nextLink)`);
     const skip = Math.max(0, isNaN(rawSkip) ? 0 : rawSkip);
 
     const cols = selectParam
@@ -415,7 +431,18 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const liveOrig = new Map(table.columns.map((c) => [c.sqlName, c.originalName]));
     const refCol = (c: { sqlName: string }) => `"${(table.live ? (liveOrig.get(c.sqlName) ?? c.sqlName) : c.sqlName).replaceAll('"', '""')}"`;
     const plan = planODataQuery(url.searchParams, table.columns, refCol, provider === "postgres");
-    const countCacheKey = `${projectSlug}/${datasetSlug}/${table.sqlName}/${plan.where ?? ""}`;
+    plan.warnings.push(...topWarnings);
+    // Versao dos dados (storage): upload/sync gravam last_data_at; entra nas chaves de cache para contagem/pagina nao servirem dado velho.
+    let dataVersion = "live";
+    if (!table.live) {
+      const agg = await prisma.datasetTable.aggregate({
+        where: { datasetId: dataset.id, sqlName: table.sqlName },
+        _max: { lastDataAt: true, updatedAt: true },
+        _count: { _all: true },
+      });
+      dataVersion = `${agg._count._all}:${agg._max.lastDataAt?.getTime() ?? 0}:${agg._max.updatedAt?.getTime() ?? 0}`;
+    }
+    const countCacheKey = `${projectSlug}/${datasetSlug}/${table.sqlName}/${dataVersion}/${plan.where ?? ""}`;
     const response: Record<string, unknown> = { "@odata.context": `${baseUrl}/$metadata#${table.sqlName}` };
 
     if (table.live) {
@@ -424,7 +451,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       );
       response["value"] = rows.map((r, i) => ({ ...r, _row_number: String(skip + i + 1) }));
       if (needCount) response["@odata.count"] = String(totalCount ?? 0);
-      if (rows.length === top) {
+      if (top > 0 && rows.length === top) {
         const next = new URL(`${baseUrl}/${table.sqlName}`);
         next.searchParams.set("$top", String(top));
         next.searchParams.set("$skip", String(skip + top));
@@ -438,7 +465,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       await syncActorGrants(actor, { datasetIds: [dataset.id] });
 
       // Cache de página: evita hits ao banco para queries idênticas repetitivas (Power BI, SDK)
-      const pageCacheKey = `${projectSlug}/${datasetSlug}/${table.sqlName}/${top}/${skip}/${selectParam ?? ""}/${needCount}/${filterParam ?? ""}/${orderbyParam ?? ""}`;
+      const pageCacheKey = `${projectSlug}/${datasetSlug}/${table.sqlName}/${dataVersion}/${top}/${skip}/${selectParam ?? ""}/${needCount}/${filterParam ?? ""}/${orderbyParam ?? ""}`;
       const cachedPage = getPageCache(pageCacheKey);
       if (cachedPage) {
         Object.assign(response, cachedPage);
@@ -446,7 +473,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         const typeMap = new Map(cols.map((c) => [c.sqlName, c.sqlType.toUpperCase().replace(/\(.*\)/, "").trim()]));
         let dataRowsLength = 0;
         const setNextLink = () => {
-          if (dataRowsLength === top) {
+          if (top > 0 && dataRowsLength === top) {
             const next = new URL(`${baseUrl}/${table.sqlName}`);
             next.searchParams.set("$top", String(top));
             next.searchParams.set("$skip", String(skip + top));
@@ -474,7 +501,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
           const colList = cols.map((c) => q(c.sqlName)).join(", ");
           const fromExpr = `${q(dataset.schemaName)}.${q(table.sqlName)}`;
           const whereSql = plan.where ? ` WHERE ${plan.where}` : "";
-          const orderSql = plan.orderBy ? ` ORDER BY ${plan.orderBy}` : "";
+          // ctid desempata (e ordena quando nao ha $orderby): sem isso OFFSET pode repetir/pular linhas entre paginas.
+          const orderSql = ` ORDER BY ${[plan.orderBy, "ctid"].filter(Boolean).join(", ")}`;
           const dataSql = `SELECT ${colList} FROM ${fromExpr}${whereSql}${orderSql} OFFSET ${skip} LIMIT ${top}`;
           const countSql = `SELECT COUNT(*) AS cnt FROM ${fromExpr}${whereSql}`;
 
@@ -499,18 +527,21 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         // ── Storage MSSQL ───────────────────────────────────────────────────
         } else {
           const colList = cols.map((c) => `[${c.sqlName}]`).join(", ");
-          const dataSql  = `SELECT ${colList}, ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS [_row_number] FROM [${dataset.schemaName}].[${table.sqlName}] ORDER BY (SELECT NULL) OFFSET ${skip} ROWS FETCH NEXT ${top} ROWS ONLY`;
+          // Sem OFFSET/FETCH aqui: o executor pagina (offset/limit) e acrescenta o proprio OFFSET ao ORDER BY final. _row_number = skip + posicao.
+          const order = stableOrderBy(cols.map((c) => ({ name: c.sqlName, sqlType: c.sqlType })), (n) => `[${n.replaceAll("]", "]]")}]`);
+          if (!order) plan.warnings.push(UNSTABLE_ORDER_WARNING);
+          const dataSql  = `SELECT ${colList} FROM [${dataset.schemaName}].[${table.sqlName}] ORDER BY ${order ?? "(SELECT NULL)"}`;
           const countSql = `SELECT COUNT(*) AS [cnt] FROM [${dataset.schemaName}].[${table.sqlName}]`;
 
           const cachedCount = getCachedCount(countCacheKey);
           const [result, countResult] = await withODataSemaphore(() => Promise.all([
-            executeReadOnly(actor.principal, dataSql, 120, top, [dataset.schemaName], 0, 120, dataset.storageServerId),
+            executeReadOnly(actor.principal, dataSql, 120, top, [dataset.schemaName], skip, 120, dataset.storageServerId),
             needCount && cachedCount === null
               ? executeReadOnly(actor.principal, countSql, 30, 1, [dataset.schemaName], 0, 120, dataset.storageServerId)
               : Promise.resolve(null),
           ]));
 
-          response["value"] = result.rows.map((row) => normalizeRow(row as Record<string, unknown>, typeMap));
+          response["value"] = result.rows.map((row, i) => ({ ...normalizeRow(row as Record<string, unknown>, typeMap), _row_number: String(skip + i + 1) }));
           if (needCount) {
             const cnt = cachedCount ?? Number((countResult!.rows[0] as Record<string, unknown>)?.cnt ?? 0);
             setCachedCount(countCacheKey, cnt);

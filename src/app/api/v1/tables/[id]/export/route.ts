@@ -49,13 +49,14 @@ async function streamStorageCsv(
         try {
           ctrl.enqueue(enc.encode(BOM + csvLine(columns) + "\r\n"));
           client = await pg._pool.connect();
-          await client.query("SET statement_timeout = 3600000"); // 1 h
+          // Snapshot único + cursor: a tabela é trocada (merge/rename) a cada refresh e
+          // LIMIT/OFFSET sem ORDER BY duplicava/perdia linhas entre páginas.
+          await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+          await client.query("SET LOCAL statement_timeout = 3600000"); // 1 h
+          await client.query(`DECLARE cw_export NO SCROLL CURSOR FOR SELECT * FROM ${quotedTable}`);
           const PAGE = 5_000;
-          let offset = 0;
           while (true) {
-            const result = await client.query(
-              `SELECT * FROM ${quotedTable} LIMIT ${PAGE} OFFSET ${offset}`,
-            );
+            const result = await client.query(`FETCH ${PAGE} FROM cw_export`);
             if (result.rows.length === 0) break;
             // dateFormat=iso: DATE/TIME/bigint/decimal pelo tipo da coluna (sem isso DATE sai deslocada por fuso)
             const kinds: Record<string, ColumnKind> = isoDates
@@ -67,10 +68,11 @@ async function streamStorageCsv(
               .join("\r\n") + "\r\n";
             ctrl.enqueue(enc.encode(chunk));
             if (result.rows.length < PAGE) break;
-            offset += PAGE;
           }
+          await client.query("COMMIT");
           ctrl.close();
         } catch (err) {
+          await client?.query("ROLLBACK").catch(() => undefined);
           ctrl.error(err);
         } finally {
           client?.release();

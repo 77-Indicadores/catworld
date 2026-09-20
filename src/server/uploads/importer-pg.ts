@@ -15,6 +15,7 @@ import { extname } from "node:path";
 import { createHash } from "node:crypto";
 import { prisma } from "@/server/db";
 import { withAdvisoryLock } from "@/server/db/advisory-lock";
+import { withImportLock } from "@/server/db/import-lock";
 import { sqlIdentifier } from "@/server/security/naming";
 import { previewFile, rowsFromFile, type FilePreview, type ParsedColumn, type RowsFromFileOpts } from "./parser";
 import { normalizeDateLike } from "./date-normalize";
@@ -149,6 +150,21 @@ export async function importUploadPg(
   source: string | NodeJS.ReadableStream,
   conn: PgStorageConnection,
 ) {
+  // Mesma serializacao por dataset+tabela do importer MSSQL (lock por linha, sem transacao longa).
+  const pre = await prisma.upload.findUniqueOrThrow({
+    where: { id: uploadId },
+    select: { originalFilename: true, dataset: { select: { id: true, schemaName: true } }, table: { select: { sqlName: true } } },
+  });
+  if (!pre.dataset) throw new Error("Dataset não definido");
+  const lockTable = pre.table?.sqlName ?? sqlIdentifier(pre.originalFilename.replace(/.[^.]+$/, ""));
+  return withImportLock(`${pre.dataset.id}:${pre.dataset.schemaName}.${lockTable}`, () => importUploadPgLocked(uploadId, source, conn));
+}
+
+async function importUploadPgLocked(
+  uploadId: string,
+  source: string | NodeJS.ReadableStream,
+  conn: PgStorageConnection,
+) {
   const importStarted = Date.now();
 
   const upload = await prisma.upload.findUniqueOrThrow({
@@ -156,6 +172,7 @@ export async function importUploadPg(
     include: { dataset: true, table: true },
   });
   if (!upload.dataset) throw new Error("Dataset não definido");
+  if (upload.table && upload.table.datasetId !== upload.dataset.id) throw new Error("Tabela do upload não pertence ao dataset de destino");
 
   let mapping = (upload.mappingJson
     ? JSON.parse(upload.mappingJson) as ParsedColumn[]
@@ -259,6 +276,31 @@ export async function importUploadPg(
     await conn.atomicSwap(schema, stage, tableName, mappingWithRh, { targetExists });
     inserted = total;
 
+  } else if (upload.mode === "upsert") {
+    if (!upload.keyColumn) throw new Error("Upsert exige coluna-chave");
+    const key = pgQuote(upload.keyColumn);
+    try {
+      // Verifica chaves duplicadas no arquivo
+      const dupRes = await conn.withClient((client) => client.query<{ k: unknown; n: string }>(
+        `SELECT ${key} AS k, COUNT(*) n FROM ${qStaging} GROUP BY ${key} HAVING COUNT(*) > 1 LIMIT 20`,
+      ));
+      if (dupRes.rows.length > 0) {
+        const sample = dupRes.rows.map(r => `${r.k} (x${r.n})`).join(", ");
+        const more = dupRes.rows.length >= 20 ? " (mostrando as primeiras 20)" : "";
+        throw new Error(`Arquivo contém chaves duplicadas para upsert na coluna "${upload.keyColumn}": ${sample}${more}`);
+      }
+    } catch (e) {
+      await conn.execute(`DROP TABLE IF EXISTS ${qStaging}`).catch(() => undefined);
+      throw e;
+    }
+    // Mesma semantica do MSSQL: mergeSwap (merged fora de tx + swap breve); com fullSnapshot,
+    // linhas ausentes do arquivo recebem cw_deleted_at. 'updated' = 0 como no MSSQL.
+    const mergedName = `cw_mgd_${upload.id.replaceAll("-", "").slice(0, 20)}`;
+    await conn.atomicSwap(schema, stage, tableName, mappingWithRh, {
+      targetExists, keyColumn: upload.keyColumn, mergedName, fullSnapshot: upload.fullSnapshot,
+    });
+    inserted = total; updated = 0;
+
   } else {
     await conn.withClient(async (client) => {
       await client.query("BEGIN");
@@ -268,29 +310,6 @@ export async function importUploadPg(
           await client.query(`DROP TABLE ${qStaging}`);
           inserted = total;
 
-        } else if (upload.mode === "upsert") {
-          if (!upload.keyColumn) throw new Error("Upsert exige coluna-chave");
-          const key = pgQuote(upload.keyColumn);
-
-          // Verifica chaves duplicadas no arquivo
-          const dupRes = await client.query<{ k: unknown; n: string }>(
-            `SELECT ${key} AS k, COUNT(*) n FROM ${qStaging} GROUP BY ${key} HAVING COUNT(*) > 1 LIMIT 20`,
-          );
-          if (dupRes.rows.length > 0) {
-            const sample = dupRes.rows.map(r => `${r.k} (x${r.n})`).join(", ");
-            const more = dupRes.rows.length >= 20 ? " (mostrando as primeiras 20)" : "";
-            throw new Error(`Arquivo contém chaves duplicadas para upsert na coluna "${upload.keyColumn}": ${sample}${more}`);
-          }
-
-          const delRes = await client.query(
-            `DELETE FROM ${qTarget} t USING ${qStaging} s WHERE t.${key} = s.${key}`,
-          );
-          updated = delRes.rowCount ?? 0;
-          await client.query(
-            `INSERT INTO ${qTarget} (${colList}) SELECT ${colList} FROM ${qStaging}`,
-          );
-          await client.query(`DROP TABLE ${qStaging}`);
-          inserted = total;
         }
 
         await client.query("COMMIT");

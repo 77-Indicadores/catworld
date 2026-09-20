@@ -72,11 +72,11 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     // No MSSQL, toda leitura passa pelo principal do actor (grant de schema por sessão),
     // nunca pela conexão administrativa do storage — vale tanto pro caminho "since" abaixo
     // quanto pro fallback sem "since" mais adiante.
-    const runReadOnly = async (sqlStr: string) => {
+    const runReadOnly = async (sqlStr: string, rowLimit = limit) => {
       if (conn.provider === "postgres") return conn.query<Record<string, unknown>>(sqlStr);
       await ensureInternalPrincipal(actor.principal, table.dataset.storageServerId);
       await grantSchema(actor.principal, table.dataset.schemaName, "READ", table.dataset.storageServerId);
-      const result = await executeReadOnly(actor.principal, sqlStr, 30, limit, [], 0, 120, table.dataset.storageServerId);
+      const result = await executeReadOnly(actor.principal, sqlStr, 30, rowLimit, [], 0, 120, table.dataset.storageServerId);
       return result.rows as Record<string, unknown>[];
     };
 
@@ -146,9 +146,13 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       const pageClause = (orderCol: string) => conn.provider === "postgres"
         ? `ORDER BY ${orderCol} ASC LIMIT ${limit}`
         : `ORDER BY ${orderCol} ASC`;
-      const rawRows = await runReadOnly(
+      // Pede limit+1 para saber se ha mais (hasMore honesto: o SDK com follow=True depende dele para continuar).
+      const rawFetched = await runReadOnly(
         `SELECT ${colList}, ${qSyncedAt} AS __cw_synced_at FROM ${qTarget} WHERE ${qDeletedAt} IS NULL AND ${qSyncedAt} > ${sinceLit} ${pageClause(qSyncedAt)}`,
+        limit + 1,
       );
+      const mssqlHasMore = rawFetched.length > limit;
+      const rawRows = mssqlHasMore ? rawFetched.slice(0, limit) : rawFetched;
       let maxSyncedAt: Date | null = null;
       const rows = rawRows.map((row) => {
         const { __cw_synced_at, ...rest } = row;
@@ -159,11 +163,15 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 
       let removedKeys: unknown[] | null = null;
       let maxDeletedAt: Date | null = null;
+      let mssqlRemovedTruncated = false;
       if (keyColumn) {
         const qKey = conn.q(keyColumn);
-        const removed = await runReadOnly(
+        const removedFetched = await runReadOnly(
           `SELECT ${qKey} AS k, ${qDeletedAt} AS d FROM ${qTarget} WHERE ${qDeletedAt} > ${sinceLit} ${pageClause(qDeletedAt)}`,
+          limit + 1,
         ) as { k: unknown; d: unknown }[];
+        mssqlRemovedTruncated = removedFetched.length > limit;
+        const removed = mssqlRemovedTruncated ? removedFetched.slice(0, limit) : removedFetched;
         removedKeys = removed.map(r => r.k);
         for (const r of removed) {
           const d = r.d instanceof Date ? r.d : new Date(String(r.d));
@@ -171,7 +179,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         }
       }
 
-      const candidates = [maxSyncedAt, maxDeletedAt].filter((d): d is Date => d != null);
+      // Como no Postgres: exclusoes so adiantam o nextSince quando nao ha mais linhas a buscar (senao pularia linhas alteradas).
+      const candidates = [maxSyncedAt, mssqlHasMore ? null : maxDeletedAt].filter((d): d is Date => d != null);
       const nextSince = candidates.length ? new Date(Math.max(...candidates.map(d => d.getTime()))) : since;
 
       return ok(rows, {
@@ -179,6 +188,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         rowCount: rows.length,
         removedKeys,
         nextSince: nextSince.toISOString(),
+        hasMore: mssqlHasMore || mssqlRemovedTruncated,
+        ...(mssqlRemovedTruncated ? { removedTruncated: true } : {}),
       });
     }
 

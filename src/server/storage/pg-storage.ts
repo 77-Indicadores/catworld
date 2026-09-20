@@ -327,9 +327,20 @@ export class PgStorageConnection implements StorageConnection {
         const syncedAtExpr = fullSnapshot
           ? `CASE WHEN t.${qDeletedAt} IS NULL THEN now() ELSE t.${qSyncedAt} END`
           : `t.${qSyncedAt}`;
+        // Schema drift: a origem pode ter ganho/perdido colunas desde a ultima carga.
+        // Colunas novas (ausentes no target) entram como NULL nas linhas antigas;
+        // colunas so do target sao descartadas (o merged segue o schema atual da origem).
+        const tgtColsRes = await this._pool.query<{ column_name: string }>(
+          `SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2`,
+          [schema, target],
+        );
+        const tgtCols = new Set(tgtColsRes.rows.map(r => r.column_name));
+        const selectList = cols
+          .map(c => (tgtCols.has(c.name) ? `t.${pgQuote(c.name)}` : `NULL`))
+          .join(", ");
         await this._pool.query(
           `INSERT INTO ${qMgd} (${colListWithMeta})
-           SELECT ${colList}, ${syncedAtExpr}, ${deletedAtExpr} FROM ${qTgt} t
+           SELECT ${selectList}, ${syncedAtExpr}, ${deletedAtExpr} FROM ${qTgt} t
            WHERE NOT EXISTS (SELECT 1 FROM ${qStg} s WHERE s.${key} = t.${key})`,
         );
       }

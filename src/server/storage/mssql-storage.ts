@@ -43,6 +43,10 @@ export function canonicalToMssql(sqlType: string): string {
   if (sqlType === "DATE") return "DATE";
   if (sqlType === "DATETIME2") return "DATETIME2";
   if (sqlType === "TIME") return "TIME";
+  // CHAR(32) só é usado pela coluna interna _cw_rh (hash MD5 hex, sempre 32
+  // chars) — precisa ficar indexável (NVARCHAR(MAX) nunca pode ser coluna de
+  // índice no SQL Server). Ver nota em importer.ts sobre mappingWithRh.
+  if (sqlType === "CHAR(32)") return "CHAR(32)";
   return "NVARCHAR(MAX)";
 }
 
@@ -357,11 +361,20 @@ export class MssqlStorageConnection implements StorageConnection {
         const syncedAtExpr = fullSnapshot
           ? `CASE WHEN t.${qDeletedAt} IS NULL THEN SYSUTCDATETIME() ELSE t.${qSyncedAt} END`
           : `t.${qSyncedAt}`;
+        // Schema drift: colunas novas da origem (ausentes no target) entram como NULL;
+        // colunas so do target sao descartadas.
+        const tgtColsRes = await p.request().query(
+          `SELECT c.name AS column_name FROM sys.columns c WHERE c.object_id = OBJECT_ID(N'${esc(schema)}.${esc(target)}',N'U')`,
+        );
+        const tgtCols = new Set((tgtColsRes.recordset as { column_name: string }[]).map(r => r.column_name));
+        const selectList = cols
+          .map(c => (tgtCols.has(c.name) ? `t.${mssqlQuote(c.name)}` : `NULL`))
+          .join(", ");
         const copyReq = p.request();
         setReqTimeout(copyReq, 7_200_000);
         await copyReq.query(
           `INSERT INTO ${qMgd} (${colListWithMeta})
-           SELECT ${colList}, ${syncedAtExpr}, ${deletedAtExpr} FROM ${qTgt} t
+           SELECT ${selectList}, ${syncedAtExpr}, ${deletedAtExpr} FROM ${qTgt} t
            WHERE NOT EXISTS (SELECT 1 FROM ${qStg} s WHERE s.${key} = t.${key})
            OPTION (MAXDOP 1)`,
         );

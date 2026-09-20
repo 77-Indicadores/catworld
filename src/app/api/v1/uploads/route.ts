@@ -9,6 +9,7 @@ import { getUploadLimits } from "@/server/worker/config";
 import { actorLabel } from "@/server/auth/actor-label";
 import { ApiError, handleApiError, ok } from "@/server/http";
 import { uploadVisibilityWhere } from "@/server/uploads/access";
+import { assertTableInDataset } from "@/server/uploads/actions";
 import { uploadTarget } from "@/server/storage";
 import { checkRateLimit } from "@/server/query/protection";
 
@@ -78,6 +79,10 @@ export async function POST(r: NextRequest) {
       const ds = await prisma.dataset.findUnique({ where: { id: input.datasetId }, select: { id: true, projectId: true } });
       if (!ds) throw new ApiError(404, "DATASET_NOT_FOUND", "Dataset não encontrado");
       await assertDatasetAccess(actor, "WRITE", ds);
+    }
+    if (input.tableId) {
+      if (!input.datasetId) throw new ApiError(400, "VALIDATION_ERROR", "tableId exige datasetId");
+      await assertTableInDataset(input.tableId, input.datasetId);
     }
     const blobName = `uploads/${new Date().toISOString().slice(0, 10)}/${randomUUID()}${extname(input.filename).toLowerCase()}`;
     const upload = await prisma.upload.create({

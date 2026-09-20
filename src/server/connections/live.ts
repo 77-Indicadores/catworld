@@ -25,10 +25,11 @@ export async function executeLiveReadOnly(
   limit = 10000,
   offset = 0,
   normalize = false,
+  orderBy?: string,
 ) {
   return isMssqlConnection(c)
-    ? executeMssqlReadOnly(c, sql, timeout, limit, offset, normalize)
-    : executePostgresReadOnly(c, sql, timeout, limit, offset, normalize);
+    ? executeMssqlReadOnly(c, sql, timeout, limit, offset, normalize, orderBy)
+    : executePostgresReadOnly(c, sql, timeout, limit, offset, normalize, orderBy);
 }
 
 /** Pagina de uma fonte live com o SQL base ja no dialeto da origem. */

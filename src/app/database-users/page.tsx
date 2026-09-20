@@ -7,6 +7,7 @@ import { RotateButton } from "@/components/management/rotate-button";
 import { EmptyState, PageHeader, Panel, StatusBadge } from "@/components/ui/primitives";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { resolveActor, requireRole } from "@/server/auth/actor";
+import { auditPageRead } from "@/server/audit-request";
 
 export const dynamic = "force-dynamic";
 
@@ -33,7 +34,9 @@ const columns: DataTableColumn<Row>[] = [
 ];
 
 export default async function DatabaseUsersPage() {
-  requireRole(await resolveActor(), ["ADMIN"]);
+  const actor = await resolveActor();
+  requireRole(actor, ["ADMIN"]);
+  auditPageRead(actor, "/database-users");
   const rows = await loadUsers();
 
   return (

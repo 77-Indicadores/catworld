@@ -62,7 +62,7 @@ async function previewCsv(path:string){
 // parsear, dependendo da ordem das entries do zip) que quebra em arquivos gerados
 // pelo proprio ExcelJS — reproduzido em teste com um .xlsx trivial. Carregamento
 // bufferizado (Workbook API) mantido; arquivos grandes devem usar CSV (rota
-// totalmente streamed via DuckDB) — ver CATWORLD_XLSX_MAX_BYTES (env.ts),
+// totalmente streamed via DuckDB) — ver o limite de XLSX (padrao do codigo, config-contract.md),
 // validado em app/api/v1/uploads/route.ts.
 async function previewXlsx(path:string){
  const workbook=new ExcelJS.Workbook();await workbook.xlsx.readFile(path);const sheet=workbook.worksheets[0];if(!sheet)throw new Error("Planilha sem abas");

@@ -131,12 +131,12 @@ export async function queryColumns(connection: PgConnection, query: string): Pro
 import { legacyFormatColumns, mssqlKind, normalizeRows, pgKind, type ColumnKind } from "@/server/sql-contract/result";
 import { dedupeColumnNames, rowsFromArrays } from "@/server/sql-contract/columns";
 
-export async function executePostgresReadOnly(connection: PgConnection, query: string, timeout = 30, limit = 10000, offset = 0, normalize = false) {
+export async function executePostgresReadOnly(connection: PgConnection, query: string, timeout = 30, limit = 10000, offset = 0, normalize = false, orderBy?: string) {
   const statement = safeStatement(query);
   return withPg(connection, async (client) => {
     await client.query(`SET statement_timeout TO ${Math.min(Math.max(timeout, 1), 120) * 1000}`);
     const started = Date.now();
-    const result = await pgQueryArray(client, `SELECT * FROM (${statement}) cw_live_result LIMIT ${Math.min(Math.max(limit, 1), 10000) + 1} OFFSET ${Math.max(offset, 0)}`);
+    const result = await pgQueryArray(client, `SELECT * FROM (${statement}) cw_live_result${orderBy?.trim() ? ` ORDER BY ${orderBy}` : ""} LIMIT ${Math.min(Math.max(limit, 1), 10000) + 1} OFFSET ${Math.max(offset, 0)}`);
     const names = dedupeColumnNames(result.fields.map((f) => f.name));
     const pgKinds = Object.fromEntries(result.fields.map((f, i) => [names[i]!, pgKind(f.dataTypeID)])) as Record<string, ColumnKind>;
     const sliced = rowsFromArrays(result.rows.slice(0, limit) as unknown[][], names);
@@ -159,17 +159,19 @@ export async function* streamPostgresRows(connection: PgConnection, query: strin
   const tunnel = await resolveEffectiveTarget(connection, 5432);
   const client = new Client(config(connection, tunnel));
   await client.connect();
-  await client.query("SET default_transaction_read_only = on");
   try {
-    let offset = 0;
+    // Cursor numa transacao unica (snapshot REPEATABLE READ): nada some nem se repete se a origem mudar durante a extracao
+    // (LIMIT/OFFSET sem ORDER BY, como era, nao garante isso).
+    await pgQuery(client, "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    await pgQuery(client, `DECLARE cw_extract_cur NO SCROLL CURSOR FOR ${statement}`);
     while (true) {
-      const result = await pgQuery(client, `SELECT * FROM (${statement}) cw_extract_result LIMIT ${batchSize} OFFSET ${offset}`);
+      const result = await pgQuery(client, `FETCH FORWARD ${Math.max(1, Math.floor(batchSize))} FROM cw_extract_cur`);
       if (!result.rows.length) break;
       yield result.rows as Record<string, unknown>[];
       if (result.rows.length < batchSize) break;
-      offset += batchSize;
     }
   } finally {
+    await client.query("ROLLBACK").catch(() => undefined);
     await client.end().catch(() => undefined);
     await tunnel.close().catch(() => undefined);
   }

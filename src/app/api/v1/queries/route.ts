@@ -56,6 +56,8 @@ export async function POST(request: NextRequest) {
     if (input.stream) {
       acquireQuerySlot();
       const streamTimeout = 300; // streaming sempre usa o máximo — sem paginação, sem timeout curto
+      // O slot vale ate o stream terminar ou ser cancelado (nao ate a rota devolver a Response).
+      let handedOff = false;
       try {
         const conn = await getStorageConnection(storageServerId);
         let ndjsonStream: ReadableStream<Uint8Array>;
@@ -64,13 +66,14 @@ export async function POST(request: NextRequest) {
           const { PgStorageConnection } = await import("@/server/storage/pg-storage");
           ndjsonStream = await executeReadOnlyPgStream(conn as InstanceType<typeof PgStorageConnection>, input.sql, streamTimeout, schemas, normalize, await pgRoleForActor(conn, actor, scope.accessible, storageServerId));
         } else {
-          ndjsonStream = await executeReadOnlyStream(actor.principal, input.sql, streamTimeout, schemas, storageServerId, input.normalize);
+          ndjsonStream = await executeReadOnlyStream(actor.principal, input.sql, streamTimeout, schemas, storageServerId, normalize);
         }
-        return new Response(ndjsonStream, {
+        handedOff = true;
+        return new Response(releaseSlotWhenDone(ndjsonStream), {
           headers: { "Content-Type": "application/x-ndjson", "X-Cache": "MISS" },
         });
       } finally {
-        releaseQuerySlot();
+        if (!handedOff) releaseQuerySlot();
       }
     }
 
@@ -150,4 +153,26 @@ export async function POST(request: NextRequest) {
     }
     return handleApiError(e);
   }
+}
+
+/** Repassa o stream e libera o slot de concorrencia exatamente uma vez: no fim, no erro ou no cancelamento. */
+function releaseSlotWhenDone(source: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+  const reader = source.getReader();
+  let released = false;
+  const release = () => { if (!released) { released = true; releaseQuerySlot(); } };
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) { release(); controller.close(); } else controller.enqueue(value);
+      } catch (err) {
+        release();
+        controller.error(err);
+      }
+    },
+    async cancel(reason) {
+      release();
+      await reader.cancel(reason).catch(() => undefined);
+    },
+  });
 }
