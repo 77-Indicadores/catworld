@@ -23,7 +23,7 @@ Sem `since` é uma **amostra** das primeiras `limit` linhas (sem `offset`): para
 
 ### `since` sem perda
 
-Saída: `data` = linhas alteradas; `meta = { columns, rowCount, removedKeys, nextSince, hasMore, nextCursor?, removedTruncated?, tieGroupTruncated? }`.
+Saída: `data` = linhas alteradas; `meta = { columns, rowCount, removedKeys, nextSince, hasMore, nextCursor?, removedTruncated?, removedIncomplete?, tieGroupTruncated? }`.
 
 **O defeito corrigido:** um sync grava o lote inteiro com o **mesmo** `cw_synced_at`. A paginação anterior (`> último timestamp`) perdia tudo
 que passava do `limit` (reproduzido: 1000 de 2500 linhas; a 2ª chamada voltava vazia).
@@ -36,6 +36,8 @@ que passava do `limit` (reproduzido: 1000 de 2500 linhas; a 2ª chamada voltava 
   quando se quer páginas pequenas. Exige tabela com chave (upsert); sem chave, `INVALID_CURSOR`.
 - **`removedKeys`** (exclusões): todas de uma vez na 1ª página (até 100 000; acima disso `removedTruncated: true`), sem o teto de `limit`
   de antes. Páginas de cursor não repetem as exclusões.
+- **Origem de `removedKeys`:** linhas excluídas na origem são **removidas fisicamente** da tabela (ver `source-contract.md`); a chave fica na lapide `cw_tomb_<tabela>` e `removedKeys` = chaves com `cw_deleted_at > since` na lapide, **unidas** às linhas legadas ainda com `cw_deleted_at` (tabelas ainda não convertidas). Chave que voltou a existir perde a lapide e chega como linha alterada.
+- **`removedIncomplete: true`:** as lapides expiram (`retention.tombstone_days`, padrão 30 dias, `0` = nunca). Se `since` é mais antigo que essa validade, exclusões anteriores ao corte podem ter sido apagadas: o consumidor deve **ressincronizar** (ler a tabela inteira e descartar as chaves ausentes). Só aparece em tabela com chave.
 - `nextSince` da **última** página é o valor a guardar. Repetir linhas é seguro (upsert por chave); pular não acontece.
 - **SDK:** `changes(table_id, since, limit, follow=True)` segue `hasMore` sozinho e devolve todas as mudanças; `follow=False` faz uma chamada só.
 - **SQL Server:** o caminho do `since` continua como era (o ajuste é só Postgres; não verificado por falta de instância).

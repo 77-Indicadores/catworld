@@ -19,6 +19,12 @@ export type WorkspaceSource = {
   deltaColumn: string | null;
   reconciliationCron: string | null;
   sourceSqlReconciliation: string | null;
+  scopeColumns: string[] | null;
+  keysCheckCron: string | null;
+  keysSql: string | null;
+  nextKeysCheckAt: string | null;
+  lastKeysCheckAt: string | null;
+  lastRemovedCount: string | null;
   active: boolean;
   lastStatus: string | null;
   lastRowCount: string | null;

@@ -1,6 +1,7 @@
 import { prisma } from "@/server/db";
 import { datasetSchema, slugify } from "@/server/security/naming";
 import { dropSchema, dropTable, ensureSchema, grantSchema } from "@/server/azure/sql";
+import { tombstoneTableName } from "@/server/storage/delete-detection";
 import { getStorageConnection } from "@/server/storage/connection";
 
 export const projectInclude = { datasets: { where: { active: true }, include: { tables: { include: { columns: true } } } } } as const;
@@ -73,6 +74,7 @@ export async function deleteTable(id: string) {
   ]);
   const conn = await getStorageConnection(table.dataset.storageServerId);
   await conn.dropTableIfExists(table.dataset.schemaName, table.sqlName);
+  await conn.dropTableIfExists(table.dataset.schemaName, tombstoneTableName(table.sqlName));
 }
 
 export async function deleteDatasetSource(id: string) {
@@ -95,6 +97,7 @@ export async function deleteDatasetSource(id: string) {
   if (target && source.mode === "extract") {
     const conn = await getStorageConnection(target.dataset.storageServerId);
     await conn.dropTableIfExists(target.dataset.schemaName, target.sqlName);
+    await conn.dropTableIfExists(target.dataset.schemaName, tombstoneTableName(target.sqlName));
   }
 }
 
@@ -124,6 +127,7 @@ export async function deleteDatasetSourceGroup(groupId: string) {
     if (target.sourceMode === "extract") {
       const conn = await getStorageConnection(target.table.dataset.storageServerId);
       await conn.dropTableIfExists(target.table.dataset.schemaName, target.table.sqlName);
+      await conn.dropTableIfExists(target.table.dataset.schemaName, tombstoneTableName(target.table.sqlName));
     }
   }
 

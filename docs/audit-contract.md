@@ -22,4 +22,5 @@ Filtros opcionais: `eventType`, `success=true|false`, `userId`, `tokenId`, `sinc
 
 Sempre: usuario ou token (`userId`/`tokenId`), `ipAddress` (x-forwarded-for, 1o salto). **Nunca** grava corpo, query string ou cabecalhos.
 POSTs que so leem/testam (`/queries`, `/queries/export`, `*/query`, `*/test`) nao entram como `API_WRITE`.
+Exclusoes detectadas na origem nao geram evento proprio: o resultado da carga fica em `lastRemovedCount`/`lastError` da fonte e em log (contagens, nunca chaves); o `JOB_COMPLETED/FAILED` segue como acima.
 Falha ao gravar auditoria e logada e nunca derruba a requisicao.

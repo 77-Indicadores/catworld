@@ -4,7 +4,7 @@ import { prisma } from "@/server/db";
 import { resolveActor } from "@/server/auth/actor";
 import { canAccess } from "@/server/auth/permissions";
 import { ApiError, handleApiError, ok } from "@/server/http";
-import { assertValidCron, nextRefreshFromCron } from "@/server/connections/sources";
+import { assertDeleteDetection, assertValidCron, exposeSource, nextRefreshFromCron, normalizeScopeColumns, parseScopeColumns } from "@/server/connections/sources";
 import { deleteDatasetSource } from "@/server/data/catalog";
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -18,7 +18,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     if (actor.role !== "ADMIN" && !await canAccess(actor, "READ", source.dataset.projectId, source.datasetId)) {
       throw new ApiError(403, "FORBIDDEN", "Sem permissão para ler esta fonte");
     }
-    return ok(source);
+    return ok(exposeSource(source));
   } catch (e) {
     return handleApiError(e);
   }
@@ -33,6 +33,9 @@ const patchSchema = z.object({
   sourceSql: z.string().min(1).nullable().optional(),
   reconciliationCron: z.string().max(100).nullable().optional(),
   sourceSqlReconciliation: z.string().min(1).nullable().optional(),
+  scopeColumns: z.array(z.string().min(1).max(128)).max(16).nullable().optional(),
+  keysCheckCron: z.string().max(100).nullable().optional(),
+  keysSql: z.string().min(1).nullable().optional(),
   active: z.boolean().optional(),
 });
 
@@ -40,7 +43,7 @@ async function authorise(request: NextRequest, id: string) {
   const actor = await resolveActor(request);
   const source = await prisma.datasetSource.findUniqueOrThrow({
     where: { id },
-    select: { datasetId: true, sourceKind: true, mode: true, reconciliationCron: true, sourceSqlReconciliation: true, dataset: { select: { projectId: true } } },
+    select: { datasetId: true, sourceKind: true, mode: true, keyColumn: true, targetTableId: true, reconciliationCron: true, sourceSqlReconciliation: true, scopeColumns: true, keysCheckCron: true, keysSql: true, dataset: { select: { projectId: true } } },
   });
   if (actor.role !== "ADMIN" && !await canAccess(actor, "WRITE", source.dataset.projectId, source.datasetId)) {
     throw new ApiError(403, "FORBIDDEN", "Sem permissão para modificar esta fonte");
@@ -76,16 +79,39 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       ? (effectiveReconciliationCron ? nextRefreshFromCron(effectiveReconciliationCron) : null)
       : undefined;
 
-    return ok(await prisma.datasetSource.update({
+    // Deteccao de exclusoes: valida contra o estado resultante (mesclado). PATCH null limpa.
+    const resultingKeyColumn = input.keyColumn !== undefined ? input.keyColumn : source.keyColumn;
+    const resultingScope = input.scopeColumns !== undefined ? normalizeScopeColumns(input.scopeColumns) : parseScopeColumns(source.scopeColumns);
+    const resultingKeysCron = input.keysCheckCron !== undefined ? (input.keysCheckCron?.trim() || null) : source.keysCheckCron;
+    const resultingKeysSql = input.keysSql !== undefined ? input.keysSql : source.keysSql;
+    // Colunas conhecidas: catalogo da tabela destino (so quando o escopo mudou; vazio = desconhecido, nao valida).
+    const knownColumns = resultingScope && input.scopeColumns !== undefined && source.targetTableId
+      ? (await prisma.datasetColumn.findMany({ where: { tableId: source.targetTableId }, select: { sqlName: true } })).map(c => c.sqlName)
+      : undefined;
+    assertDeleteDetection({
+      mode: resultingMode, sourceKind: source.sourceKind, keyColumn: resultingKeyColumn,
+      scopeColumns: resultingScope, keysCheckCron: resultingKeysCron, keysSql: resultingKeysSql,
+    }, knownColumns);
+    const { scopeColumns: _s, keysCheckCron: _k, keysSql: _q, ...rest } = input;
+    const detectionData = resultingMode === "live"
+      ? { scopeColumns: null, keysCheckCron: null, keysSql: null, nextKeysCheckAt: null }
+      : {
+          ...(input.scopeColumns !== undefined ? { scopeColumns: resultingScope ? JSON.stringify(resultingScope) : null } : {}),
+          ...(input.keysSql !== undefined ? { keysSql: source.sourceKind === "query" ? (input.keysSql?.trim() || null) : null } : {}),
+          ...(input.keysCheckCron !== undefined ? { keysCheckCron: resultingKeysCron, nextKeysCheckAt: resultingKeysCron ? nextRefreshFromCron(resultingKeysCron) : null } : {}),
+        };
+
+    return ok(exposeSource(await prisma.datasetSource.update({
       where: { id },
       data: {
-        ...input,
+        ...rest,
+        ...detectionData,
         ...(effectiveCron !== undefined ? { refreshCron: effectiveCron, nextRefreshAt: nextAt } : {}),
         ...(input.mode === "live" ? { refreshCron: null, nextRefreshAt: null } : {}),
         ...(effectiveReconciliationCron !== undefined ? { reconciliationCron: effectiveReconciliationCron, nextReconciliationAt } : {}),
         ...(input.mode === "live" ? { reconciliationCron: null, nextReconciliationAt: null } : {}),
       },
-    }));
+    })));
   } catch (e) {
     return handleApiError(e);
   }

@@ -9,6 +9,10 @@
 
 import { prisma } from "@/server/db";
 import { decryptSecret } from "@/server/security/crypto";
+import type { MarkMissingKeysOpts, MarkMissingKeysResult } from "./delete-detection";
+
+export { KEYS_CHECK_MAX_RATIO, KEYS_CHECK_RATIO_MIN_LIVE } from "./delete-detection";
+export type { MarkMissingKeysOpts, MarkMissingKeysResult } from "./delete-detection";
 
 /**
  * Colunas internas gerenciadas pelo Catworld, injetadas por atomicSwap direto no DDL —
@@ -67,6 +71,35 @@ export interface StorageConnection {
    */
   withTransaction<T>(fn: () => Promise<T>): Promise<T>;
 
+  /** Relogio do servidor de storage (o mesmo que carimba cw_synced_at), no fuso interno da coluna. */
+  serverNow(): Promise<Date>;
+
+  /**
+   * Lapide: cria (se nao existe) `cw_tomb_<table>` no schema (cw_key do tipo da chave, cw_deleted_at). Interna:
+   * nunca entra no catalogo. Toda remocao por exclusao na origem registra aqui a chave removida.
+   */
+  ensureTombstoneTable(schema: string, table: string, keySqlType: string): Promise<void>;
+
+  /**
+   * Verificacao de chaves: REMOVE fisicamente de `table` toda linha cuja `keyColumn` nao existe em `keysTable` E
+   * cujo `cw_synced_at < before` (linhas carregadas depois do inicio da leitura das chaves nao sao tocadas —
+   * evita corrida), registrando a chave na lapide na MESMA instrucao. Antes, conta candidatas e linhas; se
+   * candidatas/linhas > `opts.maxRatio` (default KEYS_CHECK_MAX_RATIO) nao remove nada (`aborted: true`).
+   * A lista de chaves vazia e tratada pelo chamador.
+   */
+  markMissingKeysDeleted(
+    schema: string, table: string, keyColumn: string, keysTable: string, before: Date, opts?: MarkMissingKeysOpts,
+  ): Promise<MarkMissingKeysResult>;
+
+  /**
+   * Conversao unica e idempotente do formato legado (soft delete): linhas com cw_deleted_at preenchido viram
+   * lapide (preservando o carimbo) e sao removidas, numa transacao. Retorna quantas converteu (0 = nada a fazer).
+   */
+  convertLegacyDeleted(schema: string, table: string, keyColumn: string): Promise<number>;
+
+  /** Apaga lapides mais antigas que `olderThanDays` (relogio do storage). 0 dias = nao apaga nada. Retorna quantas. */
+  purgeTombstones(schema: string, table: string, olderThanDays: number): Promise<number>;
+
   /**
    * Troca atômica staging → target com janela de lock mínima em produção.
    *
@@ -74,7 +107,7 @@ export interface StorageConnection {
    *   DROP target (se existir) + RENAME staging → target dentro de transação breve.
    *   Lock em produção: ~ms.
    *
-   * mergeSwap (com keyColumn):
+   * mergeSwap (com keyColumn): (chaves que voltam na staging perdem a lapide, na mesma transacao do swap)
    *   1. Materializa fora de transação: (rows de target cujo key NÃO está em staging) + (todos de staging)
    *      em uma tabela temporária — leituras na target não são bloqueadas.
    *   2. DROP target + RENAME temporária → target (transação breve, lock ~ms).
@@ -97,11 +130,17 @@ export interface StorageConnection {
       /**
        * true quando a staging representa 100% do estado atual da origem (não uma busca
        * parcial por delta). Só nesse caso é seguro tratar "ausente da staging" como excluído
-       * — habilita a marcação de cw_deleted_at em mergeSwap. Default false.
+       * — em mergeSwap a linha é REMOVIDA fisicamente e a chave vai para a lapide. Default false.
        */
       fullSnapshot?: boolean;
+      /**
+       * Colunas de escopo (nomes SQL do target; exige keyColumn). Numa linha do target ausente da
+       * staging cuja tupla de escopo (todas nao nulas) EXISTE na staging, remove a linha (lapide),
+       * como no fullSnapshot. Demais linhas: preservadas. Retorno `removed` = lapides gravadas.
+       */
+      scopeColumns?: string[];
     },
-  ): Promise<void>;
+  ): Promise<{ removed: number }>;
 }
 
 // ─── Cache de conexões ────────────────────────────────────────────────────────

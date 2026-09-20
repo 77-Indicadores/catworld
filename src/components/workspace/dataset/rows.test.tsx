@@ -8,7 +8,7 @@ const NOW_ISO = new Date().toISOString();
 
 const source = (over: Partial<WorkspaceSource> = {}): WorkspaceSource => ({
   id: "s1", name: "vendas", mode: "extract", sourceKind: "table", sourceGroupId: null, sourceSchema: "dbo", sourceTable: "vendas", sourceSql: null,
-  refreshCron: "0 * * * *", keyColumn: "id", deltaColumn: null, reconciliationCron: null, sourceSqlReconciliation: null, active: true,
+  refreshCron: "0 * * * *", keyColumn: "id", deltaColumn: null, reconciliationCron: null, sourceSqlReconciliation: null, scopeColumns: null, keysCheckCron: null, keysSql: null, nextKeysCheckAt: null, lastKeysCheckAt: null, lastRemovedCount: null, active: true,
   lastStatus: "completed", lastRowCount: "1487197", lastError: null, lastRefreshedAt: NOW_ISO, nextRefreshAt: new Date(Date.now() + 3600_000).toISOString(),
   connection: { id: "c1", name: "dev-live" }, ...over,
 });

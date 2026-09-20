@@ -1,6 +1,7 @@
 "use client";
 import { Time } from "@/components/ui/time";
 import { fmtBytes } from "@/lib/fmt";
+import { formatInt } from "@/lib/present/count";
 import { sourceOriginLabel } from "@/lib/workspace/present";
 import type { WorkspaceDerived, WorkspaceTable } from "@/lib/workspace/types";
 
@@ -76,6 +77,15 @@ export function OriginBlock({ table, datasetName, derived }: { table: WorkspaceT
         </details>
       )}
       {s?.reconciliationCron && <p className="mt-2 text-[11px] text-base-content/70">Reconciliação: <span className="font-mono">{s.reconciliationCron}</span> (UTC)</p>}
+      {s?.scopeColumns && s.scopeColumns.length > 0 && <p className="mt-1 text-[11px] text-base-content/70">Exclusões por escopo: <span className="font-mono">{s.scopeColumns.join(", ")}</span></p>}
+      {s?.keysCheckCron && (
+        <p className="mt-1 text-[11px] text-base-content/70">
+          Verificação de chaves: <span className="font-mono">{s.keysCheckCron}</span> (UTC) · última: {s.lastKeysCheckAt ? <Time iso={s.lastKeysCheckAt} relative /> : "nunca"}
+        </p>
+      )}
+      {s && s.lastRemovedCount != null && (s.scopeColumns?.length || s.keysCheckCron || s.reconciliationCron) && (
+        <p className="mt-1 text-[11px] text-base-content/70">Linhas removidas na última atualização: {formatInt(s.lastRemovedCount)}</p>
+      )}
     </section>
   );
 }

@@ -16,6 +16,7 @@ const KEYS = [
   "retention.audit_events_days",
   "retention.uploads_days",
   "retention.dataset_versions_keep",
+  "retention.tombstone_days",
 ] as const;
 
 const DEFAULTS = {
@@ -23,6 +24,7 @@ const DEFAULTS = {
   "retention.audit_events_days":     30,
   "retention.uploads_days":          30,
   "retention.dataset_versions_keep": 10,
+  "retention.tombstone_days":        30,
 } as const;
 
 const patchSchema = z.object({
@@ -30,6 +32,8 @@ const patchSchema = z.object({
   audit_events_days:     z.number().int().min(1).max(3650).optional(),
   uploads_days:          z.number().int().min(1).max(3650).optional(),
   dataset_versions_keep: z.number().int().min(1).max(1000).optional(),
+  /** Validade das lapides de exclusao (dias); 0 = guardar para sempre. */
+  tombstone_days:        z.number().int().min(0).max(3650).optional(),
 });
 
 type Row = { key: string; value: string };
@@ -45,6 +49,7 @@ async function getSettings() {
     audit_events_days:     map["retention.audit_events_days"]     ?? DEFAULTS["retention.audit_events_days"],
     uploads_days:          map["retention.uploads_days"]          ?? DEFAULTS["retention.uploads_days"],
     dataset_versions_keep: map["retention.dataset_versions_keep"] ?? DEFAULTS["retention.dataset_versions_keep"],
+    tombstone_days:        map["retention.tombstone_days"]        ?? DEFAULTS["retention.tombstone_days"],
   };
 }
 
@@ -69,6 +74,7 @@ export async function PATCH(r: NextRequest) {
       ...(body.audit_events_days     !== undefined ? [["retention.audit_events_days",     body.audit_events_days]     as [string, number]] : []),
       ...(body.uploads_days          !== undefined ? [["retention.uploads_days",          body.uploads_days]          as [string, number]] : []),
       ...(body.dataset_versions_keep !== undefined ? [["retention.dataset_versions_keep", body.dataset_versions_keep] as [string, number]] : []),
+      ...(body.tombstone_days        !== undefined ? [["retention.tombstone_days",        body.tombstone_days]        as [string, number]] : []),
     ];
 
     for (const [key, value] of updates) {

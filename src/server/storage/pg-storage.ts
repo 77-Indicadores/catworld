@@ -5,6 +5,7 @@
 
 import { Pool, type PoolClient, type PoolConfig } from "pg";
 import { CW_SYNCED_AT, CW_DELETED_AT, type ColDef, type ColInfo, type StorageConnection } from "./connection";
+import { deleteMissingKeysSql, keysCheckExceeds, mergeRemovalPlan, missingKeysWhere, tombstoneTableName, KEYS_CHECK_MAX_RATIO, TOMB_AT, TOMB_KEY, type MarkMissingKeysOpts, type MarkMissingKeysResult } from "./delete-detection";
 
 // ─── URL parsing ──────────────────────────────────────────────────────────────
 
@@ -258,8 +259,8 @@ export class PgStorageConnection implements StorageConnection {
     staging: string,
     target: string,
     cols: ColDef[],
-    opts?: { targetExists?: boolean; keyColumn?: string | null; mergedName?: string; fullSnapshot?: boolean },
-  ): Promise<void> {
+    opts?: { targetExists?: boolean; keyColumn?: string | null; mergedName?: string; fullSnapshot?: boolean; scopeColumns?: string[] },
+  ): Promise<{ removed: number }> {
     const qSc = pgQuote(schema);
     const qStg = `${qSc}.${pgQuote(staging)}`;
     const qTgt = `${qSc}.${pgQuote(target)}`;
@@ -296,7 +297,7 @@ export class PgStorageConnection implements StorageConnection {
       } finally {
         client.release();
       }
-      return;
+      return { removed: 0 };
     }
 
     // ── mergeSwap: materializa resultado fora de tx (MVCC protege target), depois DDL breve ──
@@ -312,21 +313,19 @@ export class PgStorageConnection implements StorageConnection {
 
     await this._pool.query(`DROP TABLE IF EXISTS ${qMgd}`);
 
+    const tombName = tombstoneTableName(target);
+    const qTomb = `${qSc}.${pgQuote(tombName)}`;
+    let plan: ReturnType<typeof mergeRemovalPlan> | null = null;
+    let removed = 0;
+
     try {
       await this._pool.query(`CREATE TABLE ${qMgd} (${colDefsWithMeta})`);
 
       if (targetExists) {
-        // MVCC: readers veem target antiga enquanto este INSERT roda fora de tx. Se
-        // fullSnapshot=true, ausência na staging = "excluído na origem": carimba na
-        // primeira rodada em que isso ocorre (CASE preserva se já estava excluída —
-        // idempotente). Se fullSnapshot=false (delta parcial), preserva como está —
-        // ausência aqui só significa "não mudou neste lote".
-        const deletedAtExpr = fullSnapshot
-          ? `CASE WHEN t.${qDeletedAt} IS NULL THEN now() ELSE t.${qDeletedAt} END`
-          : `t.${qDeletedAt}`;
-        const syncedAtExpr = fullSnapshot
-          ? `CASE WHEN t.${qDeletedAt} IS NULL THEN now() ELSE t.${qSyncedAt} END`
-          : `t.${qSyncedAt}`;
+        // MVCC: readers veem target antiga enquanto este INSERT roda fora de tx. Linhas ausentes
+        // da staging so somem quando ha remocao (fullSnapshot ou escopo): ai NAO sao copiadas
+        // (remocao fisica) e viram lapide na transacao do swap. Sem remocao (delta parcial),
+        // ausencia so significa "nao mudou neste lote": copia como esta.
         // Schema drift: a origem pode ter ganho/perdido colunas desde a ultima carga.
         // Colunas novas (ausentes no target) entram como NULL nas linhas antigas;
         // colunas so do target sao descartadas (o merged segue o schema atual da origem).
@@ -338,11 +337,23 @@ export class PgStorageConnection implements StorageConnection {
         const selectList = cols
           .map(c => (tgtCols.has(c.name) ? `t.${pgQuote(c.name)}` : `NULL`))
           .join(", ");
+        // Escopo: linha ausente da staging cuja tupla de escopo existe na staging = excluida na
+        // origem. Se alguma coluna de escopo ainda nao existe no target (schema drift), nao ha
+        // como avaliar: preserva como no delta normal.
+        const scopeCols = opts?.scopeColumns?.length && opts.scopeColumns.every(c => tgtCols.has(c)) ? opts.scopeColumns : null;
+        plan = mergeRemovalPlan({
+          dialect: "pg", q: pgQuote, qTgt, qStg, qTomb, key, qDeletedAt, now: "now()", fullSnapshot, scopeColumns: scopeCols,
+        });
         await this._pool.query(
           `INSERT INTO ${qMgd} (${colListWithMeta})
-           SELECT ${selectList}, ${syncedAtExpr}, ${deletedAtExpr} FROM ${qTgt} t
-           WHERE NOT EXISTS (SELECT 1 FROM ${qStg} s WHERE s.${key} = t.${key})`,
+           SELECT ${selectList}, t.${qSyncedAt}, t.${qDeletedAt} FROM ${qTgt} t
+           ${plan.copyJoin}
+           WHERE ${plan.copyWhere}`,
         );
+        if (plan.active) {
+          const keyCol = cols.find(c => c.name === keyColumn);
+          await this.ensureTombstoneTable(schema, target, keyCol?.sqlType ?? "NVARCHAR(MAX)");
+        }
       }
 
       // Copia todos os rows de staging (novos / atualizados) — sempre "vivas": carimba
@@ -356,6 +367,11 @@ export class PgStorageConnection implements StorageConnection {
       try {
         await client.query("BEGIN");
         try {
+          if (plan) {
+            // Lapides na MESMA transacao da remocao: revive chaves que voltaram; registra as removidas.
+            if (plan.active || await this.tableExists(schema, tombName)) await client.query(plan.revive);
+            if (plan.active) removed = (await client.query(plan.insert)).rowCount ?? 0;
+          }
           if (targetExists) await client.query(`DROP TABLE ${qTgt}`);
           await client.query(`ALTER TABLE ${qMgd} RENAME TO ${pgQuote(target)}`);
           await client.query("COMMIT");
@@ -366,11 +382,85 @@ export class PgStorageConnection implements StorageConnection {
       } finally {
         client.release();
       }
+      return { removed };
     } finally {
       // best-effort cleanup
       await this._pool.query(`DROP TABLE IF EXISTS ${qStg}`).catch(() => {});
       await this._pool.query(`DROP TABLE IF EXISTS ${qMgd}`).catch(() => {});
     }
+  }
+
+  async serverNow(): Promise<Date> {
+    const r = await this._pool.query<{ v: Date }>(`SELECT now()::timestamp AS v`);
+    return r.rows[0]!.v;
+  }
+
+  async ensureTombstoneTable(schema: string, table: string, keySqlType: string): Promise<void> {
+    await this._pool.query(
+      `CREATE TABLE IF NOT EXISTS ${pgQuote(schema)}.${pgQuote(tombstoneTableName(table))} (${pgQuote(TOMB_KEY)} ${canonicalToPg(keySqlType)}, ${pgQuote(TOMB_AT)} TIMESTAMP NOT NULL)`,
+    );
+  }
+
+  async markMissingKeysDeleted(
+    schema: string, table: string, keyColumn: string, keysTable: string, before: Date, opts?: MarkMissingKeysOpts,
+  ): Promise<MarkMissingKeysResult> {
+    const qTgt = `${pgQuote(schema)}.${pgQuote(table)}`;
+    const qKeys = `${pgQuote(schema)}.${pgQuote(keysTable)}`;
+    const qTomb = `${pgQuote(schema)}.${pgQuote(tombstoneTableName(table))}`;
+    const where = missingKeysWhere({ q: pgQuote, qKeys, key: pgQuote(keyColumn), beforeParam: "$1::timestamp" });
+    const c = await this._pool.query<{ live: string; candidates: string }>(
+      `SELECT COUNT(*)::text AS live, COUNT(*) FILTER (WHERE ${where})::text AS candidates FROM ${qTgt} t`,
+      [before],
+    );
+    const live = Number(c.rows[0]?.live ?? 0);
+    const candidates = Number(c.rows[0]?.candidates ?? 0);
+    if (keysCheckExceeds({ candidates, live }, opts?.maxRatio ?? KEYS_CHECK_MAX_RATIO)) return { marked: 0, candidates, live, aborted: true };
+    if (candidates === 0) return { marked: 0, candidates, live, aborted: false };
+    const keyCol = (await this.listColumns(schema, keysTable)).find(k => k.name === keyColumn);
+    await this.ensureTombstoneTable(schema, table, keyCol?.sqlType ?? "NVARCHAR(MAX)");
+    const res = await this._pool.query(
+      deleteMissingKeysSql({ dialect: "pg", q: pgQuote, qTgt, qTomb, key: pgQuote(keyColumn), where }),
+      [before],
+    );
+    return { marked: res.rowCount ?? 0, candidates, live, aborted: false };
+  }
+
+  async convertLegacyDeleted(schema: string, table: string, keyColumn: string): Promise<number> {
+    if (!(await this.tableExists(schema, table))) return 0;
+    const cols = await this.listColumns(schema, table);
+    const keyCol = cols.find(c => c.name === keyColumn);
+    if (!keyCol || !cols.some(c => c.name === CW_DELETED_AT)) return 0;
+    const qTgt = `${pgQuote(schema)}.${pgQuote(table)}`;
+    const qTomb = `${pgQuote(schema)}.${pgQuote(tombstoneTableName(table))}`;
+    const qDel = pgQuote(CW_DELETED_AT);
+    const n = await this._pool.query<{ n: string }>(`SELECT COUNT(*)::text AS n FROM ${qTgt} WHERE ${qDel} IS NOT NULL`);
+    if (Number(n.rows[0]?.n ?? 0) === 0) return 0;
+    await this.ensureTombstoneTable(schema, table, keyCol.sqlType);
+    return this.withClient(async (client) => {
+      await client.query("BEGIN");
+      try {
+        const key = pgQuote(keyColumn);
+        await client.query(
+          `INSERT INTO ${qTomb} (${pgQuote(TOMB_KEY)}, ${pgQuote(TOMB_AT)}) SELECT t.${key}, t.${qDel} FROM ${qTgt} t WHERE t.${qDel} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM ${qTomb} k WHERE k.${pgQuote(TOMB_KEY)} = t.${key})`,
+        );
+        const del = await client.query(`DELETE FROM ${qTgt} WHERE ${qDel} IS NOT NULL`);
+        await client.query("COMMIT");
+        return del.rowCount ?? 0;
+      } catch (e) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        throw e;
+      }
+    });
+  }
+
+  async purgeTombstones(schema: string, table: string, olderThanDays: number): Promise<number> {
+    const tomb = tombstoneTableName(table);
+    if (olderThanDays <= 0 || !(await this.tableExists(schema, tomb))) return 0;
+    const res = await this._pool.query(
+      `DELETE FROM ${pgQuote(schema)}.${pgQuote(tomb)} WHERE ${pgQuote(TOMB_AT)} < now()::timestamp - ($1::int * interval '1 day')`,
+      [Math.floor(olderThanDays)],
+    );
+    return res.rowCount ?? 0;
   }
 
   /**

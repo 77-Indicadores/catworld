@@ -54,12 +54,15 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
   const [incrementalEnabled, setIncrementalEnabled] = useState(false);
   const [keyColumn, setKeyColumn] = useState("");
   const [deltaColumn, setDeltaColumn] = useState("");
+  const [scopeColumns, setScopeColumns] = useState("");
+  const [keysCheckCron, setKeysCheckCron] = useState("");
+  const [keysSql, setKeysSql] = useState("");
   const [incrementalColumns, setIncrementalColumns] = useState<Column[]>([]);
   const [loadingIncrementalColumns, setLoadingIncrementalColumns] = useState(false);
 
   async function open() {
     setStep("origin"); setError(""); setColumns([]); setSelectedTables([]); setQueryStatus("idle"); setQueryTestedSql(""); setTableSearch(""); setRefreshCron("");
-    setIncrementalEnabled(false); setKeyColumn(""); setDeltaColumn(""); setIncrementalColumns([]);
+    setIncrementalEnabled(false); setKeyColumn(""); setDeltaColumn(""); setIncrementalColumns([]); setScopeColumns(""); setKeysCheckCron(""); setKeysSql("");
     ref.current?.showModal();
     setLoadingMeta(true);
     try {
@@ -157,7 +160,16 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
   }
 
   async function create() {
+    if (keysCheckCron.trim() && sourceKind === "query" && !keysSql.trim()) {
+      setError("Informe a consulta de chaves para habilitar a verificação de chaves."); return;
+    }
     setLoading(true); setError("");
+    const detect = mode === "extract" && incrementalEnabled && !!keyColumn.trim();
+    const scopeList = scopeColumns.split(",").map((c) => c.trim()).filter(Boolean);
+    const detection = {
+      scopeColumns: detect && scopeList.length ? scopeList : null,
+      keysCheckCron: detect ? (keysCheckCron.trim() || null) : null,
+    };
     try {
       await apiRequest(`/api/v1/datasets/${datasetId}/sources`, {
         method: "POST",
@@ -171,6 +183,7 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
           refreshCron: mode === "live" ? null : (refreshCron.trim() || null),
           keyColumn: mode === "extract" && incrementalEnabled ? (keyColumn.trim() || null) : null,
           deltaColumn: mode === "extract" && incrementalEnabled ? (deltaColumn.trim() || null) : null,
+          ...detection,
         } : {
           connectionId,
           name: queryName,
@@ -179,6 +192,8 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
           sourceSql,
           refreshCron: mode === "live" ? null : (refreshCron.trim() || null),
           keyColumn: mode === "extract" && incrementalEnabled ? (keyColumn.trim() || null) : null,
+          ...detection,
+          keysSql: detect && detection.keysCheckCron ? keysSql.trim() : null,
         }),
       });
       ref.current?.close();
@@ -322,6 +337,23 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
                     </Field>
                   ) : (
                     <div className="rounded-box border border-base-300 bg-base-200/40 p-3 text-sm text-base-content/65">Para consultas customizadas, o filtro incremental (janela de datas, cortes) deve estar embutido no proprio SQL. O Catworld apenas atualiza (upsert) pela coluna-chave informada.</div>
+                  )}
+                </div>
+              )}
+
+              {incrementalEnabled && keyColumn.trim() && (
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <Field label="Colunas de escopo (opcional)" hint="Separadas por vírgula. Quando um grupo (mesmos valores nessas colunas) é relido, as chaves desse grupo que não vieram são marcadas como excluídas." wide>
+                    <input className="input w-full font-mono text-sm" placeholder="ex: coluna_a, coluna_b" value={scopeColumns} onChange={(e) => setScopeColumns(e.target.value)} />
+                  </Field>
+                  <Field label="Verificação de chaves (cron UTC, opcional)" hint="Lê só a coluna-chave da origem e marca as ausentes como excluídas. Roda dentro da primeira atualização agendada depois do horário." wide>
+                    <input className="input w-full font-mono text-sm" placeholder="ex: 0 3 * * *  —  vazio = desativada" value={keysCheckCron} onChange={(e) => setKeysCheckCron(e.target.value)} />
+                    {keysCheckCron.trim() && <CronPreview cron={keysCheckCron} onPick={setKeysCheckCron} />}
+                  </Field>
+                  {sourceKind === "query" && (
+                    <Field label="Consulta de chaves" hint="Obrigatória se a verificação de chaves estiver ativa: uma única coluna, com os mesmos valores da coluna-chave." wide>
+                      <textarea className="textarea h-24 w-full font-mono text-sm" value={keysSql} onChange={(e) => setKeysSql(e.target.value)} spellCheck={false} />
+                    </Field>
                   )}
                 </div>
               )}

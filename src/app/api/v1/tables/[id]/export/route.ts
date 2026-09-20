@@ -9,6 +9,7 @@ import { getStorageConnection } from "@/server/storage/connection";
 import type { PgStorageConnection } from "@/server/storage/pg-storage";
 import type { MssqlStorageConnection } from "@/server/storage/mssql-storage";
 import { ApiError, handleApiError } from "@/server/http";
+import { activeRowsPredicate } from "@/server/storage/active-rows";
 import { fmtCell } from "@/lib/fmt-cell";
 import { mssqlKind, normalizeRows, pgKind, type ColumnKind } from "@/server/sql-contract/result";
 
@@ -37,7 +38,10 @@ async function streamStorageCsv(
   table: string,
   columns: string[],
   isoDates = false,
+  activeWhere: string | null = null,
 ): Promise<ReadableStream<Uint8Array>> {
+  // Linhas excluídas na origem (cw_deleted_at preenchido) não entram no arquivo.
+  const whereSql = activeWhere ? ` WHERE ${activeWhere}` : "";
   const enc = new TextEncoder();
 
   if (storageConn.provider === "postgres") {
@@ -53,7 +57,7 @@ async function streamStorageCsv(
           // LIMIT/OFFSET sem ORDER BY duplicava/perdia linhas entre páginas.
           await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
           await client.query("SET LOCAL statement_timeout = 3600000"); // 1 h
-          await client.query(`DECLARE cw_export NO SCROLL CURSOR FOR SELECT * FROM ${quotedTable}`);
+          await client.query(`DECLARE cw_export NO SCROLL CURSOR FOR SELECT * FROM ${quotedTable}${whereSql}`);
           const PAGE = 5_000;
           while (true) {
             const result = await client.query(`FETCH ${PAGE} FROM cw_export`);
@@ -113,7 +117,7 @@ async function streamStorageCsv(
       request.on("error", (err: Error) => ctrl.error(err));
       request.on("done", () => { flush(); ctrl.close(); });
 
-      request.query(`SELECT * FROM ${quotedTable}`);
+      request.query(`SELECT * FROM ${quotedTable}${whereSql}`);
     },
   });
 }
@@ -208,6 +212,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       table.sqlName,
       csvColumns,
       isoDates,
+      await activeRowsPredicate(storageConn, table.dataset.schemaName, table.sqlName),
     );
 
     return new Response(csvStream, { headers: csvHeaders });

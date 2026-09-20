@@ -4,7 +4,7 @@ import { prisma } from "@/server/db";
 import { resolveActor } from "@/server/auth/actor";
 import { assertCanUseConnection, assertDatasetAccess } from "@/server/auth/permissions";
 import { ApiError, handleApiError, ok } from "@/server/http";
-import { assertValidCron, createDatasetSource, createDatasetSources } from "@/server/connections/sources";
+import { assertValidCron, createDatasetSource, createDatasetSources, exposeSource } from "@/server/connections/sources";
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -14,11 +14,11 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const ds = await prisma.dataset.findUnique({ where: { id: datasetId }, select: { id: true, projectId: true } });
     if (!ds) throw new ApiError(404, "DATASET_NOT_FOUND", "Dataset não encontrado");
     await assertDatasetAccess(actor, "READ", ds);
-    return ok(await prisma.datasetSource.findMany({
+    return ok((await prisma.datasetSource.findMany({
       where: { datasetId, active: true },
       include: { connection: { select: { id: true, name: true, provider: true } }, targetTable: { include: { columns: { orderBy: { ordinal: "asc" } } } } },
       orderBy: { name: "asc" },
-    }));
+    })).map(exposeSource));
   } catch (e) {
     return handleApiError(e);
   }
@@ -45,13 +45,17 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       deltaColumn: z.string().max(128).nullable().optional(),
       reconciliationCron: z.string().max(100).nullable().optional(),
       sourceSqlReconciliation: z.string().nullable().optional(),
+      scopeColumns: z.array(z.string().min(1).max(128)).max(16).nullable().optional(),
+      keysCheckCron: z.string().max(100).nullable().optional(),
+      keysSql: z.string().nullable().optional(),
       sourceGroupId: z.string().uuid().optional(),
     }).parse(await request.json());
     await assertCanUseConnection(actor, input.connectionId, ds);
     assertValidCron(input.refreshCron, "refreshCron");
     assertValidCron(input.reconciliationCron, "reconciliationCron");
+    assertValidCron(input.keysCheckCron, "keysCheckCron");
     if (input.sourceKind === "table" && input.sourceTables?.length) {
-      return ok(await createDatasetSources({
+      return ok((await createDatasetSources({
         datasetId,
         connectionId: input.connectionId,
         mode: input.mode,
@@ -61,13 +65,16 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         keyColumn: input.keyColumn,
         deltaColumn: input.deltaColumn,
         reconciliationCron: input.reconciliationCron,
+        scopeColumns: input.scopeColumns,
+        keysCheckCron: input.keysCheckCron,
+        keysSql: input.keysSql,
         sourceGroupId: input.sourceGroupId,
-      }), undefined, 201);
+      })).map(exposeSource), undefined, 201);
     }
     if (input.sourceKind === "query" && !input.name?.trim()) {
       throw new ApiError(400, "INVALID_SOURCE", "Fonte por consulta exige um nome");
     }
-    return ok(await createDatasetSource({ datasetId, ...input }), undefined, 201);
+    return ok(exposeSource(await createDatasetSource({ datasetId, ...input })), undefined, 201);
   } catch (e) {
     return handleApiError(e);
   }

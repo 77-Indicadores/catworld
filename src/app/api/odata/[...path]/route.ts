@@ -8,6 +8,7 @@ import { assertDatasetAccess } from "@/server/auth/permissions";
 import { planODataQuery, type ODataQueryPlan } from "@/server/odata/query-options";
 import { stableOrderBy, UNSTABLE_ORDER_WARNING } from "@/server/odata/stable-order";
 import { getStorageConnection } from "@/server/storage/connection";
+import { activeRowsPredicate, joinWhere } from "@/server/storage/active-rows";
 import type { PgStorageConnection } from "@/server/storage/pg-storage";
 import { ApiError, handleApiError } from "@/server/http";
 import { prisma } from "@/server/db";
@@ -500,7 +501,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
           const pgConn = conn as PgStorageConnection;
           const colList = cols.map((c) => q(c.sqlName)).join(", ");
           const fromExpr = `${q(dataset.schemaName)}.${q(table.sqlName)}`;
-          const whereSql = plan.where ? ` WHERE ${plan.where}` : "";
+          // Esconde linhas excluídas na origem (cw_deleted_at); o $filter do cliente vem junto por AND.
+          const whereSql = joinWhere(plan.where, await activeRowsPredicate(pgConn, dataset.schemaName, table.sqlName));
           // ctid desempata (e ordena quando nao ha $orderby): sem isso OFFSET pode repetir/pular linhas entre paginas.
           const orderSql = ` ORDER BY ${[plan.orderBy, "ctid"].filter(Boolean).join(", ")}`;
           const dataSql = `SELECT ${colList} FROM ${fromExpr}${whereSql}${orderSql} OFFSET ${skip} LIMIT ${top}`;
@@ -530,8 +532,9 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
           // Sem OFFSET/FETCH aqui: o executor pagina (offset/limit) e acrescenta o proprio OFFSET ao ORDER BY final. _row_number = skip + posicao.
           const order = stableOrderBy(cols.map((c) => ({ name: c.sqlName, sqlType: c.sqlType })), (n) => `[${n.replaceAll("]", "]]")}]`);
           if (!order) plan.warnings.push(UNSTABLE_ORDER_WARNING);
-          const dataSql  = `SELECT ${colList} FROM [${dataset.schemaName}].[${table.sqlName}] ORDER BY ${order ?? "(SELECT NULL)"}`;
-          const countSql = `SELECT COUNT(*) AS [cnt] FROM [${dataset.schemaName}].[${table.sqlName}]`;
+          const activeWhere = joinWhere(await activeRowsPredicate(conn, dataset.schemaName, table.sqlName));
+          const dataSql  = `SELECT ${colList} FROM [${dataset.schemaName}].[${table.sqlName}]${activeWhere} ORDER BY ${order ?? "(SELECT NULL)"}`;
+          const countSql = `SELECT COUNT(*) AS [cnt] FROM [${dataset.schemaName}].[${table.sqlName}]${activeWhere}`;
 
           const cachedCount = getCachedCount(countCacheKey);
           const [result, countResult] = await withODataSemaphore(() => Promise.all([

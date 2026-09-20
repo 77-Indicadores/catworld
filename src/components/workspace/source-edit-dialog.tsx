@@ -15,6 +15,9 @@ type Source = {
   deltaColumn: string | null;
   reconciliationCron: string | null;
   sourceSqlReconciliation: string | null;
+  scopeColumns?: string[] | null;
+  keysCheckCron?: string | null;
+  keysSql?: string | null;
   sourceKind: string;
   sourceSql?: string | null;
   connection: { id: string; name: string };
@@ -29,6 +32,9 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
   const [deltaColumn, setDeltaColumn] = useState(source.deltaColumn ?? "");
   const [reconciliationCron, setReconciliationCron] = useState(source.reconciliationCron ?? "");
   const [sourceSqlReconciliation, setSourceSqlReconciliation] = useState(source.sourceSqlReconciliation ?? "");
+  const [scopeColumns, setScopeColumns] = useState((source.scopeColumns ?? []).join(", "));
+  const [keysCheckCron, setKeysCheckCron] = useState(source.keysCheckCron ?? "");
+  const [keysSql, setKeysSql] = useState(source.keysSql ?? "");
   const [sql, setSql] = useState(source.sourceSql ?? "");
   const [sqlTested, setSqlTested] = useState(source.sourceSql ?? "");
   const [sqlStatus, setSqlStatus] = useState<"idle" | "ok" | "error">("ok");
@@ -45,6 +51,9 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
     setDeltaColumn(source.deltaColumn ?? "");
     setReconciliationCron(source.reconciliationCron ?? "");
     setSourceSqlReconciliation(source.sourceSqlReconciliation ?? "");
+    setScopeColumns((source.scopeColumns ?? []).join(", "));
+    setKeysCheckCron(source.keysCheckCron ?? "");
+    setKeysSql(source.keysSql ?? "");
     setSql(source.sourceSql ?? "");
     setSqlTested(source.sourceSql ?? "");
     setSqlStatus("ok");
@@ -75,7 +84,12 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
     if (reconciliationCron.trim() && source.sourceKind === "query" && !sourceSqlReconciliation.trim()) {
       setError("Informe a consulta de reconciliação (sem filtro de data) para habilitar o cron de reconciliação."); return;
     }
+    if (keysCheckCron.trim() && source.sourceKind === "query" && !keysSql.trim()) {
+      setError("Informe a consulta de chaves para habilitar a verificação de chaves."); return;
+    }
     setLoading(true); setError("");
+    const scopeList = scopeColumns.split(",").map((c) => c.trim()).filter(Boolean);
+    const detect = mode === "extract" && !!keyColumn.trim();
     const body: Record<string, unknown> = {
       name: name.trim(),
       mode,
@@ -84,6 +98,9 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
       deltaColumn: deltaColumn.trim() || null,
       reconciliationCron: mode === "live" ? null : (reconciliationCron.trim() || null),
       sourceSqlReconciliation: source.sourceKind === "query" ? (sourceSqlReconciliation.trim() || null) : null,
+      scopeColumns: detect && scopeList.length ? scopeList : null,
+      keysCheckCron: detect ? (keysCheckCron.trim() || null) : null,
+      keysSql: detect && source.sourceKind === "query" ? (keysSql.trim() || null) : null,
     };
     if (source.sourceKind === "query") body.sourceSql = sql;
     try {
@@ -219,6 +236,39 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
                   </label>
                 ) : (
                   <p className="text-xs text-base-content/65">Reconciliação lê a tabela inteira, ignorando a coluna delta nessa rodada.</p>
+                )}
+              </div>
+            )}
+
+            {mode === "extract" && keyColumn.trim() && (
+              <div className="rounded-box border border-base-300 p-3 space-y-3">
+                <div>
+                  <span className="label-text font-medium">Detecção de exclusões <span className="font-normal text-base-content/65">(opcional)</span></span>
+                  <p className="mt-0.5 text-xs text-base-content/65">Marcam como excluídas (sem apagar) as linhas que sumiram da origem, sem precisar de uma reconciliação completa.</p>
+                </div>
+                <label className="form-control w-full">
+                  <span className="label-text text-sm">Colunas de escopo</span>
+                  <input className="input mt-1 w-full font-mono text-sm" placeholder="ex: coluna_a, coluna_b  —  vazio = desativado" value={scopeColumns} onChange={(e) => setScopeColumns(e.target.value)} />
+                  <span className="label-text-alt mt-1 text-base-content/65">Separadas por vírgula. Quando um grupo (mesmos valores nessas colunas) é relido pela carga, as chaves desse grupo que não vieram são marcadas como excluídas.</span>
+                </label>
+                <label className="form-control w-full">
+                  <span className="label-text text-sm">Verificação de chaves (cron UTC)</span>
+                  <input className="input mt-1 w-full font-mono text-sm" placeholder="ex: 0 3 * * *  —  vazio = desativada" value={keysCheckCron} onChange={(e) => setKeysCheckCron(e.target.value)} />
+                  {keysCheckCron.trim() && <CronPreview cron={keysCheckCron} onPick={setKeysCheckCron} />}
+                  <span className="label-text-alt mt-1 text-base-content/65">Lê só a coluna-chave da origem e marca as ausentes. Roda dentro da primeira atualização agendada depois do horário.</span>
+                </label>
+                {source.sourceKind === "query" && (
+                  <label className="form-control w-full">
+                    <span className="label-text text-sm">Consulta de chaves</span>
+                    <textarea
+                      className="textarea mt-1 h-24 w-full font-mono text-sm"
+                      placeholder="Uma única coluna, com os mesmos valores da coluna-chave"
+                      value={keysSql}
+                      onChange={(e) => setKeysSql(e.target.value)}
+                      spellCheck={false}
+                    />
+                    <span className="label-text-alt mt-1 text-base-content/65">Obrigatória se a verificação de chaves estiver ativa.</span>
+                  </label>
                 )}
               </div>
             )}
