@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { queueImportUpload, assertTableInDataset } from "./actions";
+import { queueImportUpload, queueImportUploadAuto, assertTableInDataset, FROM_PREVIEW } from "./actions";
 
 const h = vi.hoisted(() => ({
   table: vi.fn(), dataset: vi.fn(), upload: vi.fn(), updateMany: vi.fn(), jobUpdateMany: vi.fn(), jobCreate: vi.fn(), findUnique: vi.fn(),
@@ -32,6 +32,16 @@ describe("upload actions guards", () => {
     await expect(assertTableInDataset("t1", "d1")).rejects.toMatchObject({ status: 404, code: "TABLE_NOT_FOUND" });
     await expect(queueImportUpload({} as never, "u1", input)).rejects.toMatchObject({ code: "TABLE_NOT_FOUND" });
     expect(h.jobCreate).not.toHaveBeenCalled();
+  });
+
+  it("import automatico do worker (upload em PREVIEWING) e aceito com FROM_PREVIEW; o padrao FROM_UPLOADED o rejeitaria", async () => {
+    h.upload.mockResolvedValue({ datasetId: "d1", tableId: "t1", mode: "replace", keyColumn: null, sizeBytes: 1n, originalFilename: "a.csv" });
+    // linha ainda em PREVIEWING: so a transicao com FROM_PREVIEW casa
+    h.updateMany.mockImplementation(async (args: { where: { status: { in: string[] } } }) => ({ count: args.where.status.in.includes("PREVIEWING") ? 1 : 0 }));
+    h.findUnique.mockResolvedValue({ status: "PREVIEWING" });
+    const mapping = input.mapping;
+    await expect(queueImportUploadAuto("u1", mapping, FROM_PREVIEW)).resolves.toEqual({ id: "j" });
+    await expect(queueImportUploadAuto("u1", mapping)).rejects.toMatchObject({ code: "INVALID_UPLOAD_STATE" });
   });
 
   it("queues when the table belongs to the dataset", async () => {

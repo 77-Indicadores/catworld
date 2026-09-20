@@ -10,7 +10,7 @@ import { downloadFile, deleteFile } from "@/server/storage";
 import { env } from "@/server/env";
 import { previewFile, applyTypeOverrides, type FilePreview } from "@/server/uploads/parser";
 import { importUpload } from "@/server/uploads/importer";
-import { queueImportUploadAuto } from "@/server/uploads/actions";
+import { FROM_PREVIEW, queueImportUploadAuto } from "@/server/uploads/actions";
 import { enqueueDueSourceRefreshes, enqueueDueReconciliations, refreshDatasetSource, nextRefreshFromCron } from "@/server/connections/sources";
 import { enqueueDueDerivedRefreshes, refreshDerivedTable } from "@/server/connections/derived";
 import { pickInt } from "@/server/worker/config";
@@ -370,7 +370,8 @@ async function work(job: Claimed) {
           where: { id: upload.id },
           data: { previewJson: JSON.stringify(preview), rowCount: BigInt(preview.rowCount) },
         });
-        await queueImportUploadAuto(upload.id, preview.columns);
+        // O upload esta em PREVIEWING aqui: o estado de origem padrao (PENDING_UPLOAD/FAILED) rejeitava com 409.
+        await queueImportUploadAuto(upload.id, preview.columns, FROM_PREVIEW);
       } finally {
         await rm(file.dir, { recursive: true, force: true });
       }

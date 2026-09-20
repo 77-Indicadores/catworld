@@ -62,6 +62,8 @@ function isXlsx(filename: string): boolean {
 export const FROM_UPLOADED = ["PENDING_UPLOAD", "FAILED"];
 export const FROM_CONFIRM = ["PENDING_UPLOAD", "AWAITING_CONFIRMATION", "FAILED"];
 export const FROM_RETRY = ["FAILED"];
+/** O worker enfileira o import automatico enquanto o upload esta em preview (QUEUED_PREVIEW/PREVIEWING). */
+export const FROM_PREVIEW = ["QUEUED_PREVIEW", "PREVIEWING"];
 
 export function assertUploadStatus(status: string, allowed: string[]) {
   if (!allowed.includes(status)) {
