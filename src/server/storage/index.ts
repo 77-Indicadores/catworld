@@ -11,6 +11,11 @@ export async function downloadFile(blobName: string): Promise<NodeJS.ReadableStr
   return downloadLocal(blobName) as unknown as NodeJS.ReadableStream;
 }
 
+/** O arquivo ainda está em disco? (a retenção o apaga; o registro do upload sobrevive). */
+export function fileExists(blobName: string): boolean {
+  try { return existsSync(resolve(env().CATWORLD_UPLOAD_DIR, blobName)); } catch { return false; }
+}
+
 export async function deleteFile(blobName: string) {
   try {
     const path = resolve(env().CATWORLD_UPLOAD_DIR, blobName);

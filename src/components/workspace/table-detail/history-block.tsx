@@ -5,12 +5,12 @@ import { Time } from "@/components/ui/time";
 import { apiRequest, errorMessage } from "@/lib/api-client";
 import { fmtDuration } from "@/lib/fmt";
 import { JOB_TYPE_LABEL } from "@/lib/labels";
-import { formatInt } from "@/lib/present";
+import { fmtBytes, formatInt } from "@/lib/present";
 import type { HistoryRun, HistoryVersion, TableHistory } from "@/server/tables/history";
 
 const UPLOAD_MODE: Record<string, string> = { replace: "substituiu", append: "acrescentou", upsert: "atualizou por chave" };
 
-function VersionRow({ v }: { v: HistoryVersion }) {
+function VersionRow({ v, tableId }: { v: HistoryVersion; tableId: string }) {
   return (
     <li className="flex flex-col gap-0.5 border-b border-base-300 py-2 last:border-0">
       <div className="flex items-baseline justify-between gap-2">
@@ -20,6 +20,9 @@ function VersionRow({ v }: { v: HistoryVersion }) {
       <p className="text-base-content/70">
         {v.upload ? <>Upload <span className="font-mono">{v.upload.filename}</span> ({UPLOAD_MODE[v.upload.mode] ?? v.upload.mode}){v.upload.createdBy ? ` · por ${v.upload.createdBy}` : ""}</> : "Sincronização da fonte"}
       </p>
+      {v.upload && (v.upload.fileAvailable
+        ? <a className="link link-primary w-fit" href={`/api/v1/tables/${tableId}/versions/${v.id}/file`} download>Baixar arquivo original ({fmtBytes(Number(v.upload.sizeBytes))})</a>
+        : <p className="text-[11px] text-base-content/70">Arquivo original não guardado (removido pela retenção).</p>)}
     </li>
   );
 }
@@ -74,7 +77,7 @@ export function HistoryBlock({ tableId }: { tableId: string }) {
                 <h5 className="mb-1 font-semibold">Versões dos dados</h5>
                 {data.versions.length === 0
                   ? <p className="text-base-content/70">Nenhuma versão registrada ainda.</p>
-                  : <ul>{data.versions.map((v) => <VersionRow key={v.id} v={v} />)}</ul>}
+                  : <ul>{data.versions.map((v) => <VersionRow key={v.id} v={v} tableId={tableId} />)}</ul>}
               </div>
               <div>
                 <h5 className="mb-1 font-semibold">Execuções recentes</h5>

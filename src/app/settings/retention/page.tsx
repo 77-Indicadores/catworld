@@ -12,6 +12,7 @@ type Settings = {
   audit_events_days: number;
   uploads_days: number;
   dataset_versions_keep: number;
+  upload_files_days: number;
 };
 
 type CleanupRun = {
@@ -154,7 +155,8 @@ export default function RetentionPage() {
     e.preventDefault();
     if (!settings) return;
     const bad = (["jobs_days", "audit_events_days", "uploads_days"] as const).some((k) => !Number.isInteger(settings[k]) || settings[k] < 1 || settings[k] > 3650)
-      || !Number.isInteger(settings.dataset_versions_keep) || settings.dataset_versions_keep < 1 || settings.dataset_versions_keep > 1000;
+      || !Number.isInteger(settings.dataset_versions_keep) || settings.dataset_versions_keep < 1 || settings.dataset_versions_keep > 1000
+      || !Number.isInteger(settings.upload_files_days) || settings.upload_files_days < 0 || settings.upload_files_days > 3650;
     if (bad) { setError("Revise os campos destacados: use números inteiros dentro da faixa indicada."); return; }
     setSaving(true); setError(""); setSaved(false);
     try {
@@ -252,6 +254,15 @@ export default function RetentionPage() {
               min={1}
               max={1000}
               unit="versões"
+            />
+            <div className="divider my-0" />
+            <NumberField
+              label="Arquivos originais dos uploads (disco)"
+              description="Guarda o arquivo original de cada import concluído por N dias, para baixar pelo histórico da tabela. Só ficam os arquivos das últimas versões (limite acima) e nunca mais que o prazo de uploads. 0 = apagar o arquivo assim que o import termina. Atenção: arquivos grandes ocupam disco enquanto forem guardados."
+              name="upload_files_days"
+              value={settings.upload_files_days}
+              onChange={set}
+              min={0}
             />
           </div>
         </Panel>

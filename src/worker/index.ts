@@ -1,5 +1,6 @@
 import { buildClaimSql } from "./claim";
 import { isSourceBusyError } from "./source-failure";
+import { getUploadFilesDays, purgeExpiredUploadFiles } from "@/server/uploads/file-retention";
 import { createWriteStream } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
@@ -221,6 +222,10 @@ async function runMetadataCleanup() {
       versionsKeep,
     );
 
+    // Arquivos originais fora da janela (dias ou últimas N versões); o registro do upload fica até uploads_days.
+    const expiredKept = await purgeExpiredUploadFiles(await getUploadFilesDays());
+    deletedFiles += expiredKept;
+
     const durationMs = Date.now() - t0;
     console.log(
       "[METADATA_CLEANUP] jobs=%d audit_events=%d uploads=%d (files=%d orphans=%d) dataset_versions=%d duration=%dms",
@@ -374,7 +379,8 @@ async function work(job: Claimed) {
 
     await prisma.job.update({ where: { id: job.id }, data: { status: "COMPLETED", lockedAt: null, lockedBy: null, heartbeatAt: null, lastError: null } });
     // Only delete the upload file after the import is fully done — not after preview
-    if (job.type === "IMPORT_UPLOAD") {
+    // (com retenção de arquivos ligada — padrão — ele fica para o histórico de versões e o METADATA_CLEANUP o apaga depois)
+    if (job.type === "IMPORT_UPLOAD" && (await getUploadFilesDays().catch(() => 0)) === 0) {
       await deleteFile(upload.blobName).catch(() => {});
     }
   } finally {

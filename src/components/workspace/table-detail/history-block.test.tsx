@@ -7,7 +7,8 @@ const NOW = new Date().toISOString();
 
 const history = {
   versions: [
-    { id: "v1", createdAt: NOW, rowCount: "1487197", origin: "upload", upload: { filename: "vendas.csv", mode: "replace", createdBy: "ana@x.com" } },
+    { id: "v1", createdAt: NOW, rowCount: "1487197", origin: "upload", upload: { id: "u1", filename: "vendas.csv", mode: "replace", createdBy: "ana@x.com", sizeBytes: "2097152", fileAvailable: true } },
+    { id: "v2", createdAt: NOW, rowCount: "5", origin: "upload", upload: { id: "u2", filename: "velho.csv", mode: "append", createdBy: null, sizeBytes: "10", fileAvailable: false } },
     { id: "v0", createdAt: NOW, rowCount: "10", origin: "sync", upload: null },
   ],
   runs: [
@@ -70,5 +71,15 @@ describe("HistoryBlock", () => {
     open();
     expect(await screen.findByText("Nenhuma versão registrada ainda.")).toBeInTheDocument();
     expect(screen.getByText("Nenhuma execução registrada para esta tabela.")).toBeInTheDocument();
+  });
+
+  it("versão com arquivo guardado oferece o download; sem arquivo explica que a retenção o removeu", async () => {
+    render(<HistoryBlock tableId="t1" />);
+    open();
+    const link = await screen.findByRole("link", { name: /Baixar arquivo original/ });
+    expect(link.getAttribute("href")).toBe("/api/v1/tables/t1/versions/v1/file");
+    expect(link.textContent).toContain("2");
+    expect(screen.getAllByRole("link", { name: /Baixar arquivo original/ })).toHaveLength(1);
+    expect(screen.getByText(/Arquivo original não guardado/)).toBeInTheDocument();
   });
 });
