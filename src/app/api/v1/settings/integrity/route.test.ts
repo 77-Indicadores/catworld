@@ -7,6 +7,7 @@ vi.mock("@/server/auth/actor", () => ({
 }));
 vi.mock("@/server/audit", () => ({ audit: vi.fn(async (...a: unknown[]) => { m.audited.push(a); }) }));
 vi.mock("@/server/http", () => ({
+  ApiError: class ApiError extends Error { constructor(public status: number, public code: string, message: string) { super(message); } },
   ok: (data: unknown) => Response.json({ data }),
   handleApiError: (e: unknown) => Response.json({ error: String((e as Error).message) }, { status: (e as { status?: number }).status ?? 400 }),
 }));
@@ -33,6 +34,15 @@ describe("/api/v1/settings/integrity", () => {
   it("valor fora da faixa é recusado e nada muda", async () => {
     expect((await patch({ max_drop_pct: 0 })).status).toBeGreaterThanOrEqual(400);
     expect((await patch({ mode: "off" })).status).toBeGreaterThanOrEqual(400);
+    expect(m.settings).toEqual({});
+  });
+  it("L5: corpo vazio, invalido ou nao-objeto devolve 400 (e nada muda)", async () => {
+    const send = (body: string | undefined) => PATCH(new Request("http://x", { method: "PATCH", body }) as never);
+    expect((await send(undefined)).status).toBe(400);
+    expect((await send("")).status).toBe(400);
+    expect((await send("{nao json")).status).toBe(400);
+    expect((await send("null")).status).toBe(400);
+    expect((await send("[1]")).status).toBe(400);
     expect(m.settings).toEqual({});
   });
   it("só ADMIN", async () => {

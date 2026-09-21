@@ -10,7 +10,7 @@ import { z } from "zod";
 import { prisma } from "@/server/db";
 import { resolveActor, requireRole } from "@/server/auth/actor";
 import { audit } from "@/server/audit";
-import { handleApiError, ok } from "@/server/http";
+import { ApiError, handleApiError, ok } from "@/server/http";
 import { SETTING_KEYS, getIntegritySettings } from "@/server/integrity/policy";
 
 const patchSchema = z.object({
@@ -37,7 +37,10 @@ export async function PATCH(r: NextRequest) {
   try {
     const actor = await resolveActor(r);
     requireRole(actor, ["ADMIN"]);
-    const body = patchSchema.parse(await r.json());
+    // Corpo vazio/invalido e erro do CLIENTE (400), nunca uma excecao nao tratada.
+    const raw: unknown = await r.json().catch(() => undefined);
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new ApiError(400, "INVALID_JSON", "O corpo da requisição deve ser um objeto JSON.");
+    const body = patchSchema.parse(raw);
     const updates: [string, string][] = [
       ...(body.mode !== undefined ? [[SETTING_KEYS.mode, body.mode] as [string, string]] : []),
       ...(body.max_drop_pct !== undefined ? [[SETTING_KEYS.maxDropPct, String(body.max_drop_pct)] as [string, string]] : []),

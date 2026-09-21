@@ -12,10 +12,12 @@ import { auditIntegrity, evaluationDetail, recordLedger } from "@/server/integri
 import { queryColumns, quotedPgTable, sourceClockPg, streamPostgresRows, tableColumns, type SourceColumn } from "./postgres";
 import { queryColumnsMssql, quotedMssqlTable, sourceClockMssql, streamMssqlRows, tableColumnsMssql } from "./mssql";
 import { compareWithCatalog, convertSourceValue, type ResolvedColumn } from "./source-values";
+import { clearSourceOptions, effectiveIntegrity, getSourceOptions, setRunMarker, setSourceOptions, takeRunMarker, type RunMarker, type SourceOptions } from "./source-options";
+import { makeRowConverter } from "./source-row-convert";
 import { WatermarkTracker, buildDeltaPredicate, compareWatermark, deltaCap, deltaKindOf, isFutureWatermark, normalizeWatermark } from "./source-delta";
 import {
   LEASE_HEARTBEAT_MS, defaultReconciliationCron, deletionCoverageWarning, extractKeysWarning, getSourceSettings, isSkipWarning,
-  leaseMarker, previousKeysSkips, resolveColumn, withSkipCount,
+  isLeaseMarker, jitteredReconciliationCron, leaseMarker, previousKeysSkips, resolveColumn, withSkipCount,
 } from "./source-guards";
 
 /** Cron invalido virava "sem agendamento" em silêncio (a fonte nunca atualizava); agora e 400. Vazio/null = sem agendamento. */
@@ -43,7 +45,10 @@ export function nextRefreshFromCron(cronExpr: string | null | undefined, from = 
  */
 export function exposeSource<T extends object>(source: T): T & { integrityWarnings: string[] } {
   const w = deletionCoverageWarning(source as Parameters<typeof deletionCoverageWarning>[0]);
-  return { ...source, integrityWarnings: w ? [w] : [] };
+  // "lease:<uuid>" e a trava interna da rodada em andamento: nao e erro e nao sai cru na API (L5).
+  const le = (source as { lastError?: string | null }).lastError;
+  const clean = "lastError" in source && isLeaseMarker(le) ? { ...source, lastError: null } : source;
+  return { ...clean, integrityWarnings: w ? [w] : [] };
 }
 
 /**
@@ -127,8 +132,11 @@ export function nextAvgRunMs(prev: number | null | undefined, elapsedMs: number)
 /** `not: "running"` em SQL nao casa NULL; inclui lastStatus nulo explicitamente. */
 const NOT_RUNNING = { OR: [{ lastStatus: null }, { lastStatus: { not: "running" } }] };
 
-export async function queueSourceRefresh(datasetSourceId: string, opts?: { reconciliation?: boolean }) {
+export async function queueSourceRefresh(datasetSourceId: string, opts?: { reconciliation?: boolean; manual?: boolean; acceptDrop?: boolean }) {
   const reconciliation = !!opts?.reconciliation;
+  // Rodada manual (H3): a marca de uso unico leva "manual"/"acceptDrop" ate a execucao (o worker so repassa `reconciliation`).
+  // So e gravada quando ha uma rodada por vir (nova ou ja na fila): com uma em andamento a marca sobraria para a rodada agendada.
+  const markManual = () => (opts?.manual || opts?.acceptDrop) ? setRunMarker(datasetSourceId, { manual: true, acceptDrop: !!opts.acceptDrop, reconciliation }) : Promise.resolve();
   // Use Postgres advisory lock to prevent race condition where two workers both see "no existing job"
   // and both insert, creating duplicate SOURCE_REFRESH jobs for the same source.
   return withAdvisoryLock(datasetSourceId, async () => {
@@ -152,16 +160,17 @@ export async function queueSourceRefresh(datasetSourceId: string, opts?: { recon
       } catch { return false; }
     });
     if (existing) {
-      if (existing.status === "QUEUED") await markQueued(datasetSourceId);
+      if (existing.status === "QUEUED") { await markManual(); await markQueued(datasetSourceId); }
       return existing;
     }
+    await markManual();
     const weight = laneWeight(classifySourceLane(source, reconciliation));
     // Bucket "__default__" pro storage padrão (storageServerId null no dataset) —
     // nunca grava NULL aqui: NULL no Job.storageServerId é reservado pra "job não é
     // do tipo SOURCE_REFRESH" (ver claim() em worker/index.ts), não "storage padrão".
     const storageBucket = source.dataset.storageServerId ?? "__default__";
     const [job] = await prisma.$transaction([
-      prisma.job.create({ data: { type: "SOURCE_REFRESH", payloadJson: JSON.stringify({ datasetSourceId, reconciliation }), maxAttempts: 3, weight, storageServerId: storageBucket } }),
+      prisma.job.create({ data: { type: "SOURCE_REFRESH", payloadJson: JSON.stringify({ datasetSourceId, reconciliation, ...(opts?.manual ? { manual: true } : {}), ...(opts?.acceptDrop ? { acceptDrop: true } : {}) }), maxAttempts: 3, weight, storageServerId: storageBucket } }),
       // Nao sobrescreve uma fonte "running" (derrubaria a trava mutua do refresh).
       ...queuedUpdates(datasetSourceId),
     ]);
@@ -259,6 +268,8 @@ export async function createDatasetSource(input: {
   keysSql?: string | null;
   keysMinIntervalMinutes?: number | null;
   sourceGroupId?: string;
+  /** valor irrepresentavel (infinity, data BC): padrao das fontes NOVAS e "fail" (para a carga); "null" = NULL + aviso (M4) */
+  onInvalid?: "null" | "fail";
 }, opts?: { deferQueue?: boolean }) {
   const [dataset, connection] = await Promise.all([
     prisma.dataset.findUnique({ where: { id: input.datasetId }, include: { project: true } }),
@@ -284,10 +295,11 @@ export async function createDatasetSource(input: {
   // FON-06: fonte NOVA com chave e sem deteccao de exclusoes ganha reconciliacao diaria (full snapshot) por padrao; sem isso,
   // linhas apagadas na origem ficariam vivas para sempre. Escolha explicita (inclusive null) e respeitada. Fontes existentes
   // NAO sao alteradas (so sinalizadas em `integrityWarnings`).
+  const sourceId = randomUUID(); // conhecido antes do create: semeia o jitter do cron padrao (M5)
   const reconciliationCron = defaultReconciliationCron({
     mode: input.mode, keyColumn: input.keyColumn, detectDeletions: input.detectDeletions, reconciliationCron: input.reconciliationCron,
     sourceKind: input.sourceKind, sourceSqlReconciliation: input.sourceSqlReconciliation,
-  }) ?? input.reconciliationCron;
+  }, sourceId) ?? input.reconciliationCron;
 
   const displayName = input.sourceKind === "table" ? input.sourceTable! : input.name?.trim();
   if (!displayName) throw new ApiError(400, "INVALID_SOURCE", "Fonte por consulta exige um nome");
@@ -313,6 +325,7 @@ export async function createDatasetSource(input: {
   try {
   source = await prisma.datasetSource.create({
     data: {
+      id: sourceId,
       datasetId: dataset.id,
       connectionId: connection.id,
       targetTableId: table.id,
@@ -342,6 +355,9 @@ export async function createDatasetSource(input: {
     if (!existingTable) await prisma.datasetTable.delete({ where: { id: table.id } }).catch(() => undefined);
     throw e;
   }
+  // Fonte NOVA: regra estrita (M4/L3). Fonte sem registro de opcoes e LEGADA e mantem o comportamento antigo.
+  await setSourceOptions(source.id, { strict: true, onInvalid: input.onInvalid ?? "fail" })
+    .catch((e) => console.warn(`[source] opcoes da fonte ${source.id} nao gravadas (valera o comportamento legado): ${e instanceof Error ? e.message : e}`));
   if (input.mode === "extract" && !opts?.deferQueue) await queueSourceRefresh(source.id);
   return source;
 }
@@ -391,7 +407,12 @@ export async function createDatasetSources(input: {
   return sources;
 }
 
-export async function refreshDatasetSource(datasetSourceId: string, opts?: { reconciliation?: boolean }) {
+/**
+ * `manual`/`acceptDrop`: rodada disparada pelo usuario (nao e "agendada": queda grande so marca SUSPECT; `acceptDrop` tambem aceita
+ * esvaziar a tabela). O worker chama so com `reconciliation`; a marca de uso unico gravada por `queueSourceRefresh` (source-options)
+ * leva o resto ate aqui sem depender do payload do job.
+ */
+export async function refreshDatasetSource(datasetSourceId: string, opts?: { reconciliation?: boolean; manual?: boolean; acceptDrop?: boolean }) {
   const reconciliation = !!opts?.reconciliation;
   const source = await prisma.datasetSource.findUnique({
     where: { id: datasetSourceId },
@@ -448,11 +469,16 @@ export async function refreshDatasetSource(datasetSourceId: string, opts?: { rec
   const keysTable = `cw_keys_${idPrefix}`;
 
   let leaseLost = false;
+  // Falhas de renovacao SEGUIDAS: se ficarmos sem renovar por metade do prazo de takeover, outra rodada vai assumir a trava
+  // (e a tabela intermediaria e do novo dono): tratamos como trava perdida em vez de continuar escrevendo (M3).
+  let heartbeatFailures = 0;
+  const maxHeartbeatFailures = Math.max(2, Math.floor((settings.staleLeaseMinutes * 60_000) / LEASE_HEARTBEAT_MS / 2));
   const heartbeat = setInterval(() => {
     prisma.datasetSource.updateMany({
       where: { id: source.id, lastStatus: "running", lastError: lease },
       data: { lastStatus: "running", updatedAt: new Date() },
-    }).then(r => { if (r.count === 0) leaseLost = true; }).catch(() => undefined);
+    }).then(r => { heartbeatFailures = 0; if (r.count === 0) leaseLost = true; })
+      .catch(() => { if (++heartbeatFailures >= maxHeartbeatFailures) leaseLost = true; });
   }, LEASE_HEARTBEAT_MS);
   heartbeat.unref?.();
   const assertLease = () => {
@@ -460,6 +486,11 @@ export async function refreshDatasetSource(datasetSourceId: string, opts?: { rec
   };
 
   try {
+    // Opcoes por fonte (M4/H3) e marca de uso unico desta rodada (manual / reconciliacao de escalada).
+    const options: SourceOptions = await getSourceOptions(source.id);
+    const marker: RunMarker = await takeRunMarker(source.id, reconciliation);
+    if (opts?.manual) marker.manual = true;
+    if (opts?.acceptDrop) marker.acceptDrop = true;
     // ── Estrutura da origem x catalogo (FON-11/15) e resolucao de colunas (FON-14) ──────────────────────────────────────
     const rawColumns: SourceColumn[] = source.sourceKind === "table"
       ? (isMssql ? await tableColumnsMssql(source.connection, source.sourceSchema!, source.sourceTable!) : await tableColumns(source.connection, source.sourceSchema!, source.sourceTable!))
@@ -528,14 +559,16 @@ export async function refreshDatasetSource(datasetSourceId: string, opts?: { rec
     const tracker = new WatermarkTracker(kind, cap);
     const deltaIdx = trackDelta ? columns.findIndex(c => c.sqlName === deltaCol!.sqlName) : -1;
     const STREAM_BATCH = 1000;
+    const rowConverter = makeRowConverter(columns, options);
     for await (const rows of (isMssql ? streamMssqlRows(source.connection, query, STREAM_BATCH) : streamPostgresRows(source.connection, query, STREAM_BATCH))) {
       assertLease();
-      const bulkRows = rows.map(row => columns.map(c => convertSourceValue(row[c.originalName], c.sqlType, { column: c.sqlName, legacyRound: c.legacyRound })));
+      const bulkRows = rows.map(row => rowConverter.convertRow(row));
       if (deltaIdx >= 0) for (const r of bulkRows) { const v = r[deltaIdx]; tracker.push(v == null ? null : normalizeWatermark(v, kind)); }
       await storageConn.bulkInsert(schema, stage, stageCols, bulkRows);
       rowCount += BigInt(rows.length);
     }
     assertLease();
+    notes.push(...rowConverter.notes());
 
     // Nova marca (do valor CRU lido, nao de Date do storage): nunca recua e nunca passa do limite do relogio da origem.
     let newDeltaValue: string | null | undefined = undefined;
@@ -564,7 +597,12 @@ export async function refreshDatasetSource(datasetSourceId: string, opts?: { rec
     const fullState = fullSnapshot || !useKeyMerge;
     if (fullState && hasTarget) {
       const prevRows = await livePrevRows(storageConn, schema, table, Number(source.lastRowCount ?? 0n));
-      const evaluation: Evaluation = evaluateLoad({ kind: "source", fullState: true, parsedRows: Number(rowCount), prevRows, scheduled: true }, await getIntegritySettings());
+      // Politica desta rodada (H3): manual nao e "agendada" (queda grande so marca SUSPECT); consulta com janela e sem chave nao tem
+      // como saber o tamanho "normal" (virada de mes, resultado legitimamente vazio): publica e marca SUSPECT; override por fonte
+      // (allowEmpty/maxDropPct) e a queda ja medida pela verificacao de chaves (reconciliacao de escalada). Tabela sem override:
+      // protecao integral, como sempre.
+      const eff = effectiveIntegrity(await getIntegritySettings(), options, marker, { keylessWindowedQuery: source.sourceKind === "query" && !keyCol && !reconciliation });
+      const evaluation: Evaluation = evaluateLoad({ kind: "source", fullState: true, parsedRows: Number(rowCount), prevRows, scheduled: eff.scheduled, softEmpty: eff.softEmpty }, eff.settings);
       if (evaluation.verdict === "FAILED") throw new IntegrityError(evaluation);
       if (evaluation.verdict === "SUSPECT") notes.push(`INTEGRITY_SUSPECT: ${evaluation.reasons.map(r => `${r.code}: ${r.message}`).join(" ")}`);
     }
@@ -576,6 +614,7 @@ export async function refreshDatasetSource(datasetSourceId: string, opts?: { rec
         || Date.now() - source.lastKeysCheckAt.getTime() >= source.keysMinIntervalMinutes * 60_000);
     let keysWarning: string | null = null;
     let keysApplied = false;
+    let keysMeasured: { live: number; candidates: number } | null = null; // o que a verificacao de chaves JA mediu nesta rodada
     let swapKeys: { keysTable: string; keysBefore: Date } | null = null;
     let swap: { marked: number };
     try {
@@ -598,6 +637,7 @@ export async function refreshDatasetSource(datasetSourceId: string, opts?: { rec
           // sem a contagem de guarda a marcacao nao e segura, entao pula so a marcacao e aplica o delta.
           try {
             const cnt = await storageConn.countMissingKeys(schema, table, keyStorage!, keysTable, startedAt);
+            keysMeasured = cnt;
             if (keysCheckExceeds(cnt, KEYS_CHECK_MAX_RATIO)) {
               keysWarning = `KEYS_CHECK_UNSAFE: deteccao de exclusoes ignorada: ${cnt.candidates} de ${cnt.live} linhas vivas seriam marcadas (limite ${Math.round(KEYS_CHECK_MAX_RATIO * 100)}%); nenhuma foi marcada (as linhas alteradas foram aplicadas)`;
             } else {
@@ -662,6 +702,11 @@ export async function refreshDatasetSource(datasetSourceId: string, opts?: { rec
     });
     // Escalada: dispara uma reconciliacao (leitura completa, marca exclusoes de verdade) quando ela e possivel e segura.
     if (escalated && escalateAfter > 0 && keysSkips % escalateAfter === 0 && (source.sourceKind === "table" || !!source.sourceSqlReconciliation?.trim())) {
+      // A reconciliacao enfileirada por escalada PODE apagar o que a verificacao de chaves ja mediu como ausente na origem: sem isso a
+      // barra de queda a bloqueava para sempre (deadlock: a verificacao pulava por "muitas exclusoes" e a reconciliacao era barrada por
+      // "queda grande"). Margem de 2 pontos; sem medicao nesta rodada, sem liberacao (a protecao segue ligada).
+      const measured = keysMeasured as { live: number; candidates: number } | null;
+      if (measured && measured.live > 0) await setRunMarker(source.id, { reconciliation: true, allowDropPct: (measured.candidates / measured.live) * 100 + 2 });
       await queueSourceRefresh(source.id, { reconciliation: true }).catch((e) => console.warn(`[source-refresh] nao foi possivel enfileirar a reconciliacao automatica source=${source.id}: ${e instanceof Error ? e.message : e}`));
     }
     // Livro de integridade: uma linha por rodada (esperado x lido x gravado x anterior). Nunca derruba a carga.
@@ -675,13 +720,15 @@ export async function refreshDatasetSource(datasetSourceId: string, opts?: { rec
     });
     return { rowCount: finalRowCount };
   } catch (e) {
-    await storageConn.dropTableIfExists(schema, stage).catch(() => undefined);
-    // Trava perdida: outra rodada e a dona do estado da fonte; nao sobrescreve o status dela.
+    // Trava perdida: outra rodada e a dona do estado da fonte E da tabela intermediaria (nome constante por fonte): nao mexe
+    // em nada dela (nem estado, nem staging) — antes o perdedor apagava a staging do novo dono (M3).
     if (leaseLost) throw e;
+    await storageConn.dropTableIfExists(schema, stage).catch(() => undefined);
     const message = e instanceof Error ? e.message : String(e);
     // A tentativa que falha também vai para o livro (com o motivo estruturado se for a barra de integridade) e, nesse caso, para a auditoria.
     const failedEntry = {
-      kind: "source" as const, outcome: "FAILED" as const, verdict: (e instanceof IntegrityError ? e.evaluation.verdict : "FAILED") as "FAILED" | "SUSPECT" | "OK",
+      kind: "source" as const, outcome: "FAILED" as const, // falha operacional (rede, timeout, 409): "ERROR", nao "FAILED" — a tabela anterior esta intacta e nao deve virar "possivelmente incompleta" (M1)
+      verdict: (e instanceof IntegrityError ? e.evaluation.verdict : "ERROR") as "FAILED" | "SUSPECT" | "OK" | "ERROR",
       datasetId: source.datasetId, tableId: source.targetTable?.id ?? null, sourceId: source.id, tableName: source.targetTable?.sqlName ?? null,
       mode: reconciliation ? "reconciliation" : "incremental", prevRows: Number(source.lastRowCount ?? 0n),
       detail: e instanceof IntegrityError ? evaluationDetail(e.evaluation) : { error: message.slice(0, 500) },

@@ -9,8 +9,8 @@ import { visibleProjectIds } from "@/server/auth/permissions";
 import { summarizeIntegrity } from "@/server/integrity/ledger";
 
 /** Campos de frescor de uma fonte/derivada (Prisma) no formato do apresentador. */
-function toRefreshInput(x: { mode?: string | null; active?: boolean | null; lastStatus: string | null; lastError: string | null; refreshCron: string | null; nextRefreshAt: Date | null; lastRefreshedAt: Date | null }): RefreshInput {
-  return { mode: x.mode ?? "extract", active: x.active ?? true, lastStatus: x.lastStatus, lastError: x.lastError, refreshCron: x.refreshCron, nextRefreshAt: x.nextRefreshAt?.toISOString() ?? null, lastRefreshedAt: x.lastRefreshedAt?.toISOString() ?? null };
+function toRefreshInput(x: { mode?: string | null; active?: boolean | null; lastStatus: string | null; lastError: string | null; refreshCron: string | null; nextRefreshAt: Date | null; lastRefreshedAt: Date | null; updatedAt?: Date | null }): RefreshInput {
+  return { mode: x.mode ?? "extract", active: x.active ?? true, lastStatus: x.lastStatus, lastError: x.lastError, refreshCron: x.refreshCron, nextRefreshAt: x.nextRefreshAt?.toISOString() ?? null, lastRefreshedAt: x.lastRefreshedAt?.toISOString() ?? null, updatedAt: x.updatedAt?.toISOString() ?? null };
 }
 export const dynamic = "force-dynamic";
 
@@ -29,8 +29,8 @@ export default async function DashboardPage() {
       datasets: {
         where: { active: true },
         include: {
-          tables: { select: { id: true, name: true, lastDataAt: true, source: { select: { mode: true, active: true, lastStatus: true, lastError: true, refreshCron: true, nextRefreshAt: true, lastRefreshedAt: true } } } },
-          derivedTables: { where: { active: true }, select: { targetTableId: true, active: true, lastStatus: true, lastError: true, refreshCron: true, nextRefreshAt: true, lastRefreshedAt: true } },
+          tables: { select: { id: true, name: true, lastDataAt: true, source: { select: { mode: true, active: true, lastStatus: true, lastError: true, refreshCron: true, nextRefreshAt: true, lastRefreshedAt: true, updatedAt: true } } } },
+          derivedTables: { where: { active: true }, select: { targetTableId: true, active: true, lastStatus: true, lastError: true, refreshCron: true, nextRefreshAt: true, lastRefreshedAt: true, updatedAt: true } },
         },
       },
     },

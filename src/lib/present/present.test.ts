@@ -112,6 +112,33 @@ describe("integridade e fila parada (estudo de confiabilidade)", () => {
   });
 });
 
+describe("M2: rodada longa saudavel nao e 'possivel travamento'", () => {
+  const NOW2 = new Date("2026-09-19T18:00:00Z");
+  it("running com batimento recente (renovado a cada minuto) nunca e atrasada, mesmo 90 min depois do previsto", () => {
+    const f = presentRefreshFreshness(src({ lastStatus: "running", nextRefreshAt: "2026-09-19T16:30:00Z", updatedAt: "2026-09-19T17:59:00Z" }), NOW2);
+    expect(f).toMatchObject({ kind: "running", label: "Atualizando" });
+  });
+  it("running sem batimento ha mais de 20 min = dono morto: atrasada", () => {
+    expect(presentRefreshFreshness(src({ lastStatus: "running", nextRefreshAt: "2026-09-19T17:50:00Z", updatedAt: "2026-09-19T17:30:00Z" }), NOW2).kind).toBe("stale");
+  });
+  it("running sem dado de batimento: so apos 2 h do previsto; fila continua em 30 min", () => {
+    expect(presentRefreshFreshness(src({ lastStatus: "running", nextRefreshAt: "2026-09-19T16:30:00Z" }), NOW2).kind).toBe("running"); // 90 min
+    expect(presentRefreshFreshness(src({ lastStatus: "running", nextRefreshAt: "2026-09-19T15:30:00Z" }), NOW2).kind).toBe("stale");   // 150 min
+    expect(presentRefreshFreshness(src({ lastStatus: "queued", nextRefreshAt: "2026-09-19T17:00:00Z" }), NOW2).kind).toBe("stale");     // 60 min
+    expect(presentRefreshFreshness(src({ lastStatus: "queued", nextRefreshAt: "2026-09-19T17:00:00Z", updatedAt: "2026-09-19T17:59:00Z" }), NOW2).kind).toBe("stale"); // fila ignora batimento
+  });
+});
+
+describe("M1b: pausada vem antes de suspeita", () => {
+  it("todas as origens inativas: Pausada, mesmo com veredito FAILED/SUSPECT", () => {
+    expect(presentTableFreshness({ lastDataAt: null, sources: [src({ active: false })], integrity: { verdict: "FAILED", reason: "x" } }, NOW).kind).toBe("paused");
+  });
+  it("origem ativa com veredito ruim continua suspeita; mista tambem", () => {
+    expect(presentTableFreshness({ lastDataAt: null, sources: [src()], integrity: { verdict: "SUSPECT", reason: null } }, NOW).kind).toBe("suspect");
+    expect(presentTableFreshness({ lastDataAt: null, sources: [src({ active: false }), src()], integrity: { verdict: "SUSPECT", reason: null } }, NOW).kind).toBe("suspect");
+  });
+});
+
 describe("presentRefreshFreshness", () => {
   it("em dia", () => expect(presentRefreshFreshness(src(), NOW)).toMatchObject({ kind: "ok", label: "Em dia", tone: "healthy" }));
   it("erro vence tudo e traz a mensagem", () => {

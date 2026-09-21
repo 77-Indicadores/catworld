@@ -49,6 +49,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       keysSql: z.string().nullable().optional(),
       keysMinIntervalMinutes: z.number().int().min(1).nullable().optional(),
       sourceGroupId: z.string().uuid().optional(),
+      onInvalid: z.enum(["null", "fail"]).optional(),
     }).parse(await request.json());
     await assertCanUseConnection(actor, input.connectionId, ds);
     assertValidCron(input.refreshCron, "refreshCron");

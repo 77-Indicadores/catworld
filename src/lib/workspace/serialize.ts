@@ -94,10 +94,11 @@ export function serializeWorkspaceProject(p: WorkspaceProjectRow, lastUploads: M
               lastRemovedCount: big(t.source.lastRemovedCount),
               lastStatus: t.source.lastStatus,
               lastRowCount: big(t.source.lastRowCount),
-              lastError: t.source.lastError,
+              lastError: t.source.lastError?.startsWith("lease:") ? null : t.source.lastError, // marcador interno da trava nao e erro
               active: t.source.active,
               lastRefreshedAt: iso(t.source.lastRefreshedAt),
               nextRefreshAt: iso(t.source.nextRefreshAt),
+              updatedAt: iso(t.source.updatedAt),
               connection: { id: t.source.connection.id, name: t.source.connection.name },
             }
           : null,
@@ -115,6 +116,7 @@ export function serializeWorkspaceProject(p: WorkspaceProjectRow, lastUploads: M
         lastError: dt.lastError,
         lastRefreshedAt: iso(dt.lastRefreshedAt),
         nextRefreshAt: iso(dt.nextRefreshAt),
+        updatedAt: iso(dt.updatedAt),
         targetTable: dt.targetTable ? { id: dt.targetTable.id, rowCount: String(dt.targetTable.rowCount), lastDataAt: iso(dt.targetTable.lastDataAt) } : null,
       })),
     })),

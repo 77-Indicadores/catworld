@@ -11,12 +11,15 @@ describe("marca d'agua", () => {
     expect(lowerBound("2026-01-01 00:05:00.123456", "temporal", 10)).toBe("2025-12-31 23:55:00.123456");
     expect(lowerBound("42", "integer", 10)).toBe("42");
   });
-  it("predicado usa >= (empates) e OR IS NULL (delta nulo), por dialeto", () => {
+  it("H4: o incremental usa >= (empates) e NAO le as linhas de delta nulo (re-carimbariam a tabela toda a cada rodada)", () => {
     expect(buildDeltaPredicate({ kind: "temporal", quotedColumn: '"upd"', watermark: "2026-01-01 10:00:00.5", dialect: "postgres", lookbackMinutes: 0 }))
-      .toBe(`("upd" >= '2026-01-01 10:00:00.5'::timestamp OR "upd" IS NULL)`);
+      .toBe(`("upd" >= '2026-01-01 10:00:00.5'::timestamp)`);
     expect(buildDeltaPredicate({ kind: "temporal", quotedColumn: "[upd]", watermark: "2026-01-01 10:10:00.000000", dialect: "mssql", lookbackMinutes: 10 }))
-      .toBe("([upd] >= CAST('2026-01-01T10:00:00.000000' AS DATETIME2(7)) OR [upd] IS NULL)");
-    expect(buildDeltaPredicate({ kind: "integer", quotedColumn: '"id"', watermark: "100", dialect: "postgres" })).toBe('("id" >= 100 OR "id" IS NULL)');
+      .toBe("([upd] >= CAST('2026-01-01T10:00:00.000000' AS DATETIME2(7)))");
+    expect(buildDeltaPredicate({ kind: "integer", quotedColumn: '"id"', watermark: "100", dialect: "postgres" })).toBe('("id" >= 100)');
+  });
+  it("includeNull (opt-in) volta a ler delta nulo", () => {
+    expect(buildDeltaPredicate({ kind: "integer", quotedColumn: '"id"', watermark: "100", dialect: "postgres", includeNull: true })).toBe('("id" >= 100 OR "id" IS NULL)');
   });
   it("texto escapa aspas", () => {
     expect(buildDeltaPredicate({ kind: "text", quotedColumn: '"v"', watermark: "o'brien", dialect: "postgres", lookbackMinutes: 0 })).toContain("'o''brien'");
