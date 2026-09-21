@@ -56,5 +56,8 @@ export function mssqlPhysicalToCanonical(r: { type_name: string; precision?: num
   if (t === "date") return "DATE";
   if (["datetime2", "datetime", "smalldatetime"].includes(t)) return "DATETIME2";
   if (t === "time") return "TIME";
-  return "NVARCHAR(MAX)";
+  if (["nvarchar", "varchar", "nchar", "char", "text", "ntext"].includes(t)) return "NVARCHAR(MAX)";
+  // Outra familia (float, bit, uniqueidentifier, binario, xml...): tipo opaco que nao e igual a nenhum tipo do arquivo. Antes virava texto,
+  // e texto aceita qualquer coisa: um append num FLOAT/BIT passava pela checagem.
+  return `MSSQL:${t}`;
 }

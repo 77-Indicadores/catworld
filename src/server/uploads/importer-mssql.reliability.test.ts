@@ -200,6 +200,19 @@ d("import SQL Server: atomicidade, integridade e fidelidade (real)", () => {
     expectRows(await rows("t_retry"), 4000, "v2");           // antes: publicava as 50 linhas parciais
   }, 180_000);
 
+  it("TIPOS (#13): append numa coluna FLOAT/BIT (outra familia) e recusado, nao tratado como texto", async () => {
+    await pool.request().query(`CREATE TABLE ${q("t_float")} (id BIGINT NULL, nome NVARCHAR(MAX) NULL, valor FLOAT NULL)`);
+    await pool.request().query(`INSERT INTO ${q("t_float")} VALUES (1,'a',1.5)`);
+    await expect(run(file("k1.csv", 3, "v", 10), "t_float", "append")).rejects.toThrow(/Tipos incompatíveis/);
+    expect(await count("t_float")).toBe(1);
+  }, 120_000);
+
+  it("TIPOS (#13): append de arquivo SO com cabecalho numa tabela tipada passa (mesma excecao do Postgres)", async () => {
+    await run(file("k2.csv", 5, "v1"), "t_hdr");
+    await run(file("k3.csv", 0, "v2"), "t_hdr", "append");
+    expect(await count("t_hdr")).toBe(5);
+  }, 120_000);
+
   it("LEDGER: cada tentativa fica registrada com o veredito", async () => {
     const r = (await prisma.$queryRawUnsafe<{ outcome: string; verdict: string }[]>(
       `SELECT outcome, verdict FROM cw_load_ledger WHERE dataset_id = $1::uuid AND table_name = 't_integ' ORDER BY created_at`, datasetId));

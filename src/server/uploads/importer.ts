@@ -3,7 +3,7 @@ import { physicalDecimal, parseDecimalType, DECIMAL_LEGACY } from "@/lib/decimal
 import { IntegrityError, evaluateLoad, getIntegritySettings, type Evaluation } from "@/server/integrity/policy";
 import { auditIntegrity, evaluationDetail, ledgerInsert, recordLedger } from "@/server/integrity/ledger";
 import { MSSQL_MARKER_DDL, MSSQL_MARKER_INSERT, MSSQL_MARKER_SELECT } from "./applied-marker";
-import { canonicalAccepts, incompatibleColumns, incompatibleMessage, mssqlPhysicalToCanonical } from "./type-compat";
+import { canonicalAccepts, incompatibleColumns, incompatibleError, mssqlPhysicalToCanonical } from "./type-compat";
 import { isInternalColumn } from "@/server/storage/connection";
 import { extname } from "node:path";
 import sql from "mssql";
@@ -276,7 +276,9 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
 
     // Validate schema compatibility BEFORE creating staging — fail fast on bad append/upsert
     if ((upload.mode === "append" || upload.mode === "upsert") && targetExists) {
-      await assertCompatible(pool.request(), schema, tableName, mapping);
+      // Arquivo so com cabecalho nao tem valores para estreitar nada: os tipos inferidos dele (tudo texto) nao valem (igual ao Postgres).
+      const headerOnly = !!upload.previewJson && (JSON.parse(upload.previewJson) as FilePreview).rowCount === 0;
+      await assertCompatible(pool.request(), schema, tableName, mapping, headerOnly);
     }
 
     const hasDeltaCol = targetExists && await checkHasDeltaCol(pool, schema, tableName);
@@ -686,7 +688,7 @@ async function schemaMatchesSilent(pool: sql.ConnectionPool, schema: string, tab
   } catch { return false; }
 }
 
-async function assertCompatible(request: sql.Request, schema: string, table: string, columns: ParsedColumn[]) {
+export async function assertCompatible(request: sql.Request, schema: string, table: string, columns: ParsedColumn[], headerOnly = false) {
   const result = await request
     .input("schema", sql.NVarChar, schema)
     .input("table", sql.NVarChar, table)
@@ -696,8 +698,9 @@ async function assertCompatible(request: sql.Request, schema: string, table: str
   const expected = columns.map(c => c.sqlName);
   if (JSON.stringify(actual) !== JSON.stringify(expected))
     throw new Error(`Schema incompatível. Esperado: ${expected.join(", ")}; atual: ${actual.join(", ")}`);
-  if (!actualRows.every((r, i) => physicalTypeMatches(r, columns[i]!.sqlType)))
-    throw new Error("Schema incompatível: tipos da tabela atual diferem do arquivo");
+  if (headerOnly) return;
+  const bad = incompatibleColumns(actualRows.map(r => ({ name: r.name, sqlType: mssqlPhysicalToCanonical(r) })), columns);
+  if (bad.length) throw incompatibleError(bad);
 }
 
 function physicalTypeMatches(row: { type_name: string; precision?: number; scale?: number }, expected: string) {
