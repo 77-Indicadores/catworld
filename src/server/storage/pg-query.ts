@@ -58,6 +58,8 @@ export async function executeReadOnlyPg(
   truncated: boolean;
   executionTimeMs: number;
   legacyFormatColumns?: string[];
+  /** Tipo logico de cada coluna (exportacao XLSX: BIGINT/DECIMAL como numero quando exato). */
+  columnKinds?: Record<string, ColumnKind>;
   /** Avisos de entrega (ex.: paginacao sem ordem estavel). */
   warnings?: string[];
 }> {
@@ -184,6 +186,7 @@ export async function executeReadOnlyPg(
       rowCount: limitedRows.length,
       truncated: rows.length > effectiveLimit,
       ...(normalize || legacyCols.length === 0 ? {} : { legacyFormatColumns: legacyCols }),
+      columnKinds: kinds,
       ...(warnings.length > 0 ? { warnings } : {}),
       executionTimeMs: Date.now() - started,
     };
