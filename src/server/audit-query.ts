@@ -49,6 +49,7 @@ export const AUDIT_EVENT_LABELS: Record<string, string> = {
   QUERY_EXECUTED: "Consulta SQL",
   SQL_CONTRACT_MODE_CHANGED: "Modo do contrato SQL alterado",
   UPLOAD_IMPORT_PERF: "Importação de upload",
+  INTEGRITY_SETTINGS_CHANGED: "Política de integridade de cargas alterada",
   DATA_INTEGRITY_SUSPECT: "Carga barrada ou suspeita de estar incompleta",
   UPLOAD_FILE_DOWNLOADED: "Download do arquivo original de um upload",
   WORKER_STARTED: "Worker iniciado",
