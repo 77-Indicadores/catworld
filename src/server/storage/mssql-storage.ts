@@ -3,7 +3,7 @@
  * Thin wrapper em volta do pool existente de pool.ts.
  */
 
-import { physicalDecimal } from "@/lib/decimal-type";
+import { DECIMAL_LEGACY, parseDecimalType, physicalDecimal } from "@/lib/decimal-type";
 import sql from "mssql";
 import { CW_SYNCED_AT, CW_DELETED_AT, type ColDef, type ColInfo, type StorageConnection } from "./connection";
 import { absentFromStaging, carryPlan, missingKeysWhere } from "./delete-detection";
@@ -66,6 +66,20 @@ function mssqlToCanonical(r: {
   return "NVARCHAR(MAX)";
 }
 
+/** Colunas carregadas como texto exato: BIGINT, DECIMAL com mais de 15 digitos (limite de exatidao de Number) e datas/horas. */
+const TEXT_LOADED_RE: Record<string, RegExp> = {
+  BIGINT: /^-?\d{1,19}$/,
+  DECIMAL: /^-?\d+(?:\.\d+)?$/,
+  DATE: /^\d{4}-\d{2}-\d{2}$/,
+  DATETIME2: /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?$/,
+  TIME: /^\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?$/,
+};
+function textLoaded(sqlType: string): boolean {
+  if (sqlType === "BIGINT" || sqlType === "DATE" || sqlType === "DATETIME2" || sqlType === "TIME") return true;
+  const d = parseDecimalType(sqlType);
+  return !!d && d.precision > 15;
+}
+
 // ─── Quoting ──────────────────────────────────────────────────────────────────
 
 function mssqlQuote(name: string): string {
@@ -77,6 +91,11 @@ const setRequestTimeout = (req: sql.Request, ms: number) => {
 };
 
 const esc = (s: string) => s.replaceAll("'", "''");
+
+/** Indice em cw_synced_at (base de `rows?since=`). Nome constante e valido: o indice pertence a tabela e acompanha o sp_rename dela. */
+const syncedAtIndexSql = (schema: string, table: string) =>
+  `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id=OBJECT_ID(N'${esc(schema)}.${esc(table)}') AND name=N'IX_cw_synced_at')
+     CREATE NONCLUSTERED INDEX [IX_cw_synced_at] ON ${mssqlQuote(schema)}.${mssqlQuote(table)} (${mssqlQuote(CW_SYNCED_AT)})`;
 
 // ─── Pool cache ───────────────────────────────────────────────────────────────
 
@@ -228,25 +247,32 @@ export class MssqlStorageConnection implements StorageConnection {
     const bulk = new sql.Table(`${schema}.${table}`);
     bulk.create = false;
 
-    for (const c of cols) {
+    // Tudo que precisa de exatidao entra como TEXTO e o proprio SQL Server converte para o tipo da coluna (o driver tedious passaria por
+    // Number/Date: DECIMAL > 15 digitos e BIGINT > 2^53 perderiam precisao, e "YYYY-MM-DD HH:MM:SS.ffffff" seria lido no fuso local e
+    // truncado a milissegundos). Valor que nao cabe no tipo faz o bulk FALHAR (nunca arredonda). Ver B1/M6.
+    const asText = cols.map((c) => textLoaded(c.sqlType));
+    cols.forEach((c, j) => {
       const t = c.sqlType;
       let sqlType: sql.ISqlType | (() => sql.ISqlType);
-      if (t === "BIGINT") sqlType = sql.BigInt;
-      else if (t.startsWith("DECIMAL")) sqlType = sql.Decimal(18, 4);
-      else if (t === "DATE") sqlType = sql.Date;
-      else if (t === "DATETIME2") sqlType = sql.DateTime2(7);
-      else if (t === "TIME") sqlType = sql.Time(7);
+      if (asText[j]) sqlType = sql.NVarChar(64);
+      else if (t.startsWith("DECIMAL")) { const s = parseDecimalType(t) ?? DECIMAL_LEGACY; sqlType = sql.Decimal(s.precision, s.scale); }
       else sqlType = sql.NVarChar(sql.MAX);
-      bulk.columns.add(c.name, sqlType, { nullable: true });
-    }
+      bulk.columns.add(c.name, sqlType, { nullable: c.nullable !== false });
+    });
 
     for (const row of rows) {
       bulk.rows.add(...cols.map((c, j) => {
         const v = row[j];
         if (v == null) return null;
-        const s = String(v);
-        if (c.sqlType === "BIGINT") return s ? parseInt(s, 10) : null;
-        if (c.sqlType.startsWith("DECIMAL")) return s ? parseFloat(s) : null;
+        const s = v instanceof Date ? v.toISOString().replace("T", " ").replace("Z", "") : String(v);
+        if (asText[j]) {
+          if (s === "") return null;
+          if (!TEXT_LOADED_RE[c.sqlType === "BIGINT" ? "BIGINT" : c.sqlType.startsWith("DECIMAL") ? "DECIMAL" : c.sqlType].test(s)) {
+            throw new Error(`Valor invalido para ${c.name} (${c.sqlType}): ${s.slice(0, 40)}`);
+          }
+          return s;
+        }
+        if (c.sqlType.startsWith("DECIMAL")) return s ? Number(s) : null;
         return s;
       }) as Parameters<typeof bulk.rows.add>);
     }
@@ -310,6 +336,7 @@ export class MssqlStorageConnection implements StorageConnection {
         `IF COL_LENGTH('${esc(schema)}.${esc(staging)}', '${esc(CW_SYNCED_AT)}') IS NULL
          ALTER TABLE ${qStg} ADD ${qSyncedAt} DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(), ${qDeletedAt} DATETIME2 NULL`,
       );
+      { const ix = p.request(); setReqTimeout(ix, 7_200_000); await ix.query(syncedAtIndexSql(schema, staging)); }
       // ── fullSwap: DROP target + RENAME staging → target (transação breve) ──────
       const tx = new sql.Transaction(p);
       await tx.begin();
@@ -418,6 +445,8 @@ export class MssqlStorageConnection implements StorageConnection {
       await insReq.query(
         `INSERT INTO ${qMgd} (${colListWithMeta}) SELECT ${colList}, SYSUTCDATETIME(), NULL FROM ${qStg} OPTION (MAXDOP 1)`,
       );
+
+      { const ix = p.request(); setReqTimeout(ix, 7_200_000); await ix.query(syncedAtIndexSql(schema, mergedName)); }
 
       // Transação breve: DROP target + RENAME merged → target (~ms de lock)
       const tx = new sql.Transaction(p);
