@@ -1,6 +1,7 @@
 import { buildClaimSql } from "./claim";
 import { isSourceBusyError } from "./source-failure";
 import { getUploadFilesDays, purgeExpiredUploadFiles } from "@/server/uploads/file-retention";
+import { releaseAllImportLocks } from "@/server/db/import-lock";
 import { createWriteStream } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
@@ -47,8 +48,10 @@ function onTerminate() {
   state.stopping = true;
   if (terminating) return;
   terminating = true;
-  void releaseSelf()
-    .catch((e) => console.error("[worker] releaseSelf no encerramento falhou: %s", e instanceof Error ? e.message : e))
+  // Encerramento LIMPO (deploy/reinício): devolve o job com a tentativa reembolsada (não foi falha do job) e libera as travas de import
+  // deste processo na hora, para o próximo dono não esperar o lease expirar (docs/estudo-confiabilidade-dados.md, MOT-10).
+  void Promise.allSettled([releaseSelf(true), releaseAllImportLocks()])
+    .then((rs) => { for (const x of rs) if (x.status === "rejected") console.error("[worker] liberação no encerramento falhou: %s", x.reason instanceof Error ? x.reason.message : x.reason); })
     .finally(() => process.exit(0));
 }
 process.on("SIGTERM", onTerminate);
@@ -644,7 +647,8 @@ async function loop(concurrencyId: number) {
   }
 }
 
-async function releaseSelf() {
+/** `refund`: encerramento limpo devolve a tentativa (não é falha do job); após uma queda (startup) NÃO devolve, para um job que derruba o worker não rodar para sempre. */
+async function releaseSelf(refund = false) {
   const workerId = profile.name;
   const concurrency = profile.concurrency;
   // Match worker-N-1@hostname, worker-N-2@hostname, etc. Parametrizado; '_' e '%' do id nao viram curinga do LIKE.
@@ -653,10 +657,12 @@ async function releaseSelf() {
   const likes = labels.map((_, i) => `${escaped}-${i + 1}@%`);
   const released = await prisma.$executeRawUnsafe(
     `UPDATE cw_jobs
-     SET status='QUEUED', locked_at=NULL, locked_by=NULL, heartbeat_at=NULL, available_at=NOW()
+     SET status='QUEUED', locked_at=NULL, locked_by=NULL, heartbeat_at=NULL, available_at=NOW(),
+         attempts = CASE WHEN $3::boolean THEN GREATEST(attempts - 1, 0) ELSE attempts END
      WHERE status='RUNNING' AND (locked_by LIKE ANY($1::text[]) OR locked_by = ANY($2::text[]))`,
     likes,
     labels,
+    refund,
   );
   if (released > 0) console.log(`[worker] startup: ${released} job(s) do worker anterior liberados`);
 }

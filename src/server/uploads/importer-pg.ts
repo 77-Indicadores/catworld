@@ -15,7 +15,7 @@ import { extname } from "node:path";
 import { createHash } from "node:crypto";
 import { prisma } from "@/server/db";
 import { withAdvisoryLock } from "@/server/db/advisory-lock";
-import { withImportLock } from "@/server/db/import-lock";
+import { withImportLock, type Lease } from "@/server/db/import-lock";
 import { sqlIdentifier } from "@/server/security/naming";
 import { previewFile, rowsFromFile, type FilePreview, type ParsedColumn, type RowsFromFileOpts } from "./parser";
 import { normalizeDateLike } from "./date-normalize";
@@ -163,13 +163,14 @@ export async function importUploadPg(
   });
   if (!pre.dataset) throw new Error("Dataset não definido");
   const lockTable = pre.table?.sqlName ?? sqlIdentifier(pre.originalFilename.replace(/.[^.]+$/, ""));
-  return withImportLock(`${pre.dataset.id}:${pre.dataset.schemaName}.${lockTable}`, () => importUploadPgLocked(uploadId, source, conn));
+  return withImportLock(`${pre.dataset.id}:${pre.dataset.schemaName}.${lockTable}`, (lease) => importUploadPgLocked(uploadId, source, conn, lease));
 }
 
 async function importUploadPgLocked(
   uploadId: string,
   source: string | NodeJS.ReadableStream,
   conn: PgStorageConnection,
+  lease: Lease,
 ) {
   const importStarted = Date.now();
 
@@ -297,6 +298,9 @@ async function importUploadPgLocked(
     }
     if (evaluation.verdict === "SUSPECT") console.warn("[importUploadPg:integrity] SUSPECT upload=%s %s", uploadId, JSON.stringify(evaluation.reasons));
   }
+
+  // Ainda sou o dono do lock? Se o lease se perdeu, outro import pode ter mexido na tabela: abortar ANTES de publicar.
+  lease.assert();
 
   if (reclassifiedCols.length) {
     console.warn("[importUploadPg] colunas reclassificadas BIGINT→NVARCHAR por overflow 64-bit: %s upload=%s",

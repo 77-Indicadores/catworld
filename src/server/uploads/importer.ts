@@ -8,7 +8,7 @@ import { extname } from "node:path";
 import sql from "mssql";
 import { prisma } from "@/server/db";
 import { withAdvisoryLock } from "@/server/db/advisory-lock";
-import { withImportLock } from "@/server/db/import-lock";
+import { withImportLock, type Lease } from "@/server/db/import-lock";
 import { sqlPool } from "@/server/azure/sql";
 import { getStoragePool } from "@/server/storage/pool";
 import { getStorageConnection, type ColDef } from "@/server/storage/connection";
@@ -275,7 +275,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
   // que normalmente levam <2min.
   return withImportLock(`${upload.dataset.id}:${schema}.${tableName}`, importUploadForTable);
 
-  async function importUploadForTable() {
+  async function importUploadForTable(lease: Lease) {
     const stage = `cw_stage_${upload.id.replaceAll("-", "").slice(0, 20)}`;
     const pool = await getStoragePool(upload.dataset!.storageServerId);
     // StorageConnection reutiliza o mesmo pool interno (singleton por storageServerId)
@@ -432,6 +432,9 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
           }
           if (evaluation.verdict === "SUSPECT") console.warn("[importUpload:integrity] SUSPECT upload=%s %s", uploadId, JSON.stringify(evaluation.reasons));
         }
+
+        // Ainda sou o dono do lock? Se o lease se perdeu, outro import pode ter mexido na tabela: abortar ANTES de publicar.
+        lease.assert();
 
         const mappingWithRh: ColDef[] = [
           ...mapping.map(c => ({ name: c.sqlName, sqlType: c.sqlType, nullable: true })),
