@@ -62,6 +62,16 @@ export async function* rowsFromCsvDuckDB(
     return positions[used] ?? fallbackIdx;
   });
 
+  // PRÉ-VOO: conta as linhas com uma leitura que materializa só o escalar (memória mínima) e, ao contrário do stream, LANÇA o erro
+  // real do DuckDB. Motivo (reproduzido): em @duckdb/node-api 1.5.x o stream/for-await/fetchChunk/yieldRowsJs TERMINAM em silêncio
+  // no primeiro chunk com erro (ex.: uma linha com coluna a mais na linha 60.000 de 100.000 devolvia 59.392 linhas, sem erro) e o
+  // import ficava COMPLETED com linhas faltando (visto em produção: 45.056 de 49.022, todo dia). Aqui, se o DuckDB não consegue ler
+  // o arquivo INTEIRO, o erro sobe ANTES de qualquer linha ser entregue, e rowsFromFile cai no csv-parse (leniente) sem duplicar.
+  const expected = Number((await conn.runAndReadAll(
+    `SELECT count(*) FROM read_csv_auto('${safeFilePath}', ${csvOpts})`,
+  )).getRows()[0]![0]);
+
+  let yielded = 0;
   try {
     // all_varchar=true: return raw strings, no type casting — same as csv-parse behaviour.
     // Without this, DuckDB converts "10.50" → 10.5 and dates to ISO, breaking downstream logic.
@@ -80,7 +90,13 @@ export async function* rowsFromCsvDuckDB(
           obj[columns[i]!.sqlName] = val == null ? null : String(val);
         }
         yield obj;
+        yielded++;
       }
+    }
+    // Trava final: o que foi entregue tem de ser exatamente o que o pré-voo contou. Lançar aqui (com linhas já entregues) NÃO cai
+    // no csv-parse — ver rowsFromFile: erro depois da 1ª linha é fatal, para nunca duplicar nem gravar tabela incompleta.
+    if (yielded !== expected) {
+      throw new Error(`[integrity] DuckDB entregou ${yielded} de ${expected} linhas do CSV (leitura interrompida); import abortado para não gravar dados incompletos`);
     }
   } finally {
     conn.closeSync();

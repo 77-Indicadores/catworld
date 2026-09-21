@@ -172,6 +172,16 @@ function xlsxColumnIndices(headers:string[],columns:ParsedColumn[]){
 
 // P0: Accept stream in addition to file path — avoids re-downloading blob for import step.
 // When source is a stream, opts.encoding + opts.separator + opts.ext are required for CSV.
+/** Erro do DuckDB DEPOIS de já ter entregue linhas: fatal (nunca cai no csv-parse, que recomeçaria do zero e duplicaria as linhas). */
+class DuckDbMidStreamError extends Error{constructor(cause:unknown){super(cause instanceof Error?cause.message:String(cause));this.name="DuckDbMidStreamError";(this as {cause?:unknown}).cause=cause}}
+
+/** Só o erro ANTES da 1ª linha permite o fallback para o csv-parse; depois disso vira DuckDbMidStreamError. */
+async function* neverFallBackMidStream<T>(gen:AsyncGenerator<T>):AsyncGenerator<T>{
+ let started=false;
+ try{for await(const row of gen){started=true;yield row}}
+ catch(e){throw started?new DuckDbMidStreamError(e):e}
+}
+
 export async function* rowsFromFile(
  source:string|NodeJS.ReadableStream,
  columns:ParsedColumn[],
@@ -198,10 +208,11 @@ export async function* rowsFromFile(
      const{rowsFromCsvDuckDB}=await import("./parser-duckdb");
      if(stats)stats.parseMethod="duckdb";
      const t0=Date.now();
-     yield* rowsFromCsvDuckDB(tmpFile,columns);
+     yield* neverFallBackMidStream(rowsFromCsvDuckDB(tmpFile,columns));
      usedDuckDB=true;
      if(stats)stats.parseMs=Date.now()-t0;
     }catch(e){
+     if(e instanceof DuckDbMidStreamError)throw e; // já entregou linhas: cair no csv-parse duplicaria tudo
      if(!usedDuckDB){if(stats){stats.parseMethod="csv-parse";stats.fallbackReason=`duckdb-failed: ${e instanceof Error?e.message.slice(0,200):String(e)}`}console.warn("[parser] DuckDB (non-UTF8 transcoded) falhou, usando csv-parse:",e instanceof Error?e.message:e);}
      else throw e;
     }finally{
@@ -213,10 +224,11 @@ export async function* rowsFromFile(
      const{rowsFromCsvDuckDB}=await import("./parser-duckdb");
      if(stats)stats.parseMethod="duckdb";
      const t0=Date.now();
-     yield* rowsFromCsvDuckDB(source,columns);
+     yield* neverFallBackMidStream(rowsFromCsvDuckDB(source,columns));
      if(stats)stats.parseMs=Date.now()-t0;
      return;
     }catch(e){
+     if(e instanceof DuckDbMidStreamError)throw e; // já entregou linhas: cair no csv-parse duplicaria tudo
      console.warn("[parser] DuckDB falhou, usando csv-parse como fallback:",e instanceof Error?e.message:e);
      if(stats){stats.parseMethod="csv-parse";stats.fallbackReason=`duckdb-failed: ${e instanceof Error?e.message.slice(0,200):String(e)}`}
     }
