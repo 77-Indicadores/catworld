@@ -3,6 +3,7 @@ import { buildClaimSql } from "./claim";
 import { isSourceBusyError } from "./source-failure";
 import { getUploadFilesDays, purgeExpiredUploadFiles } from "@/server/uploads/file-retention";
 import { releaseAllImportLocks } from "@/server/db/import-lock";
+import { deleteInBatches } from "@/server/db/batched-delete";
 import { runWithCancelToken, watchJobStatus } from "@/server/db/job-cancel";
 import { createWriteStream } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -133,15 +134,9 @@ async function runMetadataCleanup() {
     const uploadsDays  = pickInt(cfg["retention.uploads_days"], 30, 1, 3650);
     const versionsKeep = pickInt(cfg["retention.dataset_versions_keep"], 10, 1, 1000);
 
-    const deletedJobs = await prisma.$executeRawUnsafe(
-      `DELETE FROM cw_jobs WHERE status IN ('COMPLETED','FAILED') AND created_at < NOW() - ($1 || ' days')::INTERVAL`,
-      String(jobsDays),
-    );
-
-    const deletedAudit = await prisma.$executeRawUnsafe(
-      `DELETE FROM cw_audit_events WHERE created_at < NOW() - ($1 || ' days')::INTERVAL`,
-      String(auditDays),
-    );
+    // Em lotes (um DELETE único de 1,5M linhas levava ~29 s de uma vez: locks, pico de WAL e risco de statement_timeout).
+    const deletedJobs = await deleteInBatches("cw_jobs", `status IN ('COMPLETED','FAILED') AND created_at < NOW() - ($1 || ' days')::INTERVAL`, [String(jobsDays)]);
+    const deletedAudit = await deleteInBatches("cw_audit_events", `created_at < NOW() - ($1 || ' days')::INTERVAL`, [String(auditDays)]);
 
     // Fetch blobNames before deleting so we can clean up the files on disk.
     const expiredUploads = await prisma.$queryRawUnsafe<{ blob_name: string }[]>(
