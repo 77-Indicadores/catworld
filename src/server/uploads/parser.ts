@@ -244,6 +244,10 @@ export async function* rowsFromFile(
    if(hints.mixedEol){
     // CRLF, LF e CR no mesmo arquivo: o csv-parse trata os tres como fim de registro; o DuckDB nao e usado (nao pode fundir registros)
     if(stats){stats.parseMethod="csv-parse";stats.fallbackReason="mixed-eol"}
+   }else if(hints.headerFields.length===1){
+    // UMA coluna: o DuckDB devolve a linha em branco como registro NULL (com 2+ colunas ele a pula) e nao distingue `""` de linha em branco.
+    // Linha em branco nao e registro (o preview e o csv-parse a ignoram; `""` e registro): o csv-parse decide por arquivo.
+    if(stats){stats.parseMethod="csv-parse";stats.fallbackReason="single-column"}
    }else if(fileEncoding!=="utf8"){
     const tmpDir=await mkdtemp(join(tmpdir(),"cw-duckdb-"));
     const tmpFile=join(tmpDir,"converted.csv");
