@@ -40,6 +40,8 @@ describe("aritmetica de microssegundos", () => {
   it("normTs", () => {
     expect(normTs("2026-09-19 10:00:00.1234567")).toBe("2026-09-19 10:00:00.123456");
     expect(normTs("nao")).toBeNull();
+    expect(normTs("2026-09-19T10:00:00.123456Z")).toBe("2026-09-19 10:00:00.123456");
+    expect(normTs("2026-09-19T10:00:00+03:00")).toBeNull();
   });
 });
 

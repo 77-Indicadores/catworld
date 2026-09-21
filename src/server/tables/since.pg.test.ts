@@ -1,7 +1,7 @@
 /** SQL do `since` executado em Postgres real. So roda com CW_TEST_PG_URL (descartavel — NUNCA producao). */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Pool } from "pg";
-import { decodeCursor, finalizeNextSince, parseSince, PG_NOW_TXT_SQL, pgRemovedSql, pgRowsPageSql, shapeRowsPage, settleFirstPage, type PageRow } from "./since";
+import { decodeCursor, finalizeNextSince, normTs, parseSince, PG_NOW_TXT_SQL, pgRemovedSql, pgRowsPageSql, shapeRowsPage, settleFirstPage, type PageRow } from "./since";
 
 const url = process.env.CW_TEST_PG_URL;
 const d = url ? describe : describe.skip;
@@ -97,5 +97,13 @@ d("since (executando)", () => {
   it("exclusoes: todas, sem o teto do limit, ordenadas", async () => {
     const r = await q(pgRemovedSql({ qTarget: base.qTarget, qDeleted: base.qDeleted, qKey: base.qKey, sinceLit: base.sinceLit }));
     expect(r.map((x) => Number((x as unknown as { k: string }).k))).toEqual([8001, 8002, 8003, 8004]);
+  });
+
+  it("exclusoes: `d` e ISO com Z (seguro para new Date) e normTs o entende", async () => {
+    const r = await q(pgRemovedSql({ qTarget: base.qTarget, qDeleted: base.qDeleted, qKey: base.qKey, sinceLit: base.sinceLit }));
+    const d = String((r[0] as unknown as { d: string }).d);
+    expect(d).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/);
+    expect(Number.isNaN(new Date(d).getTime())).toBe(false);
+    expect(normTs(d)).toBe(d.replace("T", " ").replace("Z", ""));
   });
 });
