@@ -50,7 +50,8 @@ const PG_TS = /^(\d{4,})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}
 /** DATE em texto do pg -> "YYYY-MM-DD" (mantem 'infinity' e datas a.C. como vieram). */
 export function pgDateText(s: string): string {
   if (PG_SPECIAL.has(s) || s.endsWith(" BC")) return s;
-  return s.slice(0, 10);
+  const m = /^\d{4,}-\d{2}-\d{2}/.exec(s); // anos com 5+ digitos (12345-01-01) nao podem ser cortados em 10 chars
+  return m ? m[0] : s.slice(0, 10);
 }
 
 /**

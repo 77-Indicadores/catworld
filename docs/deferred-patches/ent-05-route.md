@@ -1,9 +1,13 @@
 # ENT-05 — patch para `src/app/api/v1/tables/[id]/rows/route.ts` (arquivo do dono; NAO aplicado)
 
-Pre-requisito: o commit `fix(entrega): protocolo since ...` da branch `worktree-agent-aaa0ddc70a5cd4102` (traz `src/server/tables/since.ts` novo:
-`parseSince`, `finalizeNextSince`, `rowStampsOf`, `safetyWindowMs`, `PG_NOW_TXT_SQL`, `BASELINE_SINCE_TXT`). A biblioteca continua
-compativel com a rota antiga (compila e funciona), mas SO ganha o efeito completo com este patch. Enquanto a rota nao for
-alterada, `pgRemovedSql` devolve `d` como TEXTO (a rota antiga faz `new Date(String(r.d))`, ou seja hora local: aplicar o patch).
+Pre-requisito: `src/server/tables/since.ts` (ja commitado na branch `hardening/data-reliability`; reverificado contra a versao atual:
+todos os simbolos importados abaixo existem com as assinaturas usadas: `parseSince` (null tambem para ano 0000/fora de 0001-9999 ->
+responda 400 INVALID_SINCE), `settleFirstPage(first, limit, since, fetchBig)`, `shapeRowsPage(rows, limit, since)`,
+`finalizeNextSince({settled, since, removedMaxTxt, removedTruncated, nowTxt, windowMs})`, `rowStampsOf`, `safetyWindowMs`,
+`PG_NOW_TXT_SQL`, `BASELINE_SINCE_TXT`). A biblioteca continua compativel com a rota antiga (compila e funciona), mas SO ganha o
+efeito completo com este patch. ACOPLAMENTO: `pgRemovedSql` devolve `d` como texto ISO com `Z` e 6 casas
+(`2026-09-19T10:00:00.123456Z`), entao a rota antiga (`new Date(String(r.d))`) tambem le o instante certo em qualquer fuso; o patch
+abaixo usa `normTs(String(r.d))` (aceita `Z`) para nao perder os microssegundos. Nao use `new Date(...)` para calcular `nextSince`.
 
 Referencia de linhas: versao da rota no checkout principal (com o trabalho nao commitado do dono; as linhas ~84-140 e ~196-212).
 

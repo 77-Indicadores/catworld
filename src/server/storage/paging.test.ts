@@ -31,4 +31,22 @@ describe("addTieBreaker", () => {
   it("SUBSTRING(... FOR n) dentro de parenteses nao e tomado como FOR de topo", () => {
     expect(addTieBreaker("SELECT SUBSTRING(a FROM 1 FOR 2) FROM t", [25]).sql).toBe("SELECT SUBSTRING(a FROM 1 FOR 2) FROM t ORDER BY 1");
   });
+  it("t.offset / AS limit / AS for nao sao o rabo da consulta", () => {
+    expect(addTieBreaker("SELECT a, t.offset FROM t", [23, 23]).sql).toBe("SELECT a, t.offset FROM t ORDER BY 1, 2");
+    expect(addTieBreaker("SELECT a AS limit, b FROM t", [23, 23]).sql).toBe("SELECT a AS limit, b FROM t ORDER BY 1, 2");
+    expect(addTieBreaker("SELECT a, b AS fetch FROM t ORDER BY a LIMIT 5", [23, 23]).sql).toBe("SELECT a, b AS fetch FROM t ORDER BY a, 1, 2 LIMIT 5");
+  });
+  it("comentario no fim: o desempate nao cai dentro dele", () => {
+    const r = addTieBreaker("SELECT a FROM t ORDER BY a -- ordena", [23]);
+    expect(r.sql).toBe("SELECT a FROM t ORDER BY a, 1");
+    expect(addTieBreaker("SELECT a FROM t ORDER BY a /* x /* aninhado */ y */", [23]).sql).toBe("SELECT a FROM t ORDER BY a, 1");
+  });
+  it("E'...\'...' nao desalinha a leitura", () => {
+    const r = addTieBreaker("SELECT E'it\'s ORDER BY' AS x FROM t ORDER BY 1", [25]);
+    expect(r.sql).toBe("SELECT E'it\'s ORDER BY' AS x FROM t ORDER BY 1, 1");
+  });
+  it("tipos sem ordenacao (jsonpath, xid, cid, aclitem, pg_snapshot) ficam fora", () => {
+    for (const oid of [4072, 28, 29, 1033, 5038]) expect(addTieBreaker("SELECT a, x FROM t", [23, oid])).toMatchObject({ sql: "SELECT a, x FROM t ORDER BY 1", skippedColumns: 1 });
+  });
 });
+

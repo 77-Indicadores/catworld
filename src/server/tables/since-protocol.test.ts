@@ -40,6 +40,8 @@ describe("aritmetica de microssegundos", () => {
   it("normTs", () => {
     expect(normTs("2026-09-19 10:00:00.1234567")).toBe("2026-09-19 10:00:00.123456");
     expect(normTs("nao")).toBeNull();
+    expect(normTs("2026-09-19T10:00:00.123456Z")).toBe("2026-09-19 10:00:00.123456");
+    expect(normTs("2026-09-19T10:00:00+03:00")).toBeNull();
   });
 });
 
@@ -130,5 +132,13 @@ describe.each(["UTC", "Asia/Tokyo", "America/Sao_Paulo", "America/New_York"])("i
   it("carimbo devolvido pelo pg como Date (legado) e convertido por ms UTC, nao por hora local", async () => {
     const s = await settleFirstPage([{ id: 1, __cw_synced_txt: undefined, __cw_synced_at: new Date("2026-09-19T10:00:00.250Z") } as PageRow], 5, "2026-09-19T00:00:00Z", async () => []);
     expect(s.nextSinceTxt).toBe("2026-09-19 10:00:00.250000");
+  });
+});
+
+describe("parseSince: ano invalido devolve null (400), nunca 500", () => {
+  it("ano 0000 e underflow por offset", () => {
+    expect(parseSince("0000-01-01T00:00:00Z")).toBeNull();
+    expect(parseSince("0001-01-01T00:00:00+03:00")).toBeNull();
+    expect(parseSince("0001-01-01T00:00:00Z")?.txt).toBe("0001-01-01 00:00:00.000000");
   });
 });

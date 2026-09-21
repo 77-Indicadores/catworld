@@ -85,3 +85,50 @@ def test_seen_is_pruned_once_nextsince_passes_the_stamp():
     with client_with_handler(handler) as client:
         out = client.changes("tbl", since="2026-09-19T08:00:00Z")
         assert out["seen"] == []  # carimbo < nextSince: nunca mais volta
+
+
+STAMP = "2026-09-19T10:00:00.000000Z"
+
+
+def test_identical_rows_sharing_a_stamp_are_all_delivered_and_deduped_by_multiplicity():
+    """Tabela sem chave: 2 linhas IDENTICAS + 1 diferente no mesmo carimbo entregam 3; na volta (janela) entregam 0; uma 3a identica nova entrega 1."""
+    rows = [{"id": 1}, {"id": 1}, {"id": 2}]
+
+    def handler(request):
+        return page(rows, stamps=[STAMP] * len(rows), nextSince="2026-09-19T09:00:00.000000Z")
+
+    with client_with_handler(handler) as client:
+        first = client.changes("tbl")
+        assert [r["id"] for r in first["rows"]] == [1, 1, 2]
+        second = client.changes("tbl", since=first["nextSince"], seen=first["seen"])
+        assert second["rows"] == []
+
+
+def test_third_identical_row_is_delivered_once():
+    state = {"rows": [{"id": 1}, {"id": 1}]}
+
+    def handler(request):
+        r = state["rows"]
+        return page(r, stamps=[STAMP] * len(r), nextSince="2026-09-19T09:00:00.000000Z")
+
+    with client_with_handler(handler) as client:
+        first = client.changes("tbl")
+        assert len(first["rows"]) == 2
+        state["rows"] = [{"id": 1}, {"id": 1}, {"id": 1}]
+        second = client.changes("tbl", since=first["nextSince"], seen=first["seen"])
+        assert len(second["rows"]) == 1
+
+
+def test_seen_is_capped_and_falls_back_to_stamp_counts():
+    n = 50
+    rows = [{"id": i} for i in range(n)]
+
+    def handler(request):
+        return page(rows, stamps=[STAMP] * n, nextSince="2026-09-19T09:00:00.000000Z")
+
+    with client_with_handler(handler) as client:
+        first = client.changes("tbl", seen_limit=10)
+        assert len(first["rows"]) == n
+        assert len(first["seen"]) <= 10  # compacto: um contador por carimbo
+        second = client.changes("tbl", since=first["nextSince"], seen=first["seen"], seen_limit=10)
+        assert second["rows"] == []  # continua sem repetir

@@ -54,7 +54,7 @@ const pad = (n: number, w: number) => String(n).padStart(w, "0");
 /** Normaliza um texto de timestamp para "YYYY-MM-DD HH:MM:SS.ffffff" (comparavel como string). null se invalido. */
 export function normTs(txt: string): string | null {
   const m = ISO_ANY.exec(txt.trim());
-  if (!m || m[8]) return null; // aqui so aceita naive
+  if (!m || (m[8] && m[8].toUpperCase() !== "Z")) return null; // naive ou rotulado Z (= relogio do storage); offset nao
   const [, y, mo, d, h = "00", mi = "00", s = "00", frac = ""] = m;
   return `${y}-${mo}-${d} ${h}:${mi}:${s}.${(frac + "000000").slice(0, 6)}`;
 }
@@ -103,6 +103,8 @@ export function parseSince(raw: string): ParsedSince | null {
     const om = Number(digits.slice(2, 4) || "0");
     norm = fromMicros(toMicros(norm) - sign * BigInt((oh * 60 + om) * 60) * 1_000_000n);
   }
+  // ano 0000 (ou fora de 0001-9999 apos o offset) nao existe no Postgres: 400 em vez de 500
+  if (norm.length !== 26 || Number(norm.slice(0, 4)) < 1) return null;
   return { txt: norm, sqlLiteral: `'${norm}'`, iso: isoFromTs(norm) };
 }
 
@@ -166,9 +168,14 @@ export function pgRowsPageSql(i: SincePageInput): string {
 
 export const REMOVED_CAP = 100_000;
 
-/** Exclusoes desde `since`; `d` vem como TEXTO (microssegundos, sem fuso do Node). */
+/**
+ * Exclusoes desde `since`; `d` vem como TEXTO ISO com `Z` e 6 casas (`2026-09-19T10:00:00.123456Z`, o relogio do storage
+ * rotulado UTC, como `nextSince`). Assim `new Date(String(d))` (chamadores antigos) e o instante correto em qualquer fuso do
+ * Node (antes o texto sem fuso virava hora LOCAL) e `normTs(d)` continua devolvendo o texto normalizado (aceita `Z`).
+ * Perde nada: o `Date` so tem ms; quem precisa dos microssegundos usa `normTs`.
+ */
 export function pgRemovedSql(i: Pick<SincePageInput, "qTarget" | "qDeleted" | "qKey" | "sinceLit">): string {
-  return `SELECT ${i.qKey} AS k, ${i.qDeleted}::text AS d FROM ${i.qTarget} WHERE ${i.qDeleted} > ${i.sinceLit}::timestamp ORDER BY ${i.qDeleted} ASC, ${i.qKey} ASC LIMIT ${REMOVED_CAP + 1}`;
+  return `SELECT ${i.qKey} AS k, to_char(${i.qDeleted}, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS d FROM ${i.qTarget} WHERE ${i.qDeleted} > ${i.sinceLit}::timestamp ORDER BY ${i.qDeleted} ASC, ${i.qKey} ASC LIMIT ${REMOVED_CAP + 1}`;
 }
 
 export type PageRow = Record<string, unknown> & { __cw_synced_txt: unknown; __cw_synced_at?: unknown; __cw_key?: unknown };
