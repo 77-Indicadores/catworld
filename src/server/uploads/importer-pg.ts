@@ -324,8 +324,7 @@ async function importUploadPgLocked(
 
   if (upload.mode === "replace" || !targetExists) {
     // fullSwap: staging tem estado completo → DROP target + RENAME staging (AccessExclusiveLock ~ms)
-    // Índice em _cw_rh criado na staging ANTES do swap para evitar AEL durante CREATE INDEX
-    await conn.execute(`CREATE INDEX ON ${qStaging} ("_cw_rh")`);
+    // (o índice em _cw_rh já foi criado na staging acima; construí-lo duas vezes custava ~8% do import — PER-01)
     await conn.atomicSwap(schema, stage, tableName, mappingWithRh, { targetExists });
     inserted = total;
 

@@ -299,21 +299,15 @@ export class PgStorageConnection implements StorageConnection {
       );
       // ── fullSwap: DROP target + RENAME staging → target (transação breve) ──────
       // MVCC: readers que começaram antes do BEGIN continuam vendo a versão antiga.
-      const client = await this._pool.connect();
       try {
-        await client.query("BEGIN");
-        try {
+        await this.swapTx(async (client) => {
           if (targetExists) await client.query(`DROP TABLE ${qTgt}`);
           await client.query(`ALTER TABLE ${qStg} RENAME TO ${pgQuote(target)}`);
           await hideDeletedRows(client, qTgt);
-          await client.query("COMMIT");
-        } catch (e) {
-          await client.query("ROLLBACK").catch(() => undefined);
-          await this._pool.query(`DROP TABLE IF EXISTS ${qStg}`).catch(() => {});
-          throw e;
-        }
-      } finally {
-        client.release();
+        });
+      } catch (e) {
+        await this._pool.query(`DROP TABLE IF EXISTS ${qStg}`).catch(() => {});
+        throw e;
       }
       return { marked: 0 };
     }
@@ -385,27 +379,50 @@ export class PgStorageConnection implements StorageConnection {
       );
 
       // Transação breve: DROP target + RENAME merged → target (AccessExclusiveLock ~ms)
-      const client = await this._pool.connect();
-      try {
-        await client.query("BEGIN");
-        try {
-          if (targetExists) await client.query(`DROP TABLE ${qTgt}`);
-          await client.query(`ALTER TABLE ${qMgd} RENAME TO ${pgQuote(target)}`);
-          await hideDeletedRows(client, qTgt);
-          await client.query("COMMIT");
-        } catch (e) {
-          await client.query("ROLLBACK").catch(() => undefined);
-          throw e;
-        }
-      } finally {
-        client.release();
-      }
+      await this.swapTx(async (client) => {
+        if (targetExists) await client.query(`DROP TABLE ${qTgt}`);
+        await client.query(`ALTER TABLE ${qMgd} RENAME TO ${pgQuote(target)}`);
+        await hideDeletedRows(client, qTgt);
+      });
       return { marked };
     } finally {
       // best-effort cleanup
       await this._pool.query(`DROP TABLE IF EXISTS ${qStg}`).catch(() => {});
       await this._pool.query(`DROP TABLE IF EXISTS ${qMgd}`).catch(() => {});
     }
+  }
+
+  /**
+   * Afinação da troca (DROP + RENAME): o DROP pede AccessExclusiveLock e ESPERA todo leitor que já tinha a tabela aberta; enquanto
+   * espera, TODO leitor novo entra na fila atrás dele. Sem limite (medido: leitor de 12 s = troca parada 11,7 s e leitor novo parado
+   * 11,4 s), um export longo derrubava as consultas de todo mundo. Com `lock_timeout` a troca desiste depressa, solta a fila e tenta
+   * de novo — a troca é atômica, então repetir é seguro (docs/estudo-confiabilidade-dados.md, PER-04).
+   */
+  static swapTuning = { lockTimeoutMs: 3_000, attempts: 40, backoffMs: 1_500 };
+
+  private async swapTx(work: (client: PoolClient) => Promise<void>): Promise<void> {
+    const { lockTimeoutMs, attempts, backoffMs } = PgStorageConnection.swapTuning;
+    let lastError: unknown;
+    for (let i = 1; i <= attempts; i++) {
+      const client = await this._pool.connect();
+      try {
+        await client.query("BEGIN");
+        try {
+          await client.query(`SET LOCAL lock_timeout = ${Math.max(1, Math.floor(lockTimeoutMs))}`);
+          await work(client);
+          await client.query("COMMIT");
+          return;
+        } catch (e) {
+          await client.query("ROLLBACK").catch(() => undefined);
+          if ((e as { code?: string }).code !== "55P03") throw e; // só "lock_not_available" é repetido; qualquer outro erro sobe
+          lastError = e;
+        }
+      } finally {
+        client.release();
+      }
+      await new Promise((r) => setTimeout(r, backoffMs));
+    }
+    throw new Error(`Não consegui trocar a tabela depois de ${attempts} tentativas: leituras longas seguram a tabela (${lastError instanceof Error ? lastError.message : String(lastError)}).`);
   }
 
   async serverNow(): Promise<Date> {
