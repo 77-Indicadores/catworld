@@ -11,6 +11,7 @@ import { hasDateTimePart, dateCandidates, isOrderAmbiguous, type DateOrder } fro
 import { accumulateDecimal, decideDecimal, newDecimalAcc, type DecimalAcc, type DecSep } from "./decimal-format";
 import { formatDecimalType } from "@/lib/decimal-type";
 import { normalizeTypeOverride } from "./type-override";
+import { rowTexts, isBlankRow } from "./xlsx-values";
 
 /** decimalSep/dateOrder: convenção da COLUNA decidida pelo arquivo inteiro (mapeamentos antigos não têm; ver decimal-format.ts e date-normalize.ts). *Ambiguous: ficou TEXT porque a convenção não pôde ser decidida. */
 export type ParsedColumn={originalName:string;sqlName:string;sqlType:string;nullable:boolean;decimalSep?:DecSep;decimalAmbiguous?:boolean;dateOrder?:DateOrder;dateAmbiguous?:boolean};
@@ -49,16 +50,27 @@ async function previewCsv(path:string){
 // bufferizado (Workbook API) mantido; arquivos grandes devem usar CSV (rota
 // totalmente streamed via DuckDB) — ver o limite de XLSX (padrao do codigo, config-contract.md),
 // validado em app/api/v1/uploads/route.ts.
+/** Linhas NÃO vazias da aba (a 1ª é o cabeçalho). Linha totalmente vazia não é registro (antes virava linha de NULLs). */
+function*xlsxDataRows(sheet:ExcelJS.Worksheet):Generator<string[]>{
+ for(let r=1;r<=sheet.rowCount;r++){const t=rowTexts(sheet.getRow(r));if(!isBlankRow(t))yield t}
+}
+const sheetHasData=(sheet:ExcelJS.Worksheet)=>{for(const _ of xlsxDataRows(sheet))return true;return false};
+/** Só uma aba pode ter dados: importar só a 1ª e ignorar o resto seria perder dados em silêncio (TIP-08). */
+function assertSingleDataSheet(workbook:ExcelJS.Workbook){
+ const withData=workbook.worksheets.filter(sheetHasData);
+ if(withData.length>1||(withData.length===1&&withData[0]!==workbook.worksheets[0]))
+  throw new Error(`A planilha tem dados em ${withData.length>1?"mais de uma aba":"uma aba que não é a primeira"} (${withData.map(s=>`"${s.name}"`).join(", ")}). O Catworld importa uma aba por arquivo: deixe só uma aba com dados (ou envie um arquivo por aba) para nenhuma linha ser ignorada.`);
+}
 async function previewXlsx(path:string){
  const workbook=new ExcelJS.Workbook();await workbook.xlsx.readFile(path);const sheet=workbook.worksheets[0];if(!sheet)throw new Error("Planilha sem abas");
- let headers:string[]=[],stats:ColumnStats[]=[];let sampleRows:string[][]=[];let count=0;
- sheet.eachRow({includeEmpty:true},(row,rowNumber)=>{
-  const values=(Array.isArray(row.values)?row.values.slice(1):[]).map(cellValue);
-  if(rowNumber===1){headers=values;stats=headers.map(newStats);return}
+ assertSingleDataSheet(workbook);
+ let headers:string[]=[],stats:ColumnStats[]=[];let sampleRows:string[][]=[];let count=0;let first=true;
+ for(const values of xlsxDataRows(sheet)){
+  if(first){first=false;headers=values;stats=headers.map(newStats);continue}
   count++;
   if(sampleRows.length<20)sampleRows.push(values);
   headers.forEach((_,i)=>{stats[i]??=newStats();updateStats(stats[i],values[i])});
- });
+ }
  // Filter out empty headers so Object.fromEntries never sees undefined keys
  const validIndices=headers.map((h,i)=>h&&h.trim()?i:-1).filter(i=>i>=0);
  headers=validIndices.map(i=>headers[i]);
@@ -68,7 +80,6 @@ async function previewXlsx(path:string){
  return{columns,rows:objects,rowCount:count,encoding:"xlsx",separator:null,sheetNames:workbook.worksheets.map(s=>s.name)};
 }
 
-const cellValue=(value:ExcelJS.CellValue)=>value==null?"":value instanceof Date?value.toISOString():typeof value==="object"?String((value as {text?:string;result?:unknown}).text??(value as {result?:unknown}).result??""):String(value);
 function excelSerialToIso(raw:string,type:string){
  const n=Number(raw);
  if(!Number.isFinite(n)||n<=0||n>100000)return raw;
@@ -283,9 +294,9 @@ export async function* rowsFromFile(
    // ordenacao do WorkbookReader streaming. Tamanho maximo de XLSX e limitado
    // em outra camada (actions.ts) pra conter o risco de memoria.
    const workbook=new ExcelJS.Workbook();await workbook.xlsx.readFile(source);const sheet=workbook.worksheets[0];if(!sheet)return;
+   assertSingleDataSheet(workbook);
    let header=true,columnIndices:number[]=columns.map((_,i)=>i);
-   for(const row of sheet.getRows(1,sheet.rowCount)??[]){
-    const values=(Array.isArray(row.values)?row.values.slice(1):[]).map(cellValue);
+   for(const values of xlsxDataRows(sheet)){
     if(header){header=false;columnIndices=xlsxColumnIndices(values,columns);continue}
     yield Object.fromEntries(columns.map((c,i)=>[c.sqlName,normalizeCellForColumn(values[columnIndices[i]!]??"",c)??null]));
    }
@@ -294,7 +305,19 @@ export async function* rowsFromFile(
   }
   // ExcelJS WorkbookReader accepts both file path and Readable stream
   const reader=new ExcelJS.stream.xlsx.WorkbookReader(source as unknown as Stream,{worksheets:"emit",sharedStrings:"cache",styles:"ignore",hyperlinks:"ignore"});
-  for await(const worksheet of reader){let header=true,columnIndices:number[]=columns.map((_,i)=>i);for await(const row of worksheet){const values=(Array.isArray(row.values)?row.values.slice(1):[]).map(cellValue);if(header){header=false;columnIndices=xlsxColumnIndices(values,columns);continue}yield Object.fromEntries(columns.map((c,i)=>[c.sqlName,normalizeCellForColumn(values[columnIndices[i]!]??"",c)??null]))}break}
+  let sheetNo=0;
+  for await(const worksheet of reader){
+   sheetNo++;
+   let header=true,columnIndices:number[]=columns.map((_,i)=>i);
+   for await(const row of worksheet){
+    const values=rowTexts(row as unknown as ExcelJS.Row);
+    if(isBlankRow(values))continue;
+    // streaming: as abas seguintes à 1ª são lidas só para RECUSAR se tiverem dados (nunca ignorar linhas em silêncio)
+    if(sheetNo>1)throw new Error("A planilha tem dados em mais de uma aba: deixe só uma aba com dados para nenhuma linha ser ignorada.");
+    if(header){header=false;columnIndices=xlsxColumnIndices(values,columns);continue}
+    yield Object.fromEntries(columns.map((c,i)=>[c.sqlName,normalizeCellForColumn(values[columnIndices[i]!]??"",c)??null]));
+   }
+  }
   if(stats)stats.parseMs=Date.now()-t0;
   return;
  }
