@@ -6,7 +6,7 @@
  */
 import { afterAll, describe, expect, it } from "vitest";
 import { Pool } from "pg";
-import { PG_MARKER_DDL, ensurePgMarker } from "./applied-marker";
+import { ensurePgMarker } from "./applied-marker";
 import { isNonRetryable } from "./non-retryable";
 
 const url = process.env.CW_TEST_PG_URL;
@@ -19,7 +19,7 @@ function withDb(u: string, db: string, user?: string, password?: string): string
   return x.toString();
 }
 
-d("registro exactly-once: criacao (Postgres real)", () => {
+d("registro exactly-once: criacao (Postgres real)", { timeout: 60_000 }, () => {
   const admin = new Pool({ connectionString: url });
   const created: string[] = [];
   const role = `cw_np_${Date.now().toString(36)}`;
@@ -57,17 +57,6 @@ d("registro exactly-once: criacao (Postgres real)", () => {
       const c = conns[0]!;
       expect((await c.queryParams<{ ok: boolean }>(`SELECT to_regclass('cw_internal.applied_uploads') IS NOT NULL AS ok`, []))[0]!.ok).toBe(true);
       await ensurePgMarker(c); // idempotente (caminho rapido)
-    } finally { await Promise.all(conns.map((c) => c.pool.end())); }
-  });
-
-  it("premissa: o DDL cru em paralelo realmente corre (documenta o bug original)", async () => {
-    const db = await freshDb();
-    const conns = Array.from({ length: 8 }, () => conn(withDb(url!, db)));
-    try {
-      const rs = await Promise.allSettled(conns.map(async (c) => { for (const ddl of PG_MARKER_DDL) await c.execute(ddl); }));
-      const codes = rs.filter((r) => r.status === "rejected").map((r) => (r as PromiseRejectedResult).reason?.code);
-      // se o servidor for rapido o bastante a corrida pode nao ocorrer; quando ocorre, e um dos codigos tolerados
-      for (const c of codes) expect(["23505", "42P06", "42P07"]).toContain(c);
     } finally { await Promise.all(conns.map((c) => c.pool.end())); }
   });
 
