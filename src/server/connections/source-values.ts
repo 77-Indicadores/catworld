@@ -20,6 +20,8 @@ export type ConvertContext = {
   column?: string;
   /** coluna legada (era DECIMAL(18,4) de float/numeric sem escala): escala excedente e arredondada, como sempre foi; NaN/estouro falham */
   legacyRound?: boolean;
+  /** chamado quando uma coluna legada arredondou um ponto flutuante com mais de 15 digitos significativos (para registrar o aviso) */
+  onRounded?: () => void;
 };
 
 const where = (ctx?: ConvertContext) => (ctx?.column ? ` na coluna "${ctx.column}"` : "");
@@ -51,6 +53,7 @@ export function exactDecimalString(value: unknown, ctx?: ConvertContext): string
     s = expandExponent(String(value));
     // O driver (SQL Server) entrega decimal como double: mais de 15 digitos significativos nao sao verificaveis.
     const digits = s.replace(/^[-+]?0*\.?0*/, "").replace(".", "").replace(/0+$/, "").length;
+    if (digits > 15 && ctx?.legacyRound) ctx.onRounded?.();
     if (digits > 15 && !ctx?.legacyRound) throw new SourceValueError("SOURCE_VALUE_PRECISION_LOSS", `Numerico com mais de 15 digitos significativos recebido como ponto flutuante${where(ctx)}: o driver da origem nao garante o valor exato. Converta a coluna para texto na consulta da fonte (CAST ... AS VARCHAR).`);
   } else if (typeof value === "string") s = value.trim();
   else throw new SourceValueError("SOURCE_VALUE_INVALID", `Valor numerico invalido${where(ctx)}`);

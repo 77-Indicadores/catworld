@@ -9,6 +9,8 @@ import { deleteDatasetSource } from "@/server/data/catalog";
 import { queryColumns, tableColumns, type SourceColumn } from "@/server/connections/postgres";
 import { queryColumnsMssql, tableColumnsMssql } from "@/server/connections/mssql";
 import { resolveColumn, shouldResetDelta } from "@/server/connections/source-guards";
+import { clearSourceOptions, getSourceOptions, setSourceOptions } from "@/server/connections/source-options";
+import { audit } from "@/server/audit";
 
 // (rotas do Next so podem exportar handlers HTTP: as funcoes auxiliares vivem em connections/source-guards)
 async function sourceColumnsFor(source: {
@@ -33,7 +35,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     if (actor.role !== "ADMIN" && !await canAccess(actor, "READ", source.dataset.projectId, source.datasetId)) {
       throw new ApiError(403, "FORBIDDEN", "Sem permissão para ler esta fonte");
     }
-    return ok(exposeSource(source));
+    return ok({ ...exposeSource(source), options: await getSourceOptions(id) });
   } catch (e) {
     return handleApiError(e);
   }
@@ -52,6 +54,12 @@ const patchSchema = z.object({
   keysSql: z.string().min(1).nullable().optional(),
   keysMinIntervalMinutes: z.number().int().min(1).nullable().optional(),
   active: z.boolean().optional(),
+  /** opcoes por fonte (guardadas em cw_system_settings, sem migracao): ver connections/source-options.ts */
+  options: z.object({
+    allowEmpty: z.boolean().optional(),
+    maxDropPct: z.number().int().min(1).max(99).optional(),
+    onInvalid: z.enum(["null", "fail"]).optional(),
+  }).optional(),
 });
 
 async function authorise(request: NextRequest, id: string) {
@@ -69,8 +77,8 @@ async function authorise(request: NextRequest, id: string) {
 export async function PATCH(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const id = (await params).id;
-    const { source } = await authorise(request, id);
-    const input = patchSchema.parse(await request.json());
+    const { actor, source } = await authorise(request, id);
+    const { options: optionsPatch, ...input } = patchSchema.parse(await request.json());
 
     assertValidCron(input.refreshCron, "refreshCron");
     assertValidCron(input.reconciliationCron, "reconciliationCron");
@@ -126,6 +134,10 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
           ...(input.keysMinIntervalMinutes !== undefined || input.detectDeletions === false ? { keysMinIntervalMinutes: resultingDetect ? resultingKeysInterval : null } : {}),
         };
 
+    if (optionsPatch && Object.keys(optionsPatch).length) {
+      await setSourceOptions(id, optionsPatch);
+      await audit(actor, "SOURCE_OPTIONS_CHANGED", "dataset_source", id, { fields: Object.keys(optionsPatch) });
+    }
     return ok(exposeSource(await prisma.datasetSource.update({
       where: { id },
       data: {
@@ -148,6 +160,7 @@ export async function DELETE(request: NextRequest, { params }: { params: Promise
     const id = (await params).id;
     await authorise(request, id);
     await deleteDatasetSource(id);
+    await clearSourceOptions(id);
     return ok({ deleted: true });
   } catch (e) {
     return handleApiError(e);

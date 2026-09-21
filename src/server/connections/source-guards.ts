@@ -126,10 +126,24 @@ export function deletionCoverageWarning(s: DeletionCoverageInput): string | null
   return `NO_DELETION_DETECTION: linhas apagadas na origem continuam vivas nesta tabela (nada detecta exclusoes); ${how}.`;
 }
 
+/**
+ * Cron de reconciliacao "espalhado" por um hash estavel do id da fonte (M5): todas as fontes novas caiam em 03:15 UTC e
+ * a origem (ERP) recebia todas as leituras completas ao mesmo tempo. Minuto 0-59 e hora 1-5 UTC (madrugada de Brasilia/UTC-3 = 22h-02h,
+ * fora do horario comercial), determinismo por id.
+ */
+export function jitteredReconciliationCron(seed: string): string {
+  let h = 2166136261; // FNV-1a
+  for (let i = 0; i < seed.length; i++) { h ^= seed.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+  return `${h % 60} ${1 + (Math.floor(h / 60) % 5)} * * *`;
+}
+
 /** Fonte nova com chave: reconciliacao diaria por padrao quando e segura (tabela, ou consulta com consulta de reconciliacao). */
-export function defaultReconciliationCron(i: DeletionCoverageInput & { reconciliationCron?: string | null | undefined }): string | null {
+export function defaultReconciliationCron(i: DeletionCoverageInput & { reconciliationCron?: string | null | undefined }, seed?: string): string | null {
   if (i.mode !== "extract" || !i.keyColumn?.trim() || i.detectDeletions) return null;
   if (i.reconciliationCron !== undefined) return null; // escolha explicita (inclusive null = sem reconciliacao) e respeitada
   if (i.sourceKind === "query" && !i.sourceSqlReconciliation?.trim()) return null;
-  return DEFAULT_RECONCILIATION_CRON;
+  return seed ? jitteredReconciliationCron(seed) : DEFAULT_RECONCILIATION_CRON;
 }
+
+/** Marcador de lease e detalhe interno: nunca sai cru na API (L5). */
+export const isLeaseMarker = (v: string | null | undefined) => !!v && v.startsWith(LEASE_PREFIX);

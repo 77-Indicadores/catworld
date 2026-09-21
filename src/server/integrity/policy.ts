@@ -38,6 +38,8 @@ export type LoadFacts = {
   wasRetryReusingStaging?: boolean;
   /** carga agendada (fonte): queda grande bloqueia; upload manual só marca */
   scheduled?: boolean;
+  /** esvaziar a tabela NAO bloqueia (so marca SUSPECT): consulta com janela e sem chave, onde resultado vazio e normal (virada de mes) */
+  softEmpty?: boolean;
 };
 
 export type IntegritySettings = { mode: "enforce" | "warn"; maxDropPct: number; allowEmpty: boolean };
@@ -67,7 +69,7 @@ export function evaluateLoad(f: LoadFacts, cfg: IntegritySettings = INTEGRITY_DE
     reasons.push({ code: "STAGED_MISMATCH", blocking: true, message: `A staging tem ${f.stagedRows} linhas, mas foram lidas ${f.parsedRows}.` });
   }
   if (f.fullState && !f.deltaOnly && f.parsedRows === 0 && prev > 0 && !cfg.allowEmpty) {
-    reasons.push({ code: "EMPTY_REPLACE", blocking: true, message: `Substituição completa por 0 linhas sobre uma tabela com ${prev}.` });
+    reasons.push({ code: "EMPTY_REPLACE", blocking: !f.softEmpty, message: `Substituição completa por 0 linhas sobre uma tabela com ${prev}.` });
   } else if (f.fullState && !f.deltaOnly && prev >= MIN_ROWS_FOR_DROP_CHECK && f.parsedRows < prev * (1 - cfg.maxDropPct / 100) && f.parsedRows > 0) {
     reasons.push({
       code: "DROP_GT_PCT",
