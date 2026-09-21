@@ -33,15 +33,18 @@ function cleanedRef(column: ParsedColumn, alias: string): string {
   return `NULLIF(LTRIM(RTRIM(${alias}.${quoteIdentifier(column.sqlName)})),'')`;
 }
 
-function typedSelectExpr(column: ParsedColumn, alias: string): string {
+export function typedSelectExpr(column: ParsedColumn, alias: string): string {
   const value = cleanedRef(column, alias);
   if (column.sqlType === "BIGINT") return `TRY_CONVERT(BIGINT,${value})`;
   if (column.sqlType.startsWith("DECIMAL")) return decimalTsqlExpr(value, column);
+  // Convenção dd/mm × mm/dd é da COLUNA (decidida pelo arquivo inteiro): só o estilo dela entra no COALESCE, nunca os dois por valor.
+  const slashStyle = column.dateOrder === "mdy" ? 101 : 103;
+  const styles = (iso: number[]) => column.dateOrder ? [...iso, slashStyle] : [...iso, 103, 101]; // sem convenção (mapeamento antigo): legado
   if (column.sqlType === "DATE") {
-    return `COALESCE(TRY_CONVERT(DATE,${value},23),TRY_CONVERT(DATE,${value},126),TRY_CONVERT(DATE,${value},103),TRY_CONVERT(DATE,${value},101))`;
+    return `COALESCE(${styles([23, 126]).map(st => `TRY_CONVERT(DATE,${value},${st})`).join(",")})`;
   }
   if (column.sqlType === "DATETIME2") {
-    return `COALESCE(TRY_CONVERT(DATETIME2,${value},126),TRY_CONVERT(DATETIME2,${value},120),TRY_CONVERT(DATETIME2,${value},103),TRY_CONVERT(DATETIME2,${value},101))`;
+    return `COALESCE(${styles([126, 120]).map(st => `TRY_CONVERT(DATETIME2,${value},${st})`).join(",")})`;
   }
   if (column.sqlType === "TIME") return `TRY_CONVERT(TIME,${value})`;
   return `${alias}.${quoteIdentifier(column.sqlName)}`;
