@@ -174,6 +174,21 @@ d("import SQL Server: atomicidade, integridade e fidelidade (real)", () => {
     expect(r[3].quando).toBeNull();
   }, 120_000);
 
+  it("#6 mapeamento ANTIGO (sem decimalDigits) com DECIMAL(38,10) e valor de 25 digitos: exato no SQL Server", async () => {
+    const p = join(dir, "wide1.csv");
+    writeFileSync(p, "id,v\n1,12345678901234567890.1234567890\n2,-1.5\n");
+    const prev = await previewFile(p);
+    const mapping = [
+      { originalName: "id", sqlName: "id", sqlType: "BIGINT", nullable: true },
+      { originalName: "v", sqlName: "v", sqlType: "DECIMAL(38,10)", nullable: true, decimalSep: "." }, // sem decimalDigits
+    ];
+    const id = randomUUID();
+    await prisma.upload.create({ data: { id, datasetId, originalFilename: "t_wide_legacy.csv", blobName: `rel/${id}.csv`, sizeBytes: 1n, mode: "replace", status: "IMPORTING", rowCount: 2n, previewJson: JSON.stringify(prev), mappingJson: JSON.stringify(mapping) } });
+    await importUpload(id, p);
+    const r = (await pool.request().query(`SELECT id, CAST(v AS NVARCHAR(60)) v FROM ${q("t_wide_legacy")} ORDER BY id`)).recordset;
+    expect(r.map((x: { v: string }) => x.v)).toEqual(["12345678901234567890.1234567890", "-1.5000000000"]);
+  }, 120_000);
+
   it("um leitor concorrente nunca vê tabela vazia ou parcial durante um replace", async () => {
     await run(file("h1.csv", 5000, "v1"), "t_reader");
     const seen = new Set<number>(); let stop = false;

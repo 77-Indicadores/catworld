@@ -222,8 +222,9 @@ describe("TIP-09: convertForTds (função pura; ponta a ponta exige SQL Server r
     expect((convertForTds("2023-01-15 08:30:00.0000000", { sqlType: "DATETIME2" }) as Date).toISOString()).toBe("2023-01-15T08:30:00.000Z");
   });
   it("DECIMAL: número exato até 15 dígitos; acima disso lança (driver usa Number)", () => {
-    expect(convertForTds("1234.5678", { sqlType: "DECIMAL(18,4)", decimalSep: "." })).toBe(1234.5678);
-    expect(() => convertForTds("12345678901234567.5", { sqlType: "DECIMAL(38,4)", decimalSep: "." })).toThrow(ValueConversionError);
+    // (mapeamento novo: decimalDigits do arquivo; sem ele o tipo largo vai como texto exato, ver wide-decimal.test.ts)
+    expect(convertForTds("1234.5678", { sqlType: "DECIMAL(18,4)", decimalSep: ".", decimalDigits: 8 })).toBe(1234.5678);
+    expect(() => convertForTds("12345678901234567.5", { sqlType: "DECIMAL(38,4)", decimalSep: ".", decimalDigits: 8 })).toThrow(ValueConversionError);
     expect(() => convertForTds("0.00012", { sqlType: "DECIMAL(18,4)", decimalSep: "." })).toThrow(ValueConversionError);
   });
 });
