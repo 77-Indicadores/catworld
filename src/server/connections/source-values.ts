@@ -152,6 +152,7 @@ export function convertSourceValue(value: unknown, type: string, ctx?: ConvertCo
   if (type.startsWith("DECIMAL")) return convertDecimal(value, type, ctx);
   if (type === "DATE") return normalizeDate(value, ctx);
   if (type === "DATETIME2") return normalizeTimestamp(value, ctx);
+  if (type === "TIME" && value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString().slice(11, 23); // time do MSSQL chega como Date (1970-01-01 em UTC)
   if (type === "TIME") return String(value).trim().replace(/\s*[+-]\d{2}(?::?\d{2}(?::?\d{2})?)?$/, ""); // TIME nao guarda deslocamento (timetz legado)
   let s: string;
   if (typeof value === "string") s = value;

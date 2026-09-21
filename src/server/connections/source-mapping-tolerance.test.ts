@@ -31,3 +31,9 @@ describe("H1: diferenca so de mapeamento nao e mudanca estrutural", () => {
   });
 });
 
+
+describe("TIME vindo do driver MSSQL como Date", () => {
+  it("vira HH:MM:SS.mmm em UTC", () => {
+    expect(convertSourceValue(new Date("1970-01-01T12:30:15.250Z"), "TIME")).toBe("12:30:15.250");
+  });
+});
