@@ -31,13 +31,15 @@ documentado do SQL Server).
 
 `FORMAT`, `DATENAME`, `ISNUMERIC`, `ISDATE`, `STRING_SPLIT`, `PATINDEX`, `STUFF`, `QUOTENAME`, `CHOOSE`, `PARSE`, `HASHBYTES`,
 `CHECKSUM`, `BINARY_CHECKSUM`, `DATETIMEFROMPARTS`, `SYSDATETIMEOFFSET`, `SWITCHOFFSET`, `DATETRUNC`, `DATEDIFF_BIG`, `JSON_VALUE`,
-`JSON_QUERY`, `OPENJSON`, `ISJSON`, `TRANSLATE`, `STRING_AGG`, `NATURAL JOIN` (nao existe em T-SQL; antes virava um alias
+`JSON_QUERY`, `OPENJSON`, `ISJSON`, `NATURAL JOIN` (nao existe em T-SQL; antes virava um alias
 chamado `natural`).
 
 `<coluna> + '5'` (literal de texto que parece numero, com operando de tipo desconhecido) e AMBIGUO: no SQL Server e soma se a
 coluna for numerica e concatenacao se for texto. Antes virava concatenacao em silencio (`10 + '5'` = `'105'`); agora e rejeitado
 com a sugestao `CONCAT(coluna, '5')` ou `CAST(coluna AS BIGINT) + 5`. Continuam iguais: `nome + ' '`, `nome + '-'` (literal que
-nao parece numero), `1 + '5'`, `LEN(x) + '5'`.
+nao parece numero), `1 + '5'`, `LEN(x) + '5'`. Tambem concatenam (texto comprovado): `ISNULL/COALESCE/NULLIF` com algum argumento texto, `LEFT`, `RIGHT`, `TRIM`, `REVERSE`, `REPLICATE`, `CONCAT_WS`, `CAST/CONVERT` para VARCHAR/NVARCHAR e `CASE` cujos THEN/ELSE sao todos texto.
+
+`STRING_AGG` e `TRANSLATE` NAO sao rejeitados (o Postgres tem a mesma semantica e passam como antes). Comentarios `--` e `/* */` sao removidos antes da traducao (palavras neles nao disparam rejeicao).
 
 ## Opcional (desligado por padrao)
 

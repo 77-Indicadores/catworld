@@ -72,7 +72,7 @@ export function translateTsql(input: string, target: SqlTarget, options: Transla
 // ---------------------------------------------------------------------------
 
 function toPostgres(input: string): ContractTranslation {
-  const { text: protectedText0, quoted } = protectBracketIdentifiers(stripNolock(input));
+  const { text: protectedText0, quoted } = protectBracketIdentifiers(stripNolock(stripComments(input)));
   // O parser trata a barra invertida de um literal como escape (mysql): '' fecharia mal a string e produziria SQL
   // errado em silencio. No T-SQL a barra e um caractere comum: troca por um sentinela durante o parse e restaura na saida.
   const protectedText = mapLiteralSegments(protectedText0, (lit) => lit.replaceAll("\\", BS));
@@ -92,7 +92,7 @@ function toPostgres(input: string): ContractTranslation {
   const stmts: Node[] = Array.isArray(ast) ? ast : [ast];
   if (stmts.length !== 1) throw new SqlContractError("Apenas uma instrucao SQL e permitida");
   let root = stmts[0];
-  root = wrapUnionTops(root);
+  root = wrapUnionTopsDeep(root);
   markRecursive(root);
 
   let topLimit: number | null = null;
@@ -111,6 +111,36 @@ function toPostgres(input: string): ContractTranslation {
     );
   }
   return { sql: restoreIdentifiers(out, quoted).replaceAll(BS, "\\"), topLimit };
+}
+
+/**
+ * Remove `-- ...` e `/* ... *\/` (fora de literais e identificadores delimitados). Comentario nao tem semantica, e sem
+ * isso um apostrofo dentro dele desalinha os leitores de literal e palavras rejeitadas dentro dele davam falso erro.
+ */
+export function stripComments(sql: string): string {
+  let out = "";
+  let i = 0;
+  while (i < sql.length) {
+    const c = sql[i]!;
+    if (c === "'" || c === '"' || c === "[") {
+      const close = c === "[" ? "]" : c;
+      let j = i + 1;
+      while (j < sql.length) {
+        if (sql[j] === close && sql[j + 1] === close && c !== "[") { j += 2; continue; }
+        if (sql[j] === close) break;
+        j++;
+      }
+      out += sql.slice(i, j + 1);
+      i = j + 1;
+    } else if (c === "-" && sql[i + 1] === "-") {
+      while (i < sql.length && sql[i] !== "\n") i++;
+    } else if (c === "/" && sql[i + 1] === "*") {
+      const end = sql.indexOf("*/", i + 2);
+      i = end < 0 ? sql.length : end + 2;
+      out += " ";
+    } else { out += c; i++; }
+  }
+  return out;
 }
 
 function stripNolock(sql: string): string {
@@ -148,7 +178,7 @@ function rejectKnownUnsupported(sql: string): void {
 const UNSUPPORTED_FUNCTIONS = [
   "FORMAT", "DATENAME", "ISNUMERIC", "ISDATE", "STRING_SPLIT", "PATINDEX", "STUFF", "QUOTENAME", "CHOOSE", "PARSE",
   "HASHBYTES", "CHECKSUM", "BINARY_CHECKSUM", "DATETIMEFROMPARTS", "SYSDATETIMEOFFSET", "SWITCHOFFSET", "DATETRUNC",
-  "DATEDIFF_BIG", "JSON_VALUE", "JSON_QUERY", "OPENJSON", "ISJSON", "TRANSLATE", "STRING_AGG",
+  "DATEDIFF_BIG", "JSON_VALUE", "JSON_QUERY", "OPENJSON", "ISJSON",
 ];
 
 // ---------------------------------------------------------------------------
@@ -400,6 +430,21 @@ function wrapUnionTops(root: Node): Node {
   return head;
 }
 
+/** Aplica wrapUnionTops a TODO no `select` que carrega uniao (raiz, CTE, tabela derivada, subquery). */
+function wrapUnionTopsDeep(node: Node): Node {
+  if (Array.isArray(node)) { for (let i = 0; i < node.length; i++) node[i] = wrapUnionTopsDeep(node[i]); return node; }
+  if (!node || typeof node !== "object") return node;
+  for (const k of Object.keys(node)) {
+    if (k === "_next") continue; // os ramos da uniao sao tratados pelo no que os carrega
+    node[k] = wrapUnionTopsDeep(node[k]);
+  }
+  // ramos encadeados: seus filhos (subqueries) tambem
+  for (let s: Node = node?._next; s; s = s._next) {
+    for (const k of Object.keys(s)) if (k !== "_next") s[k] = wrapUnionTopsDeep(s[k]);
+  }
+  return node.type === "select" && node._next ? wrapUnionTops(node) : node;
+}
+
 /** T-SQL escreve `WITH c AS (... UNION ALL ... FROM c)`; o Postgres exige `WITH RECURSIVE`. */
 function markRecursive(node: Node): void {
   if (!node || typeof node !== "object") return;
@@ -423,7 +468,16 @@ const isText = (e: Node): boolean =>
   !!e && (e.type === "single_quote_string" || e.type === "string" || e.type === "var_string" ||
     (e.type === "binary_expr" && e.operator === "||") ||
     e.text === true ||
-    (e.type === "function" && ["CONCAT", "LTRIM", "RTRIM", "UPPER", "LOWER", "SUBSTRING", "REPLACE"].includes(fname(e))));
+    (e.type === "cast" && Array.isArray(e.target) && e.target.length === 1 && ["TEXT", "VARCHAR", "NVARCHAR", "CHAR", "NCHAR"].includes(String(e.target[0]?.dataType).toUpperCase())) ||
+    (e.type === "case" && caseResults(e).length > 0 && caseResults(e).every(isText)) ||
+    (e.type === "function" && (
+      ["CONCAT", "CONCAT_WS", "LTRIM", "RTRIM", "TRIM", "UPPER", "LOWER", "SUBSTRING", "REPLACE", "LEFT", "RIGHT", "REVERSE", "REPLICATE", "SPACE", "TRANSLATE"].includes(fname(e)) ||
+      // ISNULL/COALESCE/NULLIF: texto quando algum argumento e texto (o tipo resultante do SQL Server segue o de maior precedencia; texto vence numero-literal so com conversao, e o caso ambiguo continua rejeitado)
+      (["ISNULL", "COALESCE", "NULLIF"].includes(fname(e)) && args(e).some(isText))
+    )));
+
+/** Resultados (THEN/ELSE) de um CASE. */
+const caseResults = (e: Node): Node[] => (Array.isArray(e.args) ? e.args.map((w: Node) => w?.result).filter(Boolean) : []);
 
 const DATE_UNIT: Record<string, string> = {
   year: "year", yy: "year", yyyy: "year", quarter: "quarter", qq: "quarter", q: "quarter",
@@ -497,7 +551,7 @@ function transformFunction(n: Node): Node {
       const hay = `LOWER(CAST(${emit(a[1])} AS TEXT))`;
       const emptyGuard = (r: string) => (isStringLiteral(a[0]) && String(a[0].value) !== "" ? r : `(CASE WHEN ${needle} = '' THEN 0 ELSE ${r} END)`);
       if (a.length === 2) return numRaw(emptyGuard(`POSITION(${needle} IN ${hay})`));
-      const start = emit(a[2]);
+      const start = isNumber(a[2]) && Number(a[2].value) >= 1 ? emit(a[2]) : `GREATEST(CAST(${emit(a[2])} AS INTEGER), 1)`; // start <= 0 vale 1 no SQL Server
       return numRaw(emptyGuard(`(CASE WHEN POSITION(${needle} IN SUBSTRING(${hay} FROM ${start})) = 0 THEN 0 ELSE POSITION(${needle} IN SUBSTRING(${hay} FROM ${start})) + ${start} - 1 END)`));
     }
     case "REPLACE": {
@@ -514,7 +568,7 @@ function transformFunction(n: Node): Node {
     case "REPLICATE": case "SPACE": {
       const isSpace = f === "SPACE";
       if (a.length !== (isSpace ? 1 : 2)) throw new SqlContractError(`${f} exige ${isSpace ? 1 : 2} argumento(s).`);
-      const cnt = emit(a[isSpace ? 0 : 1]);
+      const cnt = `TRUNC(CAST(${emit(a[isSpace ? 0 : 1])} AS NUMERIC))`; // o SQL Server converte a contagem para inteiro (2.7 -> 2)
       return textRaw(`(CASE WHEN ${cnt} < 0 THEN NULL ELSE REPEAT(${isSpace ? "' '" : `CAST(${emit(a[0])} AS TEXT)`}, CAST(${cnt} AS INTEGER)) END)`);
     }
     case "EOMONTH": {
@@ -524,7 +578,8 @@ function transformFunction(n: Node): Node {
     }
     case "DATEFROMPARTS": {
       if (a.length !== 3) throw new SqlContractError("DATEFROMPARTS exige 3 argumentos.");
-      return raw(`MAKE_DATE(CAST(${emit(a[0])} AS INTEGER), CAST(${emit(a[1])} AS INTEGER), CAST(${emit(a[2])} AS INTEGER))`);
+      const i = (x: Node) => `CAST(TRUNC(CAST(${emit(x)} AS NUMERIC)) AS INTEGER)`; // argumentos fracionarios truncam, como no SQL Server
+      return raw(`MAKE_DATE(${i(a[0])}, ${i(a[1])}, ${i(a[2])})`);
     }
     case "CW_TRYCAST": return tryCast(a);
     case "CONVERT": return transformConvert(a);
@@ -677,7 +732,7 @@ function transformConvert(a: Node[]): Node {
   }
   if (trunc !== null) return textRaw(clip(`CAST(${emit(a[1])} AS TEXT)`));
   if (INT_TYPES.has(pgType)) return raw(intCast(emit(a[1]), pgType));
-  return raw(`CAST(${emit(a[1])} AS ${pgType})`);
+  return pgType === "TEXT" ? textRaw(`CAST(${emit(a[1])} AS TEXT)`) : raw(`CAST(${emit(a[1])} AS ${pgType})`);
 }
 
 export function mssqlTypeToPg(type: string, params: string[] = []): string {
