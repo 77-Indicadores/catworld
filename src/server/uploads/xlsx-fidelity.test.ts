@@ -105,6 +105,9 @@ describe("XLSX real", () => {
       wb.addWorksheet("fev").addRows([["id"], [2]]);
     });
     await expect(previewFile(p)).rejects.toThrow(/mais de uma aba/);
+    // mensagem acionavel: nomeia cada aba com suas linhas e diz como resolver
+    await expect(previewFile(p)).rejects.toThrow(/"jan" \(1 linha\(s\)\), "fev" \(1 linha\(s\)\)/);
+    await expect(previewFile(p)).rejects.toThrow(/Como resolver/);
   });
   it("aba extra VAZIA não atrapalha; dados só na 2ª aba é recusado", async () => {
     const ok = await book((wb) => { wb.addWorksheet("a").addRows([["id"], [1]]); wb.addWorksheet("vazia"); });

@@ -75,8 +75,13 @@ const sheetHasData=(sheet:ExcelJS.Worksheet)=>{for(const _ of xlsxDataRows(sheet
 /** Só uma aba pode ter dados: importar só a 1ª e ignorar o resto seria perder dados em silêncio (TIP-08). */
 function assertSingleDataSheet(workbook:ExcelJS.Workbook){
  const withData=workbook.worksheets.filter(sheetHasData);
- if(withData.length>1||(withData.length===1&&withData[0]!==workbook.worksheets[0]))
-  throw new Error(`A planilha tem dados em ${withData.length>1?"mais de uma aba":"uma aba que não é a primeira"} (${withData.map(s=>`"${s.name}"`).join(", ")}). O Catworld importa uma aba por arquivo: deixe só uma aba com dados (ou envie um arquivo por aba) para nenhuma linha ser ignorada.`);
+ if(withData.length>1||(withData.length===1&&withData[0]!==workbook.worksheets[0])){
+  const count=(s:ExcelJS.Worksheet)=>{let n=0;for(const _ of xlsxDataRows(s))n++;return Math.max(0,n-1)};
+  const list=withData.map(s=>`"${s.name}" (${count(s)} linha(s))`).join(", ");
+  const first=workbook.worksheets[0];
+  throw new Error(`A planilha tem dados em ${withData.length>1?"mais de uma aba":"uma aba que não é a primeira"}: ${list}. O Catworld importa UMA aba por arquivo e recusa em vez de ignorar linhas em silêncio. `+
+   `Como resolver: (1) deixe só a aba desejada com dados${first&&!withData.includes(first)?` e coloque-a como primeira aba (hoje a primeira, "${first.name}", está vazia)`:""}; ou (2) exporte cada aba como um arquivo (CSV) e envie um arquivo por aba.`);
+ }
 }
 async function previewXlsx(path:string){
  const workbook=new ExcelJS.Workbook();await workbook.xlsx.readFile(path);const sheet=workbook.worksheets[0];if(!sheet)throw new Error("Planilha sem abas");
