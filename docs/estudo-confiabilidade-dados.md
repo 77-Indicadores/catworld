@@ -229,3 +229,47 @@ Cada item deve nascer como teste que falha (harness em `importer-pg.reliability.
 - Auditoria de produção: `scratchpad/prod-study.ts`, `prod-study2.ts`, `impact.ts`, `t50.ts`.
 - Provas de campo: `scratchpad/spot1.ts` (ENT-01).
 - Testes já entregues: `parser-reliability.test.ts` (30), `importer-pg.reliability.pg.test.ts` (10), `staging-guard.test.ts`.
+
+## 12. Status da implementação (branch `hardening/data-reliability`, local, sem push)
+
+Verificação da branch: `tsc` limpo, `eslint` sem erros nos arquivos alterados e suíte completa verde (106 arquivos, 1.260 testes, incluindo os que rodam contra Postgres real). Cada correção nasceu com teste; os de integridade e atomicidade (`importer-pg.reliability.pg.test.ts`, `import-lock.pg.test.ts`, `swap-lock.pg.test.ts`, `parser-reliability.test.ts`) foram conferidos falhando no código antigo. **Nada do caminho SQL Server foi executado contra um SQL Server real** (não havia instância): tudo dele é código revisado e testado por unidade.
+
+| Item do plano | Situação | Onde |
+|---|---|---|
+| 1 Completude carregado × esperado | **Feito** (PG e SQL Server) | `integrity/policy.ts`, importers |
+| 2 Guarda de vazio e de queda | **Feito** em uploads e fontes | importers, `sources.ts` |
+| 3 Append exactly-once + reconciliação | **Feito** | `applied-marker.ts`, importers |
+| 4 Lease do lock de import | **Feito** | `db/import-lock.ts`, worker (SIGTERM libera e devolve a tentativa) |
+| 5 Filtro de excluídas falha fechado; derivadas | **Adiado** (arquivos do dono): patch e protótipo testado em `docs/deferred-patches/` | ENT-01, FON-09 |
+| 6 Tipos e conversão | **Feito** (decimal exato por coluna, sem NULL silencioso, sem estreitar) | TIP-01..13,15,16; MOT-03/04 |
+| 7 Leitura de CSV determinística | **Feito** | encoding no arquivo inteiro, dialeto explícito no DuckDB |
+| 8 Fuso UTC | **Feito** | `TZ=UTC`, `ensureUtcTimezone`, datas como texto cru |
+| 9 Importer SQL Server | **Feito no código** (colunas internas, tipos que só alargam, BIGINT/datas em UTC); **não testado em SQL Server real** | `importer.ts` |
+| 10 Cursor `since` | **Parcial**: biblioteca entregue e testada; a rota está no patch adiado | `since.ts`, `deferred/ent-05-route.md`, SDK |
+| 11 Paginação determinística | **Feito** no Postgres (o OFFSET do SQL Server não foi alterado) | `storage/paging.ts`, SDK usa stream |
+| 12 OData e `fallback` | OData **feito**; `fallback` (ENT-04) **adiado** (patch pronto) | `odata/*` |
+| 13 Fontes | **Feito** (marca d'água, janela, guardas, mudança de estrutura, escalada, lease, PATCH) | `connections/*` |
+| 14 Estado guardado e cancelamento | **Feito** | worker, `db/job-cancel.ts` |
+| 15 Nomes reservados e colisões | **Feito** (`cw_*`, 63 bytes, aviso de colisão `Obras.csv`/`obras.csv`) | `naming.ts`, `name-collision.ts` |
+| 16 Diferenças T-SQL × Postgres | **Feito** (emulado ou rejeitado); mudanças em `docs/sql-contract-changes.md` | `translate.ts` |
+| 17 Livro de integridade | **Feito** | `cw_load_ledger`, `integrity/ledger.ts` |
+| 18 "Possivelmente incompleta" e monitor | **Feito** | dashboard, `GET /api/health/integrity`, `WORKER_CRASHED` com jobs afetados |
+| 19 Desempenho | **Feito**: um índice `_cw_rh`, pipeline com sobreposição, índice `cw_synced_at`, `lock_timeout` no swap, DELETE em lotes. Import 100k×60 a 26 s → 18 s na mesma máquina (A/B alternado). Falta medir o lado SQL Server. | `importer-pg.ts`, `pg-storage.ts` |
+| 20 Trocas de contêiner (`WORKER_CRASHED`) | **Mitigado**: o supervisor retoma o lock em vez de sair; causa exata ainda a confirmar no log de produção | `supervisor/*` |
+
+### Decisões do dono antes de publicar
+
+1. **Modo da barra de integridade.** O padrão é `enforce`: cargas que hoje publicam com linhas faltando passam a **falhar** e a tabela anterior fica. Sugestão: publicar com `mode=warn` (`PATCH /api/v1/settings/integrity`), observar `GET /api/health/integrity` por alguns dias e então ligar `enforce`.
+2. **Arquivos e colunas que antes "funcionavam" com dado errado agora falham ou viram TEXT:** linha com campos a mais que o cabeçalho, coluna decimal/data ambígua (`1,234`, `04/05/2026`), offsets de fuso diferentes de UTC, XLSX com dados em várias abas, bytes inválidos em Windows-1252, valores fora do tipo mapeado.
+3. **SQL Server:** DECIMAL com mais de 15 dígitos significativos falha (o driver escreve por `Number`); decidir entre aceitar ou mover a coluna para TEXT.
+4. **Fontes:** novas fontes com chave ganham reconciliação diária por padrão (leitura completa: pesada em ERPs grandes); float/numeric sem restrição viram TEXT em fontes novas; fontes existentes que precisam alargar tipo fazem uma recarga única.
+5. **Traduções T-SQL:** `LIKE` com `[a-c]`, `CONVERT(VARCHAR(n))` truncando, `CHARINDEX`/`REPLACE` sem diferenciar caixa e `coluna + '5'` rejeitado como ambíguo mudam o resultado de consultas existentes; `AVG(int)` truncado só sob opção.
+6. **OData e export:** filtro/ordenação não suportados agora dão 400/501 (antes devolviam a tabela toda); CSV com `dateFormat=iso` por padrão e uma linha final `# RESULTADO TRUNCADO` quando cortado.
+7. **Aplicar os patches adiados** (`docs/deferred-patches/`) depois de commitar o trabalho em andamento em `hide-deleted*`, `apply.ts`, `run.ts`, `derived.ts`, rota `rows` e `docs/sql-contract.md`.
+
+### O que continua em aberto
+
+- Teste ponta a ponta em SQL Server real (BIGINT negativo/>2^53, datetime, retentativa, append exactly-once, marca no destino).
+- Confirmar no log do supervisor de produção a causa das quedas de conexão do lock e o horário.
+- Não houve otimização do import específico do SQL Server (20 a 48 min): falta medir por fase.
+- Correções de comportamento como `TIP-10` (não aparar texto, `""` ≠ NULL) e o hash `_cw_rh` **não foram alteradas** de propósito (mudariam chaves e deltas já gravados).
