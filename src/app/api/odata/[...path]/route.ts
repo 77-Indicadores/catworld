@@ -6,7 +6,7 @@ import { withPg, quotedPgTable } from "@/server/connections/postgres";
 import { executeLiveReadOnly, isMssqlConnection, liveCount, liveQuoteIdent, liveQuotedTable, type LiveConnection } from "@/server/connections/live";
 import { assertDatasetAccess } from "@/server/auth/permissions";
 import { ODataOptionError, planODataQuery, type ODataQueryPlan } from "@/server/odata/query-options";
-import { edmFacets, MAX_PAGE, nextPageParams as nextParams, parseNonNegativeInt } from "@/server/odata/paging-facets";
+import { edmFacets, MAX_PAGE, nextPageParams as nextParams, parseNonNegativeInt, parseSelect } from "@/server/odata/paging-facets";
 import { PG_STRING_TYPES } from "@/server/storage/pg-types";
 import { pgDateText, pgTimestampToIso } from "@/server/sql-contract/result";
 import { stableOrderBy, UNSTABLE_ORDER_WARNING } from "@/server/odata/stable-order";
@@ -432,7 +432,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const skip = intParam("$skip", 0);
     const nextPageParams = (returned: number) => nextParams({ top, wantedTop, topRequested, skip, returned });
 
-    const wantedCols = selectParam ? selectParam.split(",").map((s) => s.trim()).filter(Boolean) : null;
+    const wantedCols = parseSelect(selectParam);
     const unknownCols = wantedCols ? wantedCols.filter((n) => !table.columns.some((c) => c.sqlName === n)) : [];
     if (unknownCols.length) throw new ApiError(400, "ODATA_INVALID_QUERY", `$select referencia coluna(s) inexistente(s): ${unknownCols.join(", ")}`);
     const cols = wantedCols ? table.columns.filter((c) => wantedCols.includes(c.sqlName)) : table.columns;
@@ -477,7 +477,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       const np = nextPageParams(rows.length);
       if (np) {
         const next = new URL(`${baseUrl}/${table.sqlName}`);
-        next.searchParams.set("$top", np.top);
+        if (np.top !== null) next.searchParams.set("$top", np.top);
         next.searchParams.set("$skip", np.skip);
         if (selectParam) next.searchParams.set("$select", selectParam);
         if (needCount) next.searchParams.set("$count", "true");
@@ -500,7 +500,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
           const np = nextPageParams(dataRowsLength);
           if (np) {
             const next = new URL(`${baseUrl}/${table.sqlName}`);
-            next.searchParams.set("$top", np.top);
+            if (np.top !== null) next.searchParams.set("$top", np.top);
             next.searchParams.set("$skip", np.skip);
             if (selectParam) next.searchParams.set("$select", selectParam);
             if (needCount) next.searchParams.set("$count", "true");
