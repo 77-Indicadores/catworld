@@ -727,7 +727,8 @@ export async function refreshDatasetSource(datasetSourceId: string, opts?: { rec
     const message = e instanceof Error ? e.message : String(e);
     // A tentativa que falha também vai para o livro (com o motivo estruturado se for a barra de integridade) e, nesse caso, para a auditoria.
     const failedEntry = {
-      kind: "source" as const, outcome: "FAILED" as const, verdict: (e instanceof IntegrityError ? e.evaluation.verdict : "FAILED") as "FAILED" | "SUSPECT" | "OK",
+      kind: "source" as const, outcome: "FAILED" as const, // falha operacional (rede, timeout, 409): "ERROR", nao "FAILED" — a tabela anterior esta intacta e nao deve virar "possivelmente incompleta" (M1)
+      verdict: (e instanceof IntegrityError ? e.evaluation.verdict : "ERROR") as "FAILED" | "SUSPECT" | "OK" | "ERROR",
       datasetId: source.datasetId, tableId: source.targetTable?.id ?? null, sourceId: source.id, tableName: source.targetTable?.sqlName ?? null,
       mode: reconciliation ? "reconciliation" : "incremental", prevRows: Number(source.lastRowCount ?? 0n),
       detail: e instanceof IntegrityError ? evaluationDetail(e.evaluation) : { error: message.slice(0, 500) },

@@ -514,7 +514,10 @@ model LoadLedger {
   prevRows     BigInt?  @map("prev_rows")
   detailJson   String?  @map("detail_json") @db.Text
 
-  @@index([createdAt])
-  @@index([tableId, createdAt])
+  // Nomes explicitos = os das migracoes (202609200004/5): o Prisma nao ve deriva. O indice parcial cw_load_ledger_attention_idx
+  // (WHERE verdict <> 'OK') nao tem representacao no schema do Prisma e existe so na migracao.
+  @@index([createdAt], map: "cw_load_ledger_created_idx")
+  @@index([tableId, createdAt], map: "cw_load_ledger_table_idx")
+  @@index([datasetId, tableName, createdAt(sort: Desc)], map: "cw_load_ledger_ds_table_idx")
   @@map("cw_load_ledger")
 }

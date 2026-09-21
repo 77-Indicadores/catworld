@@ -8,10 +8,17 @@
 import { prisma } from "@/server/db";
 import type { Evaluation, Verdict } from "./policy";
 
+/**
+ * `ERROR` = a tentativa falhou por causa TRANSITORIA/operacional (rede, timeout, 409 de estrutura, trava perdida) e a tabela anterior
+ * segue intacta: nao e problema de integridade e nao entra em "precisa de atencao". `FAILED` e so a barra de integridade
+ * (IntegrityError); `SUSPECT` = publicada, mas possivelmente incompleta.
+ */
+export type LedgerVerdict = Verdict | "ERROR";
+
 export type LedgerEntry = {
   kind: "upload" | "source" | "derived";
   outcome: "COMPLETED" | "FAILED";
-  verdict: Verdict;
+  verdict: LedgerVerdict;
   datasetId?: string | null;
   tableId?: string | null;
   uploadId?: string | null;
@@ -82,35 +89,77 @@ function firstReason(detailJson: string | null): string | null {
   } catch { return null; }
 }
 
+/** Retencao do livro (dias): sem ela a tabela cresce sem limite e o resumo varre tudo. */
+export const LEDGER_RETENTION_DAYS = 90;
+
+/**
+ * Apaga entradas com mais de `days` dias, em lotes curtos (um DELETE unico de milhoes de linhas segura locks e gera pico de WAL; ver
+ * db/batched-delete.ts, que so aceita cw_audit_events/cw_jobs — por isso o mesmo padrao vive aqui). Chamar da rotina de retencao
+ * dos metadados (worker), uma vez por ciclo: `await purgeLedger()`.
+ */
+export async function purgeLedger(days = LEDGER_RETENTION_DAYS, batch = 20_000, maxBatches = 500): Promise<number> {
+  const size = Math.max(1, Math.floor(batch));
+  let total = 0;
+  for (let i = 0; i < maxBatches; i++) {
+    const n = await prisma.$executeRawUnsafe(
+      `DELETE FROM cw_load_ledger WHERE ctid IN (SELECT ctid FROM cw_load_ledger WHERE created_at < now() - ($1::text || ' days')::interval LIMIT ${size})`,
+      String(Math.max(1, Math.floor(days))),
+    );
+    total += n;
+    if (n < size) break;
+  }
+  return total;
+}
+
 export type IntegritySummary = {
   windowHours: number;
   loads: number;
   failed: number;
   suspect: number;
   /** tabelas cujo ÚLTIMO veredito não foi OK */
-  tablesNeedingAttention: { tableId: string | null; tableName: string | null; verdict: string; lastAt: string; expectedRows: number | null; parsedRows: number | null; reason: string | null }[];
+  tablesNeedingAttention: { mode?: string | null; tableId: string | null; tableName: string | null; verdict: string; lastAt: string; expectedRows: number | null; parsedRows: number | null; reason: string | null }[];
 };
 
-/** Resumo para o endpoint de saúde e o dashboard. */
+/**
+ * Resumo para o endpoint de saúde e o dashboard.
+ *
+ * "Precisa de atenção" = o ÚLTIMO veredito, por (tabela, tipo de rodada: reconciliação x demais), é SUSPECT ou uma barra de integridade
+ * (FAILED com motivos estruturados). Falha transitória (`ERROR`, ou FAILED só com `error`: rede, timeout, 409) NÃO conta: a tabela
+ * anterior está intacta. Uma reconciliação barrada não é mascarada por um incremental OK depois: só uma reconciliação bem-sucedida a
+ * limpa. Ficam de fora tabelas que não existem mais, cuja fonte foi apagada, ou cujas origens estão todas pausadas/inativas (nada mais
+ * vai carregar para limpar o alerta).
+ */
 export async function summarizeIntegrity(windowHours = 24): Promise<IntegritySummary> {
   const counts = await prisma.$queryRaw<{ verdict: string; outcome: string; n: bigint }[]>`
     SELECT verdict, outcome, COUNT(*) AS n FROM cw_load_ledger WHERE created_at > now() - (${windowHours}::text || ' hours')::interval GROUP BY 1, 2`;
-  // Último veredito por TABELA (dataset + nome): a falha de uma tentativa não conhece o table_id, então a chave é dataset+nome e o id é
-  // resolvido pelo catálogo. Uma carga OK posterior encerra o alerta (a linha mais recente vence).
-  const last = await prisma.$queryRaw<{ table_id: string | null; table_name: string | null; verdict: string; created_at: Date; expected_rows: bigint | null; parsed_rows: bigint | null; detail_json: string | null }[]>`
-    SELECT DISTINCT ON (l.dataset_id, l.table_name)
-           COALESCE(l.table_id, (SELECT t.id FROM cw_tables t WHERE t.dataset_id = l.dataset_id AND t.sql_name = l.table_name)) AS table_id,
-           l.table_name, l.verdict, l.created_at, l.expected_rows, l.parsed_rows, l.detail_json
-    FROM cw_load_ledger l WHERE l.created_at > now() - interval '7 days' AND l.table_name IS NOT NULL
-    ORDER BY l.dataset_id, l.table_name, l.created_at DESC`;
+  type Row = { table_id: string | null; table_name: string | null; mode: string | null; verdict: string; created_at: Date; expected_rows: bigint | null; parsed_rows: bigint | null; detail_json: string | null };
+  const last = await prisma.$queryRaw<Row[]>`
+    WITH last AS (
+      SELECT DISTINCT ON (l.dataset_id, l.table_name, (COALESCE(l.mode, '') = 'reconciliation'))
+             l.dataset_id, l.table_id, l.source_id, l.table_name, l.mode, l.verdict, l.created_at, l.expected_rows, l.parsed_rows, l.detail_json
+      FROM cw_load_ledger l WHERE l.created_at > now() - interval '7 days' AND l.table_name IS NOT NULL
+      ORDER BY l.dataset_id, l.table_name, (COALESCE(l.mode, '') = 'reconciliation'), l.created_at DESC)
+    SELECT t.id AS table_id, l.table_name, l.mode, l.verdict, l.created_at, l.expected_rows, l.parsed_rows, l.detail_json
+    FROM last l
+    JOIN cw_tables t ON t.id = COALESCE(l.table_id, (SELECT t2.id FROM cw_tables t2 WHERE t2.dataset_id = l.dataset_id AND t2.sql_name = l.table_name))
+    WHERE (l.verdict = 'SUSPECT' OR (l.verdict = 'FAILED' AND l.detail_json LIKE '%"reasons"%'))
+      AND (l.source_id IS NULL OR EXISTS (SELECT 1 FROM cw_dataset_sources s WHERE s.id = l.source_id))
+      AND NOT (
+        (EXISTS (SELECT 1 FROM cw_dataset_sources s WHERE s.target_table_id = t.id) OR EXISTS (SELECT 1 FROM cw_derived_tables d WHERE d.target_table_id = t.id))
+        AND NOT EXISTS (SELECT 1 FROM cw_dataset_sources s WHERE s.target_table_id = t.id AND s.active)
+        AND NOT EXISTS (SELECT 1 FROM cw_derived_tables d WHERE d.target_table_id = t.id AND d.active))
+    ORDER BY l.created_at DESC`;
+  // Uma entrada por tabela (a mais recente entre os tipos de rodada).
+  const seen = new Set<string>();
+  const attention = last.filter((r) => { const k = r.table_id ?? `${r.table_name}`; if (seen.has(k)) return false; seen.add(k); return true; });
   const n = (v: string, o?: string) => counts.filter((c) => c.verdict === v && (!o || c.outcome === o)).reduce((s, c) => s + Number(c.n), 0);
   return {
     windowHours,
     loads: counts.reduce((s, c) => s + Number(c.n), 0),
     failed: counts.filter((c) => c.outcome === "FAILED").reduce((s, c) => s + Number(c.n), 0),
     suspect: n("SUSPECT"),
-    tablesNeedingAttention: last.filter((r) => r.verdict !== "OK").map((r) => ({
-      tableId: r.table_id, tableName: r.table_name, verdict: r.verdict, lastAt: r.created_at.toISOString(),
+    tablesNeedingAttention: attention.map((r) => ({
+      mode: r.mode, tableId: r.table_id, tableName: r.table_name, verdict: r.verdict, lastAt: r.created_at.toISOString(),
       expectedRows: r.expected_rows === null ? null : Number(r.expected_rows), parsedRows: r.parsed_rows === null ? null : Number(r.parsed_rows),
       reason: firstReason(r.detail_json),
     })),

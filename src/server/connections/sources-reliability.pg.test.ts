@@ -131,7 +131,7 @@ d("fontes conectadas: confiabilidade (Postgres real)", () => {
   }
   const storageIds = async () => (await stor(`SELECT id FROM ${SCHEMA}.orders ORDER BY id`)).map(r => String(r.id));
 
-  it("FON-02: empate na marca, NULL no delta e commit tardio (dentro da janela) entram; o que ficou alem da janela so a reconciliacao pega; sem duplicar", async () => {
+  it("FON-02/H4: empate na marca e commit tardio (dentro da janela) entram; delta NULL e o que ficou alem da janela so a reconciliacao pega (o incremental nao re-le NULL); sem duplicar", async () => {
     await resetOrders();
     const s = newSource();
     await refreshDatasetSource(s.id);
@@ -145,7 +145,8 @@ d("fontes conectadas: confiabilidade (Postgres real)", () => {
     await erpq(`INSERT INTO public.orders VALUES (1004, timestamp '${max}' - interval '3 hours', 'alem')`);      // alem da janela
     await refreshDatasetSource(s.id);
     const ids = await storageIds();
-    expect(ids).toContain("1001"); expect(ids).toContain("1002"); expect(ids).toContain("1003");
+    expect(ids).toContain("1001"); expect(ids).toContain("1003");
+    expect(ids).not.toContain("1002"); // H4: linha NOVA com delta NULL chega na reconciliacao (o incremental nao re-le todas as de delta NULL)
     expect(ids).not.toContain("1004");
     await refreshDatasetSource(s.id); // repetir e inofensivo
     expect(await storageIds()).toEqual(ids);
@@ -153,6 +154,7 @@ d("fontes conectadas: confiabilidade (Postgres real)", () => {
 
     await refreshDatasetSource(s.id, { reconciliation: true });
     expect(await storageIds()).toContain("1004");
+    expect(await storageIds()).toContain("1002");
     // oraculo: storage == ERP
     const a = await erpq(`SELECT "Id"::text AS id, "Val" AS v FROM public.orders ORDER BY 1`);
     const b = await stor(`SELECT id::text AS id, val AS v FROM ${SCHEMA}.orders ORDER BY 1`);

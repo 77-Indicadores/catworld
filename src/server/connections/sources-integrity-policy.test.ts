@@ -9,6 +9,7 @@ const prismaMock = vi.hoisted(() => ({
   $transaction: vi.fn(async (ops: unknown[]) => ops),
   $queryRawUnsafe: vi.fn(),
   $executeRawUnsafe: vi.fn(),
+  $executeRaw: vi.fn(async () => 1),
 }));
 const storage = vi.hoisted(() => ({
   createSchemaIfNotExists: vi.fn(), dropTableIfExists: vi.fn(), createTable: vi.fn(), bulkInsert: vi.fn(), query: vi.fn(),
@@ -123,6 +124,24 @@ describe("H3: guarda de queda/vazio da fonte", () => {
     vi.clearAllMocks();
     setup(base({ sourceKind: "query", sourceSql: "SELECT 1", sourceSqlReconciliation: "SELECT 2", keyColumn: "id", detectDeletions: true, lastRowCount: 100n }), () => nRows(40), 100);
     await expect(refreshDatasetSource(ID, { reconciliation: true })).rejects.toThrow(/DROP_GT_PCT/);
+  });
+});
+
+describe("M1a: falha operacional vai para o livro como ERROR, barra de integridade como FAILED", () => {
+  beforeEach(() => vi.clearAllMocks());
+  // valores do INSERT em ordem: kind, dataset, table, upload, source, job, tableName, mode, attempt, outcome, VEREDITO, ...
+  const verdicts = () => prismaMock.$executeRaw.mock.calls.map((c) => (c as unknown[])[11] as string);
+  it("erro de rede/timeout: ERROR", async () => {
+    setup(base(), () => nRows(1000));
+    storage.createTable.mockRejectedValue(new Error("ETIMEDOUT"));
+    await expect(refreshDatasetSource(ID)).rejects.toThrow("ETIMEDOUT");
+    expect(verdicts()).toContain("ERROR");
+    expect(verdicts()).not.toContain("FAILED");
+  });
+  it("barra de integridade: FAILED", async () => {
+    setup(base(), () => nRows(100));
+    await expect(refreshDatasetSource(ID)).rejects.toThrow(/DROP_GT_PCT/);
+    expect(verdicts()).toContain("FAILED");
   });
 });
 
