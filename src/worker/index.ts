@@ -3,6 +3,7 @@ import { buildClaimSql } from "./claim";
 import { isSourceBusyError } from "./source-failure";
 import { getUploadFilesDays, purgeExpiredUploadFiles } from "@/server/uploads/file-retention";
 import { releaseAllImportLocks } from "@/server/db/import-lock";
+import { runWithCancelToken, watchJobStatus } from "@/server/db/job-cancel";
 import { createWriteStream } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
@@ -350,6 +351,9 @@ async function work(job: Claimed) {
   }
 
   const heartbeat = startHeartbeat(job.id);
+  // Cancelamento cooperativo: se o job deixar de estar RUNNING (cancelado) durante o import, o importer aborta antes de publicar.
+  const cancelToken = { cancelled: false };
+  const stopWatching = watchJobStatus(cancelToken, async () => (await prisma.job.findUnique({ where: { id: job.id }, select: { status: true } }))?.status ?? null);
 
   try {
     if (job.type === "PREVIEW_UPLOAD") {
@@ -376,7 +380,7 @@ async function work(job: Claimed) {
       // This prevents csv-parse quote-handling discrepancies from dropping rows at end of file.
       const file = await localOriginals(upload);
       try {
-        await importUpload(upload.id, file.path);
+        await runWithCancelToken(cancelToken, () => importUpload(upload.id, file.path));
       } finally {
         await rm(file.dir, { recursive: true, force: true });
       }
@@ -392,6 +396,7 @@ async function work(job: Claimed) {
     }
   } finally {
     clearInterval(heartbeat);
+    stopWatching();
   }
 }
 

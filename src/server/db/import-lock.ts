@@ -1,5 +1,6 @@
 import { hostname } from "node:os";
 import { prisma } from "@/server/db";
+import { assertNotCancelled } from "./job-cancel";
 
 // Trava de import por tabela: lock por linha em cw_import_locks (nunca uma transação Postgres de vida longa — o trabalho protegido é
 // externo, ex.: SQL Server, e pode legitimamente levar minutos).
@@ -110,7 +111,10 @@ export async function withImportLock<T>(
   const lease: Lease = {
     key,
     get lost() { return lost || Date.now() - lastOkAt >= leaseMs; },
-    assert() { if (lease.lost) throw new LeaseLostError(key); },
+    assert() {
+      if (lease.lost) throw new LeaseLostError(key);
+      assertNotCancelled(); // job cancelado enquanto importava: aborta antes de publicar
+    },
   };
 
   try {
