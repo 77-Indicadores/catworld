@@ -78,11 +78,27 @@ describe("CSV bem formado: exatamente as linhas do arquivo", () => {
 });
 
 describe("CSV malformado: nada some em silêncio (o bug real)", () => {
+  // TIP-07: campos a MAIS que o cabeçalho perderiam valores: o import é RECUSADO nomeando a linha (antes entregava as linhas com
+  // as células extras perdidas em silêncio). Linha do arquivo = índice do dado + 1 (cabeçalho é a linha 1).
+  const tooMany: [string, Opts, number][] = [
+    ["coluna a MAIS no meio (linha 60.000 de 100.000)", { n: 100_000, bad: { 60_000: "60000,nome,1,SOBRA,MAIS" } }, 60_001],
+    ["coluna a MAIS logo após o 1º chunk (linha 2.049)", { n: 5000, bad: { 2049: "2049,nome,1,SOBRA" } }, 2050],
+    ["coluna a MAIS na última linha", { n: 5000, bad: { 5000: "5000,nome,1,SOBRA" } }, 5001],
+    ["várias linhas com coluna a mais espalhadas", { n: 20_000, bad: { 3000: "3000,a,1,X", 9000: "9000,a,1,X,Y", 15_000: "15000,a,1,X" } }, 3001],
+  ];
+  for (const [label, o, line] of tooMany) {
+    for (const enc of ["utf8", "latin1"] as const) {
+      it(`${label} — ${enc}: erro alto nomeando a linha ${line}`, async () => {
+        await expect(read(csv(`extra-${enc}-${label.length}.csv`, { ...o, enc }))).rejects.toThrow(new RegExp(`Linha ${line} `));
+      });
+    }
+  }
+  it("campos extras VAZIOS no fim (vírgula sobrando) não perdem nada e são aceitos", async () => {
+    const { rows } = await read(csv("trailing.csv", { n: 3000, bad: { 1500: "1500,nome,1,,", 2: "2,nome,1,\"\"" } }));
+    expectExactly(rows, 3000);
+  });
+
   const cases: [string, Opts][] = [
-    ["coluna a MAIS no meio (linha 60.000 de 100.000)", { n: 100_000, bad: { 60_000: "60000,nome,1,SOBRA,MAIS" } }],
-    ["coluna a MAIS logo após o 1º chunk (linha 2.049)", { n: 5000, bad: { 2049: "2049,nome,1,SOBRA" } }],
-    ["coluna a MAIS na última linha", { n: 5000, bad: { 5000: "5000,nome,1,SOBRA" } }],
-    ["várias linhas com coluna a mais espalhadas", { n: 20_000, bad: { 3000: "3000,a,1,X", 9000: "9000,a,1,X,Y", 15_000: "15000,a,1,X" } }],
     ["coluna a MENOS", { n: 100_000, bad: { 60_000: "60000,so" } }],
     ["aspas no meio de um campo", { n: 100_000, bad: { 60_000: '60000,nome "x" y,5' } }],
   ];
@@ -91,11 +107,11 @@ describe("CSV malformado: nada some em silêncio (o bug real)", () => {
       const { prev, rows } = await read(csv(`bad-${label.length}.csv`, o));
       expectExactly(rows, o.n);
       expect(prev.rowCount).toBe(o.n);
-    });
+    }, 30_000);
     it(`${label} — arquivo Windows-1252`, async () => {
       const { rows } = await read(csv(`bad-w-${label.length}.csv`, { ...o, enc: "latin1" }));
       expectExactly(rows, o.n);
-    });
+    }, 30_000);
   }
   it("linha em branco no meio não vira linha nem derruba o resto", async () => {
     const p = csv("blank.csv", { n: 10_000, bad: { 5000: "" } });

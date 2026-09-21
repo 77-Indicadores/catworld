@@ -107,12 +107,11 @@ d("import Postgres: atomicidade e integridade (real)", () => {
     expect(await fingerprint("t_swap")).toBe(await expectedFingerprint(4500, "v2"));
   });
 
-  it("o BUG REAL: linha com coluna a mais depois da amostra do sniffer — todas as linhas chegam ao banco", async () => {
+  it("o BUG REAL: linha com coluna a mais (TIP-07): o import é RECUSADO nomeando a linha e nada é publicado pela metade", async () => {
     const n = 60_000;
-    await run(file("c.csv", n, "v1", { 50_000: "50000,x,1,SOBRA,MAIS" }), "t_bad");
-    expect(await count("t_bad")).toBe(n);                          // antes: 49.152 (perdia o resto em silêncio)
-    const ids = (await pool.query(`SELECT count(DISTINCT id) n FROM ${SCHEMA}.t_bad`)).rows[0].n;
-    expect(Number(ids)).toBe(n);                                    // sem duplicata
+    await expect(run(file("c.csv", n, "v1", { 50_000: "50000,x,1,SOBRA,MAIS" }), "t_bad")).rejects.toThrow(/Linha 50001/);
+    // antes: 49.152 linhas entregues sem erro; depois do 1o hotfix: 60.000 com as celulas extras perdidas; agora: falha alta
+    await expect(count("t_bad")).rejects.toThrow();   // a tabela nem foi criada
   }, 120_000);
 
   it("import que FALHA no meio não mexe na tabela existente (atomicidade)", async () => {

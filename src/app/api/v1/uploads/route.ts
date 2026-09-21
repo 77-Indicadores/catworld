@@ -11,6 +11,7 @@ import { ApiError, handleApiError, ok } from "@/server/http";
 import { uploadVisibilityWhere } from "@/server/uploads/access";
 import { assertTableInDataset } from "@/server/uploads/actions";
 import { uploadTarget } from "@/server/storage";
+import { normalizeTypeOverride } from "@/server/uploads/type-override";
 import { checkRateLimit } from "@/server/query/protection";
 
 export async function GET(r: NextRequest) {
@@ -55,7 +56,7 @@ export async function POST(r: NextRequest) {
       // normalizado do cabeçalho, valor = um dos tipos canonicos aceitos em
       // applyTypeOverrides). Aplicado durante PREVIEW_UPLOAD, antes do import —
       // ver src/worker/index.ts.
-      typeOverrides: z.record(z.string(), z.string()).optional(),
+      typeOverrides: z.record(z.string(), z.string().refine((t) => normalizeTypeOverride(t) !== null, "tipo de override inválido (use BIGINT, DECIMAL(p,s) com p<=38, DATE, DATETIME2, TIME ou NVARCHAR(MAX))")).optional(),
     }).parse(await r.json());
 
     const limits = await getUploadLimits();

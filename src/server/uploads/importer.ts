@@ -1,5 +1,5 @@
 import * as Sentry from "@sentry/nextjs";
-import { physicalDecimal } from "@/lib/decimal-type";
+import { physicalDecimal, parseDecimalType, DECIMAL_LEGACY } from "@/lib/decimal-type";
 import { IntegrityError, evaluateLoad, getIntegritySettings, type Evaluation } from "@/server/integrity/policy";
 import { auditIntegrity, evaluationDetail, ledgerInsert, recordLedger } from "@/server/integrity/ledger";
 import { MSSQL_MARKER_DDL, MSSQL_MARKER_INSERT, MSSQL_MARKER_SELECT } from "./applied-marker";
@@ -17,6 +17,7 @@ import { quoteIdentifier, sqlIdentifier } from "@/server/security/naming";
 import { previewFile, rowsFromFile, type FilePreview, type ParsedColumn, type RowsFromFileOpts, type ParseStats } from "./parser";
 import { env } from "@/server/env";
 import { normalizeDateLike } from "./date-normalize";
+import { convertForTds, decimalTsqlExpr } from "./convert-values";
 
 
 function sqlTypeDef(type: string): string {
@@ -36,17 +37,18 @@ function cleanedRef(column: ParsedColumn, alias: string): string {
   return `NULLIF(LTRIM(RTRIM(${alias}.${quoteIdentifier(column.sqlName)})),'')`;
 }
 
-function typedSelectExpr(column: ParsedColumn, alias: string): string {
+export function typedSelectExpr(column: ParsedColumn, alias: string): string {
   const value = cleanedRef(column, alias);
   if (column.sqlType === "BIGINT") return `TRY_CONVERT(BIGINT,${value})`;
-  if (column.sqlType.startsWith("DECIMAL")) {
-    return `TRY_CONVERT(DECIMAL(18,4),CASE WHEN ${value} LIKE '%,%' THEN REPLACE(REPLACE(${value},'.',''),',','.') ELSE ${value} END)`;
-  }
+  if (column.sqlType.startsWith("DECIMAL")) return decimalTsqlExpr(value, column);
+  // Convenção dd/mm × mm/dd é da COLUNA (decidida pelo arquivo inteiro): só o estilo dela entra no COALESCE, nunca os dois por valor.
+  const slashStyle = column.dateOrder === "mdy" ? 101 : 103;
+  const styles = (iso: number[]) => column.dateOrder ? [...iso, slashStyle] : [...iso, 103, 101]; // sem convenção (mapeamento antigo): legado
   if (column.sqlType === "DATE") {
-    return `COALESCE(TRY_CONVERT(DATE,${value},23),TRY_CONVERT(DATE,${value},126),TRY_CONVERT(DATE,${value},103),TRY_CONVERT(DATE,${value},101))`;
+    return `COALESCE(${styles([23, 126]).map(st => `TRY_CONVERT(DATE,${value},${st})`).join(",")})`;
   }
   if (column.sqlType === "DATETIME2") {
-    return `COALESCE(TRY_CONVERT(DATETIME2,${value},126),TRY_CONVERT(DATETIME2,${value},120),TRY_CONVERT(DATETIME2,${value},103),TRY_CONVERT(DATETIME2,${value},101))`;
+    return `COALESCE(${styles([126, 120]).map(st => `TRY_CONVERT(DATETIME2,${value},${st})`).join(",")})`;
   }
   if (column.sqlType === "TIME") return `TRY_CONVERT(TIME,${value})`;
   return `${alias}.${quoteIdentifier(column.sqlName)}`;
@@ -68,59 +70,12 @@ function stagingColType(sqlType: string): string {
 /** mssql column type for TDS bulk copy into a typed staging table */
 function tdsColType(sqlType: string): sql.ISqlType | (() => sql.ISqlType) {
   if (sqlType === "BIGINT") return sql.BigInt;
-  if (sqlType.startsWith("DECIMAL")) return sql.Decimal(18, 4);
+  if (sqlType.startsWith("DECIMAL")) { const d = parseDecimalType(sqlType) ?? DECIMAL_LEGACY; return sql.Decimal(d.precision, d.scale); }
   if (sqlType === "DATE") return sql.Date;
   if (sqlType === "DATETIME2") return sql.DateTime2;
   if (sqlType === "TIME") return sql.Time;
   if (sqlType === "NVARCHAR(MAX)") return sql.NVarChar(sql.MAX);
   return sql.NVarChar(4000);
-}
-
-/** Convert a raw string value to a JS value suitable for TDS into a typed staging column. */
-function convertForTds(v: unknown, sqlType: string): unknown {
-  const s = v == null ? "" : String(v).trim();
-  if (!s) return null;
-  if (sqlType === "BIGINT") {
-    if (!/^-?\d+$/.test(s)) return null;
-    try {
-      const b = BigInt(s);
-      // SQL Server BIGINT is signed 64-bit: -(2^63) to 2^63-1
-      if (b < 0n || b > 9223372036854775807n) return null; // tedious BigInt handler requires >= 0n
-      return Number(b);
-    } catch { return null; }
-  }
-  if (sqlType.startsWith("DECIMAL")) {
-    const lastDot = s.lastIndexOf(".");
-    const lastComma = s.lastIndexOf(",");
-    const cleaned = lastComma > lastDot
-      ? s.replaceAll(".", "").replace(",", ".") // BR: "1.234,56"
-      : s.replaceAll(",", "");                  // US/neutral: "1,234.56"
-    const n = Number.parseFloat(cleaned);
-    // DECIMAL(18,4) max integer part is 14 digits; reject larger values
-    if (!Number.isFinite(n) || Math.abs(n) >= 1e14) return null;
-    return n;
-  }
-  if (sqlType === "DATE" || sqlType === "DATETIME2") {
-    const d = normalizeDateLike(s);
-    if (!d) return null;
-    // Ensure proper ISO 8601: space→T, truncate fractional seconds to 3 digits
-    // (SQL Server exports "2023-01-15 08:30:00.0000000" which V8 may reject)
-    const iso = d.replace(" ", "T").replace(/(\.\d{3})\d+/, "$1");
-    const date = new Date(iso);
-    return isNaN(date.getTime()) ? null : date;
-  }
-  if (sqlType === "TIME") {
-    // mssql sql.Time requires a Date object — passing a string throws "Invalid time."
-    if (!/^\d{1,2}:\d{2}(:\d{2})?(\.\d+)?$/.test(s)) return null;
-    const [hh, mm, ss = "0"] = s.split(":");
-    const [sec, frac = "0"] = ss.split(".");
-    const h = Number(hh), m = Number(mm), se = Number(sec), ms = Math.round(Number("0." + frac) * 1000);
-    if (h > 23 || m > 59 || se > 59) return null;
-    const d = new Date(1970, 0, 1, h, m, se, ms);
-    return isNaN(d.getTime()) ? null : d;
-  }
-  // Strip null bytes — they can corrupt the TDS BCP stream (error 4815)
-  return s.replace(/\x00/g, "") || null;
 }
 
 // ─── TDS bulk copy ────────────────────────────────────────────────────────────
@@ -182,7 +137,7 @@ async function tdsBulkCopy(
     const { createHash: ch } = await import("node:crypto");
     for (const row of batch) {
       const vals = typed
-        ? mapping.map(c => convertForTds(row[c.sqlName], c.sqlType))
+        ? mapping.map(c => convertForTds(row[c.sqlName], c))
         : mapping.map(c => stringify(row[c.sqlName]));
       const rh = ch("md5").update(mapping.map(c => String(row[c.sqlName] ?? "")).join("|")).digest("hex");
       vals.push(rh);
