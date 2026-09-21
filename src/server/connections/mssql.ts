@@ -5,6 +5,7 @@ import { sqlIdentifier } from "@/server/security/naming";
 import { ApiError } from "@/server/http";
 import type { SourceColumn } from "./postgres";
 import { resolveEffectiveTarget, type SshTunnelConnection } from "./ssh-tunnel";
+import { TEXT_TYPE, decimalOrText } from "./source-values";
 
 export type MssqlConnection = SshTunnelConnection & {
   server: string;
@@ -30,7 +31,8 @@ function config(connection: MssqlConnection, target: { host: string; port: numbe
     database: connection.databaseName,
     user: connection.username,
     password,
-    options: { encrypt, trustServerCertificate },
+    // useUTC (padrao do driver, explicito aqui): datetime sem fuso e lido como UTC, sem passar pelo fuso do processo.
+    options: { encrypt, trustServerCertificate, useUTC: true },
     connectionTimeout: 10000,
     requestTimeout: 120000,
   };
@@ -86,15 +88,19 @@ export async function tableColumnsMssql(connection: MssqlConnection, schema: str
     const result = await pool.request()
       .input("schema", sql.NVarChar(128), schema)
       .input("table", sql.NVarChar(128), table)
-      .query<{ column_name: string; data_type: string; is_nullable: string }>(
-        `SELECT COLUMN_NAME AS column_name, DATA_TYPE AS data_type, IS_NULLABLE AS is_nullable FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=@schema AND TABLE_NAME=@table ORDER BY ORDINAL_POSITION`,
+      .query<{ column_name: string; data_type: string; is_nullable: string; numeric_precision: number | null; numeric_scale: number | null }>(
+        `SELECT COLUMN_NAME AS column_name, DATA_TYPE AS data_type, IS_NULLABLE AS is_nullable, NUMERIC_PRECISION AS numeric_precision, NUMERIC_SCALE AS numeric_scale FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=@schema AND TABLE_NAME=@table ORDER BY ORDINAL_POSITION`,
       );
-    return result.recordset.map((row) => ({
-      originalName: row.column_name,
-      sqlName: sqlIdentifier(row.column_name),
-      sqlType: mapMssqlType(row.data_type),
-      nullable: row.is_nullable !== "NO",
-    }));
+    return result.recordset.map((row) => {
+      const m = mapMssqlType(row.data_type, row.numeric_precision, row.numeric_scale);
+      return {
+        originalName: row.column_name,
+        sqlName: sqlIdentifier(row.column_name),
+        sqlType: m.sqlType,
+        nullable: row.is_nullable !== "NO",
+        ...(m.lossyNumeric ? { lossyNumeric: true } : {}),
+      };
+    });
   });
 }
 
@@ -102,14 +108,18 @@ export async function queryColumnsMssql(connection: MssqlConnection, query: stri
   const statement = safeStatementMssql(query);
   return withMssql(connection, async (pool) => {
     const result = await pool.request().query(probeStatementMssql(statement));
-    const cols = result.recordset.columns as Record<string, { name: string; type: unknown; nullable?: boolean }> | undefined;
+    const cols = result.recordset.columns as Record<string, { name: string; type: unknown; nullable?: boolean; precision?: number; scale?: number }> | undefined;
     if (!cols) return [];
-    return Object.values(cols).map((col) => ({
-      originalName: col.name,
-      sqlName: sqlIdentifier(col.name),
-      sqlType: mapMssqlColType(col.type),
-      nullable: col.nullable ?? true,
-    }));
+    return Object.values(cols).map((col) => {
+      const m = mapMssqlColType(col.type, col.precision, col.scale);
+      return {
+        originalName: col.name,
+        sqlName: sqlIdentifier(col.name),
+        sqlType: m.sqlType,
+        nullable: col.nullable ?? true,
+        ...(m.lossyNumeric ? { lossyNumeric: true } : {}),
+      };
+    });
   });
 }
 
@@ -196,9 +206,23 @@ export async function* streamMssqlRows(connection: MssqlConnection, query: strin
   // Use a longer timeout for full-table streaming — the query may run for many minutes
   const tunnel = await resolveEffectiveTarget(connection, 1433);
   const pool = new sql.ConnectionPool({ ...config(connection, tunnel), requestTimeout: 7_200_000 });
+  // Sem listener, um erro do pool fora de uma requisicao derruba o processo (unhandled 'error').
+  pool.on("error", (err: Error) => console.warn(`[source-stream] erro no pool da origem: ${err.message}`));
   await pool.connect();
+  let tx: sql.Transaction | null = null;
   try {
-    const request = new sql.Request(pool);
+    // Isolamento (FON-18): sem SNAPSHOT, uma leitura longa em READ COMMITTED pode pular ou repetir linhas movidas durante a
+    // extracao. SNAPSHOT so existe se o banco habilitou ALLOW_SNAPSHOT_ISOLATION; sem isso segue em READ COMMITTED
+    // (REPEATABLE READ seguraria travas compartilhadas e bloquearia o ERP). Nao testado contra SQL Server real.
+    try {
+      const st = await pool.request().query<{ s: number }>("SELECT snapshot_isolation_state AS s FROM sys.databases WHERE name = DB_NAME()");
+      if (st.recordset[0]?.s === 1) {
+        const t = new sql.Transaction(pool);
+        await t.begin(sql.ISOLATION_LEVEL.SNAPSHOT);
+        tx = t;
+      }
+    } catch { tx = null; }
+    const request = tx ? new sql.Request(tx) : new sql.Request(pool);
     request.stream = true;
 
     let batch: Record<string, unknown>[] = [];
@@ -246,9 +270,18 @@ export async function* streamMssqlRows(connection: MssqlConnection, query: strin
       }
     }
   } finally {
+    if (tx) await tx.rollback().catch(() => undefined);
     await pool.close().catch(() => undefined);
     await tunnel.close().catch(() => undefined);
   }
+}
+
+/** Relogio da origem em UTC (limita a marca d'agua de fontes incrementais). */
+export async function sourceClockMssql(connection: MssqlConnection): Promise<Date> {
+  return withMssql(connection, async (pool) => {
+    const r = await pool.request().query<{ now: string }>("SELECT CONVERT(varchar(33), SYSUTCDATETIME(), 126) AS now");
+    return new Date(`${r.recordset[0]!.now}Z`);
+  });
 }
 
 export function safeStatementMssql(query: string) {
@@ -261,14 +294,19 @@ export function quotedMssqlTable(schema: string, table: string) {
   return `[${schema.replaceAll("]", "]]")}].[${table.replaceAll("]", "]]")}]`;
 }
 
-function mapMssqlType(dataType: string): string {
+type Mapped = { sqlType: string; lossyNumeric?: boolean };
+
+function mapMssqlType(dataType: string, precision?: number | null, scale?: number | null): Mapped {
   const t = dataType.toLowerCase();
-  if (["bigint", "int", "smallint", "tinyint"].includes(t)) return "BIGINT";
-  if (["decimal", "numeric", "float", "real", "money", "smallmoney"].includes(t)) return "DECIMAL(18,4)";
-  if (t === "date") return "DATE";
-  if (["datetime", "datetime2", "smalldatetime", "datetimeoffset"].includes(t)) return "DATETIME2";
-  if (t === "time") return "TIME";
-  return "NVARCHAR(MAX)";
+  if (["bigint", "int", "smallint", "tinyint"].includes(t)) return { sqlType: "BIGINT" };
+  if (["decimal", "numeric"].includes(t)) return decimalOrText(precision, scale);
+  if (t === "money") return { sqlType: "DECIMAL(19,4)" };
+  if (t === "smallmoney") return { sqlType: "DECIMAL(10,4)" };
+  if (["float", "real"].includes(t)) return { sqlType: TEXT_TYPE, lossyNumeric: true };
+  if (t === "date") return { sqlType: "DATE" };
+  if (["datetime", "datetime2", "smalldatetime", "datetimeoffset"].includes(t)) return { sqlType: "DATETIME2" };
+  if (t === "time") return { sqlType: "TIME" };
+  return { sqlType: TEXT_TYPE };
 }
 
 const mssqlTypeMap = new Map<unknown, string>([
@@ -276,12 +314,8 @@ const mssqlTypeMap = new Map<unknown, string>([
   [sql.Int, "BIGINT"],
   [sql.SmallInt, "BIGINT"],
   [sql.TinyInt, "BIGINT"],
-  [sql.Decimal, "DECIMAL(18,4)"],
-  [sql.Numeric, "DECIMAL(18,4)"],
-  [sql.Float, "DECIMAL(18,4)"],
-  [sql.Real, "DECIMAL(18,4)"],
-  [sql.Money, "DECIMAL(18,4)"],
-  [sql.SmallMoney, "DECIMAL(18,4)"],
+  [sql.Money, "DECIMAL(19,4)"],
+  [sql.SmallMoney, "DECIMAL(10,4)"],
   [sql.Date, "DATE"],
   [sql.DateTime, "DATETIME2"],
   [sql.DateTime2, "DATETIME2"],
@@ -290,6 +324,8 @@ const mssqlTypeMap = new Map<unknown, string>([
   [sql.Time, "TIME"],
 ]);
 
-function mapMssqlColType(colType: unknown): string {
-  return mssqlTypeMap.get(colType) ?? "NVARCHAR(MAX)";
+function mapMssqlColType(colType: unknown, precision?: number, scale?: number): Mapped {
+  if (colType === sql.Decimal || colType === sql.Numeric) return decimalOrText(precision, scale);
+  if (colType === sql.Float || colType === sql.Real) return { sqlType: TEXT_TYPE, lossyNumeric: true };
+  return { sqlType: mssqlTypeMap.get(colType) ?? TEXT_TYPE };
 }

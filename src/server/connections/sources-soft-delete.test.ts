@@ -30,12 +30,14 @@ vi.mock("./postgres", () => ({
   queryColumns: vi.fn(async () => [{ originalName: "Id", sqlName: "id", sqlType: "BIGINT", nullable: false }]),
   quotedPgTable: (s: string, t: string) => `"${s}"."${t}"`,
   streamPostgresRows: (_c: unknown, q: string) => { streams.calls.push(q); return streams.rows(q); },
+  sourceClockPg: vi.fn(async () => new Date("2026-01-02T00:00:00Z")),
   tableColumns: vi.fn(async () => [
     { originalName: "Id", sqlName: "id", sqlType: "BIGINT", nullable: false },
+    { originalName: "upd", sqlName: "upd", sqlType: "DATETIME2", nullable: true },
     { originalName: "a", sqlName: "a", sqlType: "NVARCHAR(MAX)", nullable: true },
   ]),
 }));
-vi.mock("./mssql", () => ({ queryColumnsMssql: vi.fn(), quotedMssqlTable: vi.fn(), streamMssqlRows: vi.fn(), tableColumnsMssql: vi.fn() }));
+vi.mock("./mssql", () => ({ sourceClockMssql: vi.fn(), queryColumnsMssql: vi.fn(), quotedMssqlTable: vi.fn(), streamMssqlRows: vi.fn(), tableColumnsMssql: vi.fn() }));
 
 import { refreshDatasetSource, assertDeleteDetection } from "./sources";
 
