@@ -82,7 +82,7 @@ describe("translateTsql -> postgres", () => {
   it("subconjunto ampliado: TRY_CAST numerico, CHARINDEX com inicio, semana, APPLY", () => {
     expect(pg("SELECT TRY_CAST(a AS INT) FROM t").sql).toMatch(/CAST\(\(CASE WHEN CAST\(a AS TEXT\) ~/);
     expect(pg("SELECT TRY_CONVERT(DECIMAL(10,2), a) FROM t").sql).toContain("DECIMAL(10,2)");
-    expect(pg("SELECT CHARINDEX('a', b, 3) FROM t").sql).toContain("SUBSTRING(b FROM 3)");
+    expect(pg("SELECT CHARINDEX('a', b, 3) FROM t").sql).toContain("SUBSTRING(LOWER(CAST(b AS TEXT)) FROM 3)");
     expect(pg("SELECT DATEDIFF(week, a, b) FROM t").sql).toContain("1900-01-07");
     expect(pg("SELECT DATEPART(weekday, d) FROM t").sql).toContain("EXTRACT(DOW FROM d)");
     expect(pg("SELECT a FROM t CROSS APPLY (SELECT TOP 1 b FROM u WHERE u.id = t.id) x").sql).toMatch(/CROSS JOIN LATERAL .*LIMIT 1/);
@@ -93,7 +93,7 @@ describe("translateTsql -> postgres", () => {
     const o = pg("SELECT a FROM t ORDER BY a, b DESC").sql;
     expect(o).toMatch(/ORDER BY a ASC NULLS FIRST, b DESC NULLS LAST/i);
     expect(pg("SELECT ROW_NUMBER() OVER (PARTITION BY g ORDER BY x) FROM t").sql).toMatch(/ORDER BY x ASC NULLS FIRST/i);
-    expect(pg("SELECT 1 FROM t WHERE n LIKE 'b%' AND m NOT LIKE 'x%'").sql).toMatch(/n ILIKE 'b%' AND m NOT ILIKE 'x%'/);
+    expect(pg("SELECT 1 FROM t WHERE n LIKE 'b%' AND m NOT LIKE 'x%'").sql).toContain("(n ILIKE 'b%' ESCAPE '') AND (m NOT ILIKE 'x%' ESCAPE '')");
     expect(pg("SELECT LEN(c) FROM t").sql).toContain("LENGTH(RTRIM(CAST(c AS TEXT)))");
     expect(pg("SELECT CAST(x AS INT), CAST(y AS BIGINT), CAST(z AS DECIMAL(10,2)) FROM t").sql)
       .toMatch(/CAST\(TRUNC\(CAST\(x AS NUMERIC\)\) AS INTEGER\).*AS BIGINT\).*CAST\(z AS DECIMAL\(10,2\)\)/);
