@@ -6,6 +6,7 @@ import { validateReadOnlySql } from "@/server/security/sql-safety";
 import { contractTranslate } from "@/server/sql-contract/apply";
 import { ApiError } from "@/server/http";
 import { nextRefreshFromCron } from "./sources";
+import { evaluateLoad, getIntegritySettings, IntegrityError } from "@/server/integrity/policy";
 
 /** Contrato de SQL: a derivada e escrita em T-SQL, validada como read-only e traduzida por backend. */
 export async function prepareDerivedSql(querySql: string, provider: string): Promise<string> {
@@ -90,12 +91,19 @@ export async function refreshDerivedTable(derivedTableId: string) {
 
     const rowCount = Number(await conn.countRows(schema, staging));
 
+    // Guarda de integridade (mesma politica das fontes): 0 linhas ou queda grande contra a versao anterior NAO troca a
+    // tabela (a anterior continua no ar) e a derivada fica com status de erro visivel.
+    const evaluation = evaluateLoad(
+      { kind: "derived", fullState: true, parsedRows: rowCount, prevRows: Number(dt.lastRowCount ?? 0n), scheduled: true },
+      await getIntegritySettings(),
+    );
+    if (evaluation.verdict === "FAILED") throw new IntegrityError(evaluation);
+
     // Lê colunas da staging para atualizar metadados
     const cols = await conn.listColumns(schema, staging);
 
-    // Substitui target pela staging atomicamente
-    await conn.dropTableIfExists(schema, dt.sqlName);
-    await conn.renameTable(schema, staging, dt.sqlName);
+    // Troca ATOMICA (uma transacao): leitores nunca veem a tabela ausente e uma queda no meio nao a apaga.
+    await swapDerived(conn, schema, staging, dt.sqlName);
 
     const now = new Date();
 
@@ -144,6 +152,28 @@ export async function refreshDerivedTable(derivedTableId: string) {
     console.log("[derived] %s → %d linhas", dt.sqlName, rowCount);
   } catch (e) {
     await conn.dropTableIfExists(schema, staging).catch(() => {});
+    // Antes uma falha deixava lastStatus "running" para sempre. A tabela anterior continua no ar.
+    await prisma.derivedTable.update({
+      where: { id: derivedTableId },
+      data: { lastStatus: "failed", lastError: (e instanceof Error ? e.message : String(e)).slice(0, 1000) },
+    }).catch(() => {});
     throw e;
   }
+}
+
+/** DROP do destino + RENAME da staging na MESMA transacao (Postgres: multi-statement e uma transacao implicita; SQL Server: BEGIN TRAN). */
+async function swapDerived(conn: Awaited<ReturnType<typeof getStorageConnection>>, schema: string, staging: string, target: string): Promise<void> {
+  if (conn.provider === "sqlserver") {
+    const q = (x: string) => x.replace(/'/g, "''");
+    const pool = await (conn as import("@/server/storage/mssql-storage").MssqlStorageConnection).rawPool();
+    await pool.request().query(
+      `SET XACT_ABORT ON; BEGIN TRAN;
+       IF OBJECT_ID(N'[${q(schema)}].[${q(target)}]', N'U') IS NOT NULL DROP TABLE [${q(schema)}].[${q(target)}];
+       EXEC sp_rename N'${q(schema)}.${q(staging)}', N'${q(target)}';
+       COMMIT;`,
+    );
+    return;
+  }
+  const { pgQuote } = await import("@/server/storage/pg-storage");
+  await conn.execute(`DROP TABLE IF EXISTS ${pgQuote(schema)}.${pgQuote(target)}; ALTER TABLE ${pgQuote(schema)}.${pgQuote(staging)} RENAME TO ${pgQuote(target)}`);
 }

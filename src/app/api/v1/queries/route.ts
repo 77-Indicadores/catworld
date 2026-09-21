@@ -94,8 +94,9 @@ export async function POST(request: NextRequest) {
     ];
     // legacyFormatColumns e so do servidor: vira aviso de depreciacao, nunca entra em `data`.
     const shape = (r: QueryResult) => {
-      const { legacyFormatColumns, ...data } = r as QueryResult & { legacyFormatColumns?: string[] };
-      const w = [...warnings];
+      // `warnings` do resultado (ex.: LEGACY_TRANSLATION do fallback, ENT-04) vira aviso da resposta, nunca entra em `data`.
+      const { legacyFormatColumns, warnings: resultWarnings, ...data } = r as QueryResult & { legacyFormatColumns?: string[]; warnings?: string[] };
+      const w = [...warnings, ...(resultWarnings ?? [])];
       if (legacyFormatColumns?.length) {
         w.push(`formato de resultado LEGADO (deprecado): as colunas [${legacyFormatColumns.join(", ")}] mudam com "normalize": true, que sera o padrao no futuro; envie "normalize": true (formato recomendado)`);
       }
