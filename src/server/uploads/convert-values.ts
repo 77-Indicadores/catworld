@@ -13,6 +13,8 @@ import { normalizeDateLike, type DateOrder } from "./date-normalize";
 export type ConvertColumn = { sqlName?: string; sqlType: string; decimalSep?: DecSep | null; dateOrder?: DateOrder | null; /** dígitos significativos necessários (do arquivo inteiro); ausente em mapeamentos antigos */ decimalDigits?: number | null };
 
 export class ValueConversionError extends Error {
+  /** Deterministico: repetir o job nao muda o resultado (o worker nao gasta tentativas). */
+  readonly nonRetryable = true as const;
   constructor(column: ConvertColumn, value: string, why: string) {
     super(`Valor "${value.length > 60 ? value.slice(0, 60) + "…" : value}" não cabe no tipo ${column.sqlType}${column.sqlName ? ` da coluna ${column.sqlName}` : ""}: ${why}. O import foi interrompido para não gravar dado diferente do arquivo.`);
     this.name = "ValueConversionError";
@@ -73,8 +75,11 @@ const TDS_MAX_DECIMAL_DIGITS = 15; // o driver (tedious) escreve DECIMAL via Num
  */
 export function isWideDecimal(col: { sqlType: string; decimalDigits?: number | null }): boolean {
   // Só é "largo" quando o ARQUIVO precisa de mais de 15 dígitos: o piso DECIMAL(18,4) sozinho não muda o caminho (a maioria das colunas
-  // cabe em 15 e continua no bulk tipado, sem o ALTER COLUMN extra). Mapeamento antigo (sem decimalDigits): comportamento anterior.
-  return !!parseDecimalType(col.sqlType) && (col.decimalDigits ?? 0) > TDS_MAX_DECIMAL_DIGITS;
+  // cabe em 15 e continua no bulk tipado, sem o ALTER COLUMN extra).
+  // Mapeamento antigo (sem decimalDigits): cai na PRECISAO do tipo (pior caso). Antes assumia 0 digitos e um DECIMAL(38,10) com valores de mais de 15
+  // digitos so falhava na conversao; agora entra como texto exato. Mapeamentos novos trazem decimalDigits e mantem o bulk tipado quando cabe em 15.
+  const spec = parseDecimalType(col.sqlType);
+  return !!spec && (col.decimalDigits ?? spec.precision) > TDS_MAX_DECIMAL_DIGITS;
 }
 
 /**

@@ -2,7 +2,22 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@/server/db", () => ({ prisma: {} }));
 
-import { LIVENESS_FRESH_MS, WorkerState, assertKnownTypes, identityConflict, parseLiveness, parseProfileArg } from "./runtime";
+import { abortAndWait, LIVENESS_FRESH_MS, WorkerState, assertKnownTypes, identityConflict, parseLiveness, parseProfileArg } from "./runtime";
+
+describe("abortAndWait (SIGTERM: aborta antes de liberar)", () => {
+  it("marca os tokens e espera o job em andamento terminar", async () => {
+    const t = { cancelled: false };
+    const state = { inflight: 1 };
+    setTimeout(() => { state.inflight = 0; }, 60);
+    const ok = await abortAndWait([t], state, 2000, 10);
+    expect(t.cancelled).toBe(true);
+    expect(ok).toBe(true);
+  });
+  it("estoura o prazo se o job nao para", async () => {
+    const ok = await abortAndWait([{ cancelled: false }], { inflight: 1 }, 80, 10);
+    expect(ok).toBe(false);
+  });
+});
 
 describe("parseProfileArg", () => {
   it("aceita --profile nome e --profile=nome", () => {

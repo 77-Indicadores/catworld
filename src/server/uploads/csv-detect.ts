@@ -128,6 +128,51 @@ async function scanWhole(path: string, encoding: CsvEncoding): Promise<{ head: s
   return { head, mixedEol: eol.mixed };
 }
 
+// ─── Aspa nao fechada ────────────────────────────────────────────────────────
+
+/**
+ * Linha (1-based) em que abriu uma aspa que NUNCA foi fechada ate o fim do arquivo, ou null. Uma aspa de abertura sem fechamento faz o
+ * resto do arquivo virar UM valor so: o DuckDB nao acusa erro (devolve poucas linhas, com o resto engolido) e o import publicaria a tabela
+ * quase vazia. Regra RFC 4180 (a mesma do csv-parse com relax_quotes): aspa so abre no INICIO de um campo; `""` dentro de aspas e uma aspa literal.
+ */
+export function firstUnclosedQuoteLine(text: string, separator: string, st: QuoteScan = newQuoteScan()): number | null {
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]!;
+    if (st.cr) { st.cr = false; if (c === "\n") { st.line++; if (!st.inQuote || st.pendingQ) { /* fim de registro */ } continue; } st.line++; }
+    if (st.inQuote) {
+      if (st.pendingQ) {
+        if (c === '"') { st.pendingQ = false; continue; }   // "" = aspa literal
+        st.inQuote = false; st.pendingQ = false;             // a aspa anterior fechou o campo; `c` e processado abaixo, fora das aspas
+      } else {
+        if (c === '"') st.pendingQ = true;
+        else if (c === "\n") st.line++;
+        else if (c === "\r") st.cr = true;
+        continue;
+      }
+    }
+    if (c === "\n") { st.line++; st.fieldStart = true; }
+    else if (c === "\r") { st.cr = true; st.fieldStart = true; }
+    else if (c === separator) st.fieldStart = true;
+    else if (c === '"' && st.fieldStart) { st.inQuote = true; st.openLine = st.line; st.fieldStart = false; }
+    else st.fieldStart = false;
+  }
+  return st.inQuote && !st.pendingQ ? st.openLine : null;
+}
+export type QuoteScan = { inQuote: boolean; pendingQ: boolean; fieldStart: boolean; cr: boolean; line: number; openLine: number };
+export const newQuoteScan = (): QuoteScan => ({ inQuote: false, pendingQ: false, fieldStart: true, cr: false, line: 1, openLine: 0 });
+
+async function assertQuotesClosed(path: string, encoding: CsvEncoding, separator: string): Promise<void> {
+  const dec = strictDecoder(encoding);
+  const st = newQuoteScan();
+  for await (const chunk of createReadStream(path)) firstUnclosedQuoteLine(dec.write(chunk as Buffer), separator, st);
+  firstUnclosedQuoteLine(dec.end(), separator, st);
+  if (st.inQuote && !st.pendingQ) throw unclosedQuoteError(st.openLine);
+}
+
+export function unclosedQuoteError(line: number): CsvFormatError {
+  return new CsvFormatError(`As aspas abertas na linha ${line} nunca foram fechadas: o resto do arquivo seria lido como um único valor e as linhas seguintes se perderiam. Feche as aspas dessa linha (ou escape-as com "") e envie de novo.`);
+}
+
 // ─── Dialeto ─────────────────────────────────────────────────────────────────
 
 type Score = { sep: string; hdr: number; ratio: number; head: string[] };
@@ -214,6 +259,7 @@ export async function detectFileHints(path: string): Promise<FileHints> {
     separator = p.sep; headerFields = p.head;
   }
   assertHeaderIsFirstRecord(head, separator, headerFields);
+  await assertQuotesClosed(path, encoding, separator); // aspa sem fechamento engole o resto do arquivo: recusa nomeando a linha
 
   const hints: FileHints = { encoding, separator, sepDirective, headerFields, mixedEol: scan.mixedEol };
   cache.set(key, hints);
@@ -235,7 +281,16 @@ export async function* csvRecords(source: NodeJS.ReadableStream, encoding: strin
   source.on?.("error", (e) => parser.destroy(e as Error));
   decoded.pipe(parser);
   let first = true, headerLen = 0;
-  for await (const item of parser as AsyncIterable<{ record: string[]; info: { lines: number } }>) {
+  // csv-parse acusa "Quote Not Closed" em ingles ao fim do stream: traduz e nomeia a linha (fontes por stream nao passam pelo detectFileHints)
+  const iter = (async function* () {
+    try { yield* parser as AsyncIterable<{ record: string[]; info: { lines: number } }>; }
+    catch (e) {
+      const m = /CSV_QUOTE_NOT_CLOSED/.test(String((e as { code?: string }).code)) ? /line (\d+)/.exec((e as Error).message) : null;
+      if (m) throw unclosedQuoteError(Number(m[1]));
+      throw e;
+    }
+  })();
+  for await (const item of iter) {
     const row = item.record;
     if (first) {
       first = false;

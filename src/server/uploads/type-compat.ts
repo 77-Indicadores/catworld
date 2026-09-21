@@ -6,6 +6,7 @@
  * sumia). Regra: só é aceito ALARGAR (o valor sempre cabe sem perder informação); estreitar exige um replace, que recria a tabela.
  */
 import { parseDecimalType } from "@/lib/decimal-type";
+import { markNonRetryable } from "./non-retryable";
 
 const isText = (t: string) => t.startsWith("NVARCHAR") || t === "TEXT" || t.startsWith("VARCHAR") || t.startsWith("CHAR");
 
@@ -42,6 +43,11 @@ export function incompatibleMessage(cols: { column: string; existing: string; in
   return `Tipos incompatíveis com a tabela existente: ${list}. O append/upsert não estreita colunas (perderia informação); use replace ou ajuste o arquivo.`;
 }
 
+/** Erro (nao repetivel pelo worker) de tipos incompativeis no append/upsert. */
+export function incompatibleError(cols: { column: string; existing: string; incoming: string }[]): Error {
+  return markNonRetryable(new Error(incompatibleMessage(cols)));
+}
+
 /** Tipo físico do SQL Server (sys.columns) → tipo canônico. */
 export function mssqlPhysicalToCanonical(r: { type_name: string; precision?: number; scale?: number }): string {
   const t = r.type_name.toLowerCase();
@@ -50,5 +56,8 @@ export function mssqlPhysicalToCanonical(r: { type_name: string; precision?: num
   if (t === "date") return "DATE";
   if (["datetime2", "datetime", "smalldatetime"].includes(t)) return "DATETIME2";
   if (t === "time") return "TIME";
-  return "NVARCHAR(MAX)";
+  if (["nvarchar", "varchar", "nchar", "char", "text", "ntext"].includes(t)) return "NVARCHAR(MAX)";
+  // Outra familia (float, bit, uniqueidentifier, binario, xml...): tipo opaco que nao e igual a nenhum tipo do arquivo. Antes virava texto,
+  // e texto aceita qualquer coisa: um append num FLOAT/BIT passava pela checagem.
+  return `MSSQL:${t}`;
 }

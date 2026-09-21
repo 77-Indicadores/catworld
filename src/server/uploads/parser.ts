@@ -15,7 +15,8 @@ import { rowTexts, isBlankRow } from "./xlsx-values";
 
 /** decimalSep/dateOrder: convenção da COLUNA decidida pelo arquivo inteiro (mapeamentos antigos não têm; ver decimal-format.ts e date-normalize.ts). *Ambiguous: ficou TEXT porque a convenção não pôde ser decidida. */
 export type ParsedColumn={originalName:string;sqlName:string;sqlType:string;nullable:boolean;decimalSep?:DecSep;decimalAmbiguous?:boolean;dateOrder?:DateOrder;dateAmbiguous?:boolean;decimalDigits?:number};
-export type FilePreview={columns:ParsedColumn[];rows:Record<string,unknown>[];rowCount:number;encoding:string;separator:string|null;sheetNames:string[]};
+/** `source:"server"`: o preview foi calculado pelo worker (a contagem vale como esperada no gate de integridade). Ausente = veio do cliente (navegador/SDK): nao e prova. */
+export type FilePreview={columns:ParsedColumn[];rows:Record<string,unknown>[];rowCount:number;encoding:string;separator:string|null;sheetNames:string[];source?:"server"};
 export type RowsFromFileOpts={encoding?:string;separator?:string;ext?:string};
 export type ParseStats={parseMethod?:"duckdb"|"csv-parse"|"xlsx"|"stream";parseMs?:number;fileEncoding?:string;fileSeparator?:string;fallbackReason?:string};
 
@@ -42,6 +43,22 @@ async function previewCsv(path:string){
  return{columns,rows:objects,rowCount:count,encoding,separator,sheetNames:[]};
 }
 
+/**
+ * Contagem de linhas de dados do arquivo, independente do import (mesma regra do preview: cabecalho fora, linhas vazias fora), SEM inferir tipos.
+ * E a contagem "esperada" quando o preview nao foi feito pelo servidor (o preview do navegador nao e prova). null = formato sem contagem barata.
+ */
+export async function countDataRows(path:string):Promise<number|null>{
+ const ext=extname(path).toLowerCase();
+ if(ext===".csv"){
+  const{encoding,separator}=await detectFileHints(path);
+  let n=0,first=true;
+  for await(const _ of csvPipeStream(createReadStream(path),encoding,separator)){if(first){first=false;continue}n++}
+  return n;
+ }
+ if(ext===".xlsx")return (await previewXlsx(path)).rowCount;
+ return null;
+}
+
 // P6: ExcelJS.stream.xlsx.WorkbookReader (streaming) foi tentado aqui pra evitar
 // carregar o XLSX inteiro em memoria, mas a lib tem um bug de ordenacao interna
 // (_parseWorksheet acessa this.model.sheets antes de xl/workbook.xml terminar de
@@ -58,8 +75,13 @@ const sheetHasData=(sheet:ExcelJS.Worksheet)=>{for(const _ of xlsxDataRows(sheet
 /** Só uma aba pode ter dados: importar só a 1ª e ignorar o resto seria perder dados em silêncio (TIP-08). */
 function assertSingleDataSheet(workbook:ExcelJS.Workbook){
  const withData=workbook.worksheets.filter(sheetHasData);
- if(withData.length>1||(withData.length===1&&withData[0]!==workbook.worksheets[0]))
-  throw new Error(`A planilha tem dados em ${withData.length>1?"mais de uma aba":"uma aba que não é a primeira"} (${withData.map(s=>`"${s.name}"`).join(", ")}). O Catworld importa uma aba por arquivo: deixe só uma aba com dados (ou envie um arquivo por aba) para nenhuma linha ser ignorada.`);
+ if(withData.length>1||(withData.length===1&&withData[0]!==workbook.worksheets[0])){
+  const count=(s:ExcelJS.Worksheet)=>{let n=0;for(const _ of xlsxDataRows(s))n++;return Math.max(0,n-1)};
+  const list=withData.map(s=>`"${s.name}" (${count(s)} linha(s))`).join(", ");
+  const first=workbook.worksheets[0];
+  throw new Error(`A planilha tem dados em ${withData.length>1?"mais de uma aba":"uma aba que não é a primeira"}: ${list}. O Catworld importa UMA aba por arquivo e recusa em vez de ignorar linhas em silêncio. `+
+   `Como resolver: (1) deixe só a aba desejada com dados${first&&!withData.includes(first)?` e coloque-a como primeira aba (hoje a primeira, "${first.name}", está vazia)`:""}; ou (2) exporte cada aba como um arquivo (CSV) e envie um arquivo por aba.`);
+ }
 }
 async function previewXlsx(path:string){
  const workbook=new ExcelJS.Workbook();await workbook.xlsx.readFile(path);const sheet=workbook.worksheets[0];if(!sheet)throw new Error("Planilha sem abas");
@@ -152,7 +174,7 @@ function inferType(header:string,s:ColumnStats):{sqlType:string}&Partial<Pick<Pa
 
 // Tipos canônicos aceitos como override: ver type-override.ts (também usado pela validação da API).
 export { normalizeTypeOverride };
-export class TypeOverrideError extends Error { constructor(message: string) { super(message); this.name = "TypeOverrideError"; } }
+export class TypeOverrideError extends Error { nonRetryable = true as const; constructor(message: string) { super(message); this.name = "TypeOverrideError"; } }
 
 /**
  * Aplica overrides de tipo (chave = sqlName ou originalName da coluna, case-insensitive) por cima da inferência automática.
@@ -227,6 +249,10 @@ export async function* rowsFromFile(
    if(hints.mixedEol){
     // CRLF, LF e CR no mesmo arquivo: o csv-parse trata os tres como fim de registro; o DuckDB nao e usado (nao pode fundir registros)
     if(stats){stats.parseMethod="csv-parse";stats.fallbackReason="mixed-eol"}
+   }else if(hints.headerFields.length===1){
+    // UMA coluna: o DuckDB devolve a linha em branco como registro NULL (com 2+ colunas ele a pula) e nao distingue `""` de linha em branco.
+    // Linha em branco nao e registro (o preview e o csv-parse a ignoram; `""` e registro): o csv-parse decide por arquivo.
+    if(stats){stats.parseMethod="csv-parse";stats.fallbackReason="single-column"}
    }else if(fileEncoding!=="utf8"){
     const tmpDir=await mkdtemp(join(tmpdir(),"cw-duckdb-"));
     const tmpFile=join(tmpDir,"converted.csv");

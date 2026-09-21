@@ -11,6 +11,12 @@ const columnSchema = z.object({
   sqlName: z.string(),
   sqlType: z.string(),
   nullable: z.boolean(),
+  // Convencao decidida pelo arquivo inteiro no preview: sem estes campos o zod os descartava e o import caia no modo "legado" (tenta as duas ordens de data).
+  decimalSep: z.enum([".", ","]).optional(),
+  decimalAmbiguous: z.boolean().optional(),
+  dateOrder: z.enum(["dmy", "mdy"]).optional(),
+  dateAmbiguous: z.boolean().optional(),
+  decimalDigits: z.number().int().positive().max(1000).optional(),
 });
 
 export const confirmUploadSchema = z.object({

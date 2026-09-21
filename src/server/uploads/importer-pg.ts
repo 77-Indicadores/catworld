@@ -23,9 +23,11 @@ import type { PgStorageConnection } from "@/server/storage/pg-storage";
 import { pgQuote, canonicalToPg } from "@/server/storage/pg-storage";
 import { userColumnNames } from "@/server/storage/connection";
 import { IntegrityError, evaluateLoad, getIntegritySettings, type Evaluation } from "@/server/integrity/policy";
-import { auditIntegrity, evaluationDetail, ledgerInsert, recordLedger } from "@/server/integrity/ledger";
-import { PG_MARKER_DDL, PG_MARKER_INSERT, PG_MARKER_SELECT } from "./applied-marker";
-import { incompatibleColumns, incompatibleMessage } from "./type-compat";
+import { auditIntegrity, evaluationDetail, recordLedger } from "@/server/integrity/ledger";
+import { PG_MARKER_INSERT, PG_MARKER_SELECT, ensurePgMarker } from "./applied-marker";
+import { incompatibleColumns, incompatibleError } from "./type-compat";
+import { loadPrevMapping, resolveAgainstExisting } from "./existing-types";
+import { resolveExpectedRows, type ExpectedRows } from "./expected-rows";
 
 // ─── Type conversion ──────────────────────────────────────────────────────────
 
@@ -218,6 +220,12 @@ async function importUploadPgLocked(
 
   // Valida compatibilidade antes de criar staging (append/upsert em target existente)
   const targetExists = await conn.tableExists(schema, tableName);
+  // Tabela existente e tipada: a coluna fisica manda (data/decimal ambiguo herda o tipo e a convencao da carga anterior; sem convencao, falha alto).
+  if (targetExists && (upload.mode === "append" || upload.mode === "upsert" || (upload.mode === "replace" && upload.deltaJson != null))) {
+    const tblId = upload.table?.id ?? (await prisma.datasetTable.findUnique({ where: { datasetId_sqlName: { datasetId: upload.dataset.id, sqlName: tableName } }, select: { id: true } }))?.id;
+    const existingCols0 = (await conn.listColumns(schema, tableName)).filter((c) => userColumnNames([c]).length > 0);
+    mapping = resolveAgainstExisting(mapping, existingCols0, await loadPrevMapping(prisma, tblId));
+  }
   if ((upload.mode === "append" || upload.mode === "upsert") && targetExists) {
     const existingCols = await conn.listColumns(schema, tableName);
     // colunas internas (_cw_rh, cw_synced_at, cw_deleted_at) não fazem parte do schema do usuário — ver CW_SYNCED_AT em storage/connection.ts.
@@ -230,16 +238,18 @@ async function importUploadPgLocked(
     // Só é aceito ALARGAR o tipo: estreitar (DECIMAL em BIGINT, DATETIME em DATE) arredondava/truncava as linhas existentes em silêncio.
     // (arquivo só com cabeçalho não tem valores para estreitar nada: os tipos inferidos dele não valem)
     const narrowing = preview && preview.rowCount === 0 ? [] : incompatibleColumns(existingCols.filter((c) => userColumnNames([c]).length > 0), mapping);
-    if (narrowing.length) throw new Error(incompatibleMessage(narrowing));
+    if (narrowing.length) throw incompatibleError(narrowing);
   }
 
   // Marca exactly-once: se um append deste upload já foi confirmado (queda entre o COMMIT e os metadados), não recarrega nem
   // acrescenta de novo — só reconcilia os metadados. Vive no destino, fora dos datasets.
-  for (const ddl of PG_MARKER_DDL) await conn.execute(ddl);
+  // (so o append usa o registro; criar o schema/tabela para todo modo corria em paralelo e falhava — PG 23505)
+  if (upload.mode === "append") await ensurePgMarker(conn);
   const marker = upload.mode === "append"
     ? (await conn.queryParams<{ rows: string }>(PG_MARKER_SELECT, [upload.id]))[0]
     : undefined;
-  const alreadyApplied = marker !== undefined;
+  // Marca sem a tabela (foi apagada depois): nao ha o que reconciliar; recarrega em vez de "concluir" com tabela vazia.
+  const alreadyApplied = marker !== undefined && targetExists;
 
   // Drop staging anterior (retry idempotente)
   await conn.execute(`DROP TABLE IF EXISTS ${qStaging}`);
@@ -297,16 +307,22 @@ async function importUploadPgLocked(
   // FAILED = não troca nada: a tabela anterior continua no ar, completa.
   let evaluation: Evaluation = { verdict: "OK", reasons: [] };
   let prevRowsForLedger = 0;
+  let expected: ExpectedRows | null = null;
   if (!alreadyApplied) {
     // Linhas da versão anterior: pelo metadado da tabela DESTINO (o upload novo nem sempre traz `tableId`); sem metadado, conta a tabela física.
     const meta = upload.table ?? await prisma.datasetTable.findUnique({ where: { datasetId_sqlName: { datasetId: upload.dataset.id, sqlName: tableName } }, select: { rowCount: true } });
     const prevRows = targetExists ? Number(meta?.rowCount ?? (await conn.countRows(schema, tableName))) : 0;
     prevRowsForLedger = prevRows;
     const cfg = await getIntegritySettings();
+    // So a contagem do SERVIDOR e prova (o rowCount/preview do navegador nao calibra o gate).
+    expected = await resolveExpectedRows(upload, source);
+    if (expected.clientDisagrees) console.warn("[importUploadPg:integrity] contagem do cliente (%s) difere da do servidor (%d): vale a do servidor upload=%s", expected.clientRowCount, expected.expected, uploadId);
     evaluation = evaluateLoad({
       kind: "upload",
       fullState: upload.mode === "replace" || !targetExists || (upload.mode === "upsert" && upload.fullSnapshot),
-      expectedRows: knownRowCount,
+      expectedRows: expected.expected,
+      expectedUnverified: expected.source === "unavailable",
+      clientCountDisagrees: expected.clientDisagrees,
       parsedRows: total,
       stagedRows: total,
       prevRows: prevRows,
@@ -314,7 +330,7 @@ async function importUploadPgLocked(
     }, cfg);
     if (evaluation.verdict === "FAILED") {
       await conn.execute(`DROP TABLE IF EXISTS ${qStaging}`).catch(() => undefined);
-      throw new IntegrityError(evaluation, { expectedRows: knownRowCount, parsedRows: total, prevRows });
+      throw new IntegrityError(evaluation, { expectedRows: expected.expected, parsedRows: total, prevRows });
     }
     if (evaluation.verdict === "SUSPECT") console.warn("[importUploadPg:integrity] SUSPECT upload=%s %s", uploadId, JSON.stringify(evaluation.reasons));
   }
@@ -345,7 +361,13 @@ async function importUploadPgLocked(
   if (upload.mode === "replace" || !targetExists) {
     // fullSwap: staging tem estado completo → DROP target + RENAME staging (AccessExclusiveLock ~ms)
     // (o índice em _cw_rh já foi criado na staging acima; construí-lo duas vezes custava ~8% do import — PER-01)
-    await conn.atomicSwap(schema, stage, tableName, mappingWithRh, { targetExists });
+    // Append que CRIA a tabela: a marca exactly-once entra na MESMA transacao da troca (create+insert): sem ela, uma queda entre o swap e os
+    // metadados fazia a retentativa acrescentar o arquivo de novo (50.000 virava 100.000).
+    const markCreate = upload.mode === "append" && !targetExists;
+    await conn.atomicSwap(schema, stage, tableName, mappingWithRh, {
+      targetExists,
+      ...(markCreate ? { inSwapTx: async (client) => { await client.query(PG_MARKER_INSERT, [upload.id, tableName, "append", String(total)]); } } : {}),
+    });
     inserted = total;
 
   } else if (upload.mode === "upsert") {
@@ -454,11 +476,6 @@ async function importUploadPgLocked(
         schemaJson: JSON.stringify(mapping),
       },
     }),
-    ledgerInsert({
-      kind: "upload", outcome: "COMPLETED", verdict: evaluation.verdict, datasetId: upload.dataset!.id, tableId: table.id, uploadId: upload.id,
-      tableName, mode: upload.mode, expectedRows: knownRowCount, parsedRows: total, physicalRows: Number(actual), prevRows: prevRowsForLedger,
-      detail: evaluationDetail(evaluation, { importMethod: alreadyApplied ? "already-applied" : "pg-unnest-batch", storage: "postgres" }),
-    }),
     prisma.upload.update({
       where: { id: upload.id },
       data: {
@@ -472,6 +489,13 @@ async function importUploadPgLocked(
       },
     }),
   ]));
+
+  // Livro de integridade FORA da transacao dos metadados: uma falha aqui (recordLedger nunca lanca) nao pode desfazer uma carga ja publicada.
+  await recordLedger({
+    kind: "upload", outcome: "COMPLETED", verdict: evaluation.verdict, datasetId: upload.dataset!.id, tableId: table.id, uploadId: upload.id,
+    tableName, mode: upload.mode, expectedRows: expected?.expected ?? null, parsedRows: total, physicalRows: Number(actual), prevRows: prevRowsForLedger,
+    detail: evaluationDetail(evaluation, { importMethod: alreadyApplied ? "already-applied" : "pg-unnest-batch", storage: "postgres", ...(expected ? { expectedSource: expected.source, clientRowCount: expected.clientRowCount } : {}) }),
+  });
 
   return { tableId: table.id, inserted, updated, rowCount: actual };
 }

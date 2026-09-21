@@ -46,5 +46,15 @@ describe("mssqlPhysicalToCanonical", () => {
     expect(mssqlPhysicalToCanonical({ type_name: "decimal", precision: 12, scale: 3 })).toBe("DECIMAL(12,3)");
     expect(mssqlPhysicalToCanonical({ type_name: "datetime" })).toBe("DATETIME2");
     expect(mssqlPhysicalToCanonical({ type_name: "nvarchar" })).toBe("NVARCHAR(MAX)");
+    expect(mssqlPhysicalToCanonical({ type_name: "varchar" })).toBe("NVARCHAR(MAX)");
+  });
+  it("familia diferente (float, bit, uniqueidentifier, binario) NAO vira texto (texto aceitaria qualquer coisa)", () => {
+    for (const t of ["float", "real", "bit", "uniqueidentifier", "varbinary", "xml", "sql_variant"]) {
+      const c = mssqlPhysicalToCanonical({ type_name: t });
+      expect(c).not.toBe("NVARCHAR(MAX)");
+      expect(canonicalAccepts(c, "NVARCHAR(MAX)")).toBe(false);
+      expect(canonicalAccepts(c, "DECIMAL(10,2)")).toBe(false);
+      expect(canonicalAccepts(c, "BIGINT")).toBe(false);
+    }
   });
 });

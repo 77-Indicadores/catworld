@@ -279,7 +279,9 @@ export class PgStorageConnection implements StorageConnection {
     staging: string,
     target: string,
     cols: ColDef[],
-    opts?: { targetExists?: boolean; keyColumn?: string | null; mergedName?: string; fullSnapshot?: boolean; keysTable?: string; keysBefore?: Date },
+    opts?: { targetExists?: boolean; keyColumn?: string | null; mergedName?: string; fullSnapshot?: boolean; keysTable?: string; keysBefore?: Date;
+      /** fullSwap: roda DENTRO da transacao do swap (ex.: marca exactly-once do append que cria a tabela: ou tudo ou nada). Deve ser idempotente (o swap pode repetir por lock_timeout). */
+      inSwapTx?: (client: PoolClient) => Promise<void> },
   ): Promise<{ marked: number }> {
     const qSc = pgQuote(schema);
     const qStg = `${qSc}.${pgQuote(staging)}`;
@@ -310,6 +312,7 @@ export class PgStorageConnection implements StorageConnection {
           if (targetExists) await client.query(`DROP TABLE ${qTgt}`);
           await client.query(`ALTER TABLE ${qStg} RENAME TO ${pgQuote(target)}`);
           await hideDeletedRows(client, qTgt);
+          if (opts?.inSwapTx) await opts.inSwapTx(client);
         });
       } catch (e) {
         await this._pool.query(`DROP TABLE IF EXISTS ${qStg}`).catch(() => {});

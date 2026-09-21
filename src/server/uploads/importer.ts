@@ -1,10 +1,12 @@
 import * as Sentry from "@sentry/nextjs";
 import { physicalDecimal, parseDecimalType, DECIMAL_LEGACY } from "@/lib/decimal-type";
 import { IntegrityError, evaluateLoad, getIntegritySettings, type Evaluation } from "@/server/integrity/policy";
-import { auditIntegrity, evaluationDetail, ledgerInsert, recordLedger } from "@/server/integrity/ledger";
-import { MSSQL_MARKER_DDL, MSSQL_MARKER_INSERT, MSSQL_MARKER_SELECT } from "./applied-marker";
-import { canonicalAccepts, incompatibleColumns, incompatibleMessage, mssqlPhysicalToCanonical } from "./type-compat";
+import { auditIntegrity, evaluationDetail, recordLedger } from "@/server/integrity/ledger";
+import { MSSQL_MARKER_INSERT, MSSQL_MARKER_SELECT, ensureMssqlMarker } from "./applied-marker";
+import { canonicalAccepts, incompatibleColumns, incompatibleError, mssqlPhysicalToCanonical } from "./type-compat";
 import { isInternalColumn } from "@/server/storage/connection";
+import { loadPrevMapping, resolveAgainstExisting } from "./existing-types";
+import { resolveExpectedRows, type ExpectedRows } from "./expected-rows";
 import { extname } from "node:path";
 import sql from "mssql";
 import { prisma } from "@/server/db";
@@ -264,8 +266,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
     // Typed staging: Node.js pre-converts values (typedCsvField) so BULK INSERT writes native types
     // and the delta INSERT SELECT becomes a direct column copy — no TRY_CONVERT on Azure SQL (saves DTU).
     // colDefsMax is kept as fallback when a NVARCHAR value exceeds 4000 chars (rare truncation error).
-    const colDefs    = mapping.map(c => `${quoteIdentifier(c.sqlName)} ${stagingColType(c)} NULL`).join(",") + ",[_cw_rh] CHAR(32) NULL";
-    const colDefsMax = mapping.map(c => `${quoteIdentifier(c.sqlName)} NVARCHAR(MAX)  NULL`).join(",") + ",[_cw_rh] CHAR(32) NULL";
+    // (colDefs e calculado depois de resolver o mapeamento contra a tabela existente, mais abaixo)
     // Set to false if truncation forces NVARCHAR(MAX) fallback — INSERT SELECT must use TRY_CONVERT then
     const stagingIsTyped = true;
 
@@ -274,9 +275,24 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
         .recordset[0].ok,
     ) === 1;
 
+    // Tabela existente e tipada: a coluna fisica manda (data/decimal ambiguo herda o tipo e a convencao da carga anterior; sem convencao, falha alto).
+    if (targetExists && (upload.mode === "append" || upload.mode === "upsert" || (upload.mode === "replace" && upload.deltaJson != null))) {
+      const tblId = upload.table?.id ?? (await prisma.datasetTable.findUnique({ where: { datasetId_sqlName: { datasetId: upload.dataset!.id, sqlName: tableName } }, select: { id: true } }))?.id;
+      const phys = (await pool.request()
+        .input("schema", sql.NVarChar, schema).input("table", sql.NVarChar, tableName)
+        .query("SELECT c.name, t.name type_name, c.precision, c.scale FROM sys.columns c JOIN sys.types t ON c.user_type_id=t.user_type_id WHERE c.object_id=OBJECT_ID(QUOTENAME(@schema)+'.'+QUOTENAME(@table)) ORDER BY c.column_id"))
+        .recordset as { name: string; type_name: string; precision: number; scale: number }[];
+      const existing = phys.filter((r) => !isInternalColumn(r.name)).map((r) => ({ name: r.name, sqlType: mssqlPhysicalToCanonical(r) }));
+      mapping = resolveAgainstExisting(mapping, existing, await loadPrevMapping(prisma, tblId));
+    }
+
+    const colDefs = mapping.map(c => `${quoteIdentifier(c.sqlName)} ${stagingColType(c)} NULL`).join(",") + ",[_cw_rh] CHAR(32) NULL";
+
     // Validate schema compatibility BEFORE creating staging — fail fast on bad append/upsert
     if ((upload.mode === "append" || upload.mode === "upsert") && targetExists) {
-      await assertCompatible(pool.request(), schema, tableName, mapping);
+      // Arquivo so com cabecalho nao tem valores para estreitar nada: os tipos inferidos dele (tudo texto) nao valem (igual ao Postgres).
+      const headerOnly = !!upload.previewJson && (JSON.parse(upload.previewJson) as FilePreview).rowCount === 0;
+      await assertCompatible(pool.request(), schema, tableName, mapping, headerOnly);
     }
 
     const hasDeltaCol = targetExists && await checkHasDeltaCol(pool, schema, tableName);
@@ -306,11 +322,13 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
 
     // Marca exactly-once (append): se este upload já foi aplicado (queda entre o COMMIT e os metadados), não recarrega nem acrescenta
     // de novo — só reconcilia os metadados.
-    await writePool.request().query(MSSQL_MARKER_DDL);
+    // (so o append usa o registro; criar para todo modo corria em paralelo e falhava. Sem permissao: o append falha alto)
     let alreadyAppliedRows: number | null = null;
     if (upload.mode === "append") {
+      await ensureMssqlMarker((q) => writePool.request().query(q));
       const m = await pool.request().input("uploadId", sql.UniqueIdentifier, upload.id).query(MSSQL_MARKER_SELECT);
-      if (m.recordset.length > 0) alreadyAppliedRows = Number(m.recordset[0].rows);
+      // marca sem a tabela (apagada depois): nao ha o que reconciliar, recarrega
+      if (m.recordset.length > 0 && targetExists) alreadyAppliedRows = Number(m.recordset[0].rows);
     }
     const alreadyApplied = alreadyAppliedRows !== null;
 
@@ -322,6 +340,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
     let total = 0, inserted = 0, updated = 0;
     let evaluation: Evaluation = { verdict: "OK", reasons: [] };
     let prevRowsForLedger = 0;
+    let expected: ExpectedRows | null = null;
     let lastProgressMs = Date.now();
     let actual = 0n;
     const reclassifiedCols: string[] = [];
@@ -399,11 +418,16 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
           const meta = upload.table ?? await prisma.datasetTable.findUnique({ where: { datasetId_sqlName: { datasetId: upload.dataset!.id, sqlName: tableName } }, select: { rowCount: true } });
           const prevRows = targetExists ? Number(meta?.rowCount ?? (await storageConn.countRows(schema, tableName))) : 0;
           prevRowsForLedger = prevRows;
+          // So a contagem do SERVIDOR e prova (o rowCount/preview do navegador nao calibra o gate).
+          expected = await resolveExpectedRows(upload, source);
+          if (expected.clientDisagrees) console.warn("[importUpload:integrity] contagem do cliente (%s) difere da do servidor (%d): vale a do servidor upload=%s", expected.clientRowCount, expected.expected, uploadId);
           evaluation = evaluateLoad({
             kind: "upload",
             fullState: !phase2 && (upload.mode === "replace" || !targetExists || (upload.mode === "upsert" && upload.fullSnapshot)),
             deltaOnly: phase2,
-            expectedRows: knownRowCount,
+            expectedRows: expected.expected,
+            expectedUnverified: expected.source === "unavailable",
+            clientCountDisagrees: expected.clientDisagrees,
             parsedRows: total,
             stagedRows: total,
             prevRows,
@@ -411,7 +435,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
           }, await getIntegritySettings());
           if (evaluation.verdict === "FAILED") {
             await writePool.request().query(`IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL DROP TABLE ${staging}`).catch(() => undefined);
-            throw new IntegrityError(evaluation, { expectedRows: knownRowCount, parsedRows: total, prevRows });
+            throw new IntegrityError(evaluation, { expectedRows: expected.expected, parsedRows: total, prevRows });
           }
           if (evaluation.verdict === "SUSPECT") console.warn("[importUpload:integrity] SUSPECT upload=%s %s", uploadId, JSON.stringify(evaluation.reasons));
         }
@@ -503,6 +527,14 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
                 CREATE INDEX [IX__cw_rh] ON ${target} ([_cw_rh]);
                 DROP TABLE ${staging};
               `);
+              if (upload.mode === "append" && !targetExists) {
+                // Append que CRIA a tabela: marca exactly-once na MESMA transacao do create+insert
+                request.input("uploadId", sql.UniqueIdentifier, upload.id);
+                request.input("tableName", sql.NVarChar, tableName);
+                request.input("mode", sql.NVarChar, "append");
+                request.input("rows", sql.BigInt, total);
+                await request.query(MSSQL_MARKER_INSERT);
+              }
               inserted = total;
             } else if (upload.mode === "append") {
               await request.query(
@@ -607,11 +639,6 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
             schemaJson: JSON.stringify(mapping),
           },
         }),
-        ledgerInsert({
-          kind: "upload", outcome: "COMPLETED", verdict: evaluation.verdict, datasetId: upload.dataset!.id, tableId: table.id, uploadId: upload.id,
-          tableName, mode: upload.mode, expectedRows: knownRowCount, parsedRows: total, physicalRows: Number(actual), prevRows: prevRowsForLedger,
-          detail: evaluationDetail(evaluation, { importMethod: phaseTimings.importMethod, parseMethod: parseStats.parseMethod, fallbackReason: parseStats.fallbackReason, storage: "sqlserver" }),
-        }),
         prisma.auditEvent.create({
           data: {
             eventType: "UPLOAD_IMPORT_PERF",
@@ -634,6 +661,13 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
           },
         }),
       ]));
+
+      // Livro de integridade FORA da transacao dos metadados: uma falha aqui (recordLedger nunca lanca) nao pode desfazer uma carga ja publicada.
+      await recordLedger({
+        kind: "upload", outcome: "COMPLETED", verdict: evaluation.verdict, datasetId: upload.dataset!.id, tableId: table.id, uploadId: upload.id,
+        tableName, mode: upload.mode, expectedRows: expected?.expected ?? null, parsedRows: total, physicalRows: Number(actual), prevRows: prevRowsForLedger,
+        detail: evaluationDetail(evaluation, { ...(expected ? { expectedSource: expected.source, clientRowCount: expected.clientRowCount } : {}), importMethod: phaseTimings.importMethod, parseMethod: parseStats.parseMethod, fallbackReason: parseStats.fallbackReason, storage: "sqlserver" }),
+      });
 
       return { tableId: table.id, inserted, updated, rowCount: actual };
     } catch (e) {
@@ -686,7 +720,7 @@ async function schemaMatchesSilent(pool: sql.ConnectionPool, schema: string, tab
   } catch { return false; }
 }
 
-async function assertCompatible(request: sql.Request, schema: string, table: string, columns: ParsedColumn[]) {
+export async function assertCompatible(request: sql.Request, schema: string, table: string, columns: ParsedColumn[], headerOnly = false) {
   const result = await request
     .input("schema", sql.NVarChar, schema)
     .input("table", sql.NVarChar, table)
@@ -696,8 +730,9 @@ async function assertCompatible(request: sql.Request, schema: string, table: str
   const expected = columns.map(c => c.sqlName);
   if (JSON.stringify(actual) !== JSON.stringify(expected))
     throw new Error(`Schema incompatível. Esperado: ${expected.join(", ")}; atual: ${actual.join(", ")}`);
-  if (!actualRows.every((r, i) => physicalTypeMatches(r, columns[i]!.sqlType)))
-    throw new Error("Schema incompatível: tipos da tabela atual diferem do arquivo");
+  if (headerOnly) return;
+  const bad = incompatibleColumns(actualRows.map(r => ({ name: r.name, sqlType: mssqlPhysicalToCanonical(r) })), columns);
+  if (bad.length) throw incompatibleError(bad);
 }
 
 function physicalTypeMatches(row: { type_name: string; precision?: number; scale?: number }, expected: string) {

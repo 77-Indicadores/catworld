@@ -81,7 +81,8 @@ d("import SQL Server: atomicidade, integridade e fidelidade (real)", () => {
       await prisma.upload.create({ data: {
         id, datasetId, originalFilename: `${table}.csv`, blobName: `rel/${id}.csv`, sizeBytes: 1n, mode, keyColumn: keyColumn ?? null,
         fullSnapshot: opts.fullSnapshot ?? false, status: "IMPORTING", rowCount: BigInt(opts.rowCount ?? prev.rowCount),
-        previewJson: JSON.stringify(prev), mappingJson: JSON.stringify(prev.columns),
+        // preview "do servidor" (source): e a contagem que o gate aceita como esperada; opts.rowCount simula uma origem com mais linhas
+        previewJson: JSON.stringify({ ...prev, source: "server", rowCount: opts.rowCount ?? prev.rowCount }), mappingJson: JSON.stringify(prev.columns),
       } });
     }
     return importUpload(id, path);
@@ -174,6 +175,21 @@ d("import SQL Server: atomicidade, integridade e fidelidade (real)", () => {
     expect(r[3].quando).toBeNull();
   }, 120_000);
 
+  it("#6 mapeamento ANTIGO (sem decimalDigits) com DECIMAL(38,10) e valor de 25 digitos: exato no SQL Server", async () => {
+    const p = join(dir, "wide1.csv");
+    writeFileSync(p, "id,v\n1,12345678901234567890.1234567890\n2,-1.5\n");
+    const prev = await previewFile(p);
+    const mapping = [
+      { originalName: "id", sqlName: "id", sqlType: "BIGINT", nullable: true },
+      { originalName: "v", sqlName: "v", sqlType: "DECIMAL(38,10)", nullable: true, decimalSep: "." }, // sem decimalDigits
+    ];
+    const id = randomUUID();
+    await prisma.upload.create({ data: { id, datasetId, originalFilename: "t_wide_legacy.csv", blobName: `rel/${id}.csv`, sizeBytes: 1n, mode: "replace", status: "IMPORTING", rowCount: 2n, previewJson: JSON.stringify(prev), mappingJson: JSON.stringify(mapping) } });
+    await importUpload(id, p);
+    const r = (await pool.request().query(`SELECT id, CAST(v AS NVARCHAR(60)) v FROM ${q("t_wide_legacy")} ORDER BY id`)).recordset;
+    expect(r.map((x: { v: string }) => x.v)).toEqual(["12345678901234567890.1234567890", "-1.5000000000"]);
+  }, 120_000);
+
   it("um leitor concorrente nunca vê tabela vazia ou parcial durante um replace", async () => {
     await run(file("h1.csv", 5000, "v1"), "t_reader");
     const seen = new Set<number>(); let stop = false;
@@ -199,6 +215,60 @@ d("import SQL Server: atomicidade, integridade e fidelidade (real)", () => {
     await run(file("i2.csv", 4000, "v2"), "t_retry", "replace", undefined, { id });
     expectRows(await rows("t_retry"), 4000, "v2");           // antes: publicava as 50 linhas parciais
   }, 180_000);
+
+  it("#3 EXACTLY-ONCE: o append que CRIA a tabela grava a marca na mesma transacao (retentativa nao duplica)", async () => {
+    const id = randomUUID(); const f = file("ce1.csv", 300, "v1");
+    await run(f, "t_create_once", "append", undefined, { id });
+    expect(await count("t_create_once")).toBe(300);
+    expect((await pool.request().query(`SELECT COUNT(*) n FROM cw_internal.applied_uploads WHERE upload_id = '${id}'`)).recordset[0].n).toBe(1);
+    await run(f, "t_create_once", "append", undefined, { id });
+    expect(await count("t_create_once")).toBe(300);
+  }, 120_000);
+
+  it("#4 registro exactly-once criado em paralelo num banco novo: todos passam", async () => {
+    const dbName = `cw_marker_${Date.now().toString(36)}`;
+    await pool.request().query(`CREATE DATABASE ${dbName}`);
+    const cfg = { ...parseUrl(mssqlUrl!), database: dbName };
+    const { ensureMssqlMarker } = await import("./applied-marker");
+    const pools = await Promise.all(Array.from({ length: 8 }, () => new sql.ConnectionPool(cfg).connect()));
+    try {
+      const rs = await Promise.allSettled(pools.map((p) => ensureMssqlMarker((s) => p.request().query(s))));
+      expect(rs.filter((r) => r.status === "rejected").map((r) => String((r as PromiseRejectedResult).reason))).toEqual([]);
+      expect((await pools[0]!.request().query(`SELECT OBJECT_ID(N'cw_internal.applied_uploads', N'U') id`)).recordset[0].id).not.toBeNull();
+    } finally {
+      await Promise.all(pools.map((p) => p.close()));
+      await pool.request().query(`ALTER DATABASE ${dbName} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE ${dbName}`).catch(() => undefined);
+    }
+  }, 120_000);
+
+  it("#1 TIPOS: data/decimal AMBIGUOS herdam DATE/DECIMAL da tabela existente (append), nao viram texto", async () => {
+    const f1 = join(dir, "amb1.csv"); writeFileSync(f1, "id,dia,valor\n1,25/01/2026,\"1.234,50\"\n2,26/01/2026,\"9,25\"\n");
+    await run(f1, "t_amb");
+    const f2 = join(dir, "amb2.csv"); writeFileSync(f2, "id,dia,valor\n3,01/02/2026,1.234\n4,03/04/2026,2.500\n");
+    expect((await previewFile(f2)).columns.find((c) => c.sqlName === "dia")!.sqlType).toBe("NVARCHAR(MAX)");
+    await run(f2, "t_amb", "append");
+    const got = (await pool.request().query(`SELECT CONVERT(varchar(10), dia, 23) d, CAST(valor AS varchar(40)) v FROM ${q("t_amb")} ORDER BY id`)).recordset;
+    expect(got.map((r: { d: string }) => r.d)).toEqual(["2026-01-25", "2026-01-26", "2026-02-01", "2026-04-03"]);
+    expect([Number(got[2].v), Number(got[3].v)]).toEqual([1234, 2500]);
+    const f3 = join(dir, "amb4.csv"); writeFileSync(f3, "id,dia,valor\n5,01/02/2026,9\n");
+    const tbl = await prisma.datasetTable.findUniqueOrThrow({ where: { datasetId_sqlName: { datasetId, sqlName: "t_amb" } } });
+    await prisma.datasetVersion.deleteMany({ where: { tableId: tbl.id } });
+    await expect(run(f3, "t_amb", "append")).rejects.toThrow(/ambíguas/);
+    expect(await count("t_amb")).toBe(4);
+  }, 120_000);
+
+  it("TIPOS (#13): append numa coluna FLOAT/BIT (outra familia) e recusado, nao tratado como texto", async () => {
+    await pool.request().query(`CREATE TABLE ${q("t_float")} (id BIGINT NULL, nome NVARCHAR(MAX) NULL, valor FLOAT NULL)`);
+    await pool.request().query(`INSERT INTO ${q("t_float")} VALUES (1,'a',1.5)`);
+    await expect(run(file("k1.csv", 3, "v", 10), "t_float", "append")).rejects.toThrow(/Tipos incompatíveis/);
+    expect(await count("t_float")).toBe(1);
+  }, 120_000);
+
+  it("TIPOS (#13): append de arquivo SO com cabecalho numa tabela tipada passa (mesma excecao do Postgres)", async () => {
+    await run(file("k2.csv", 5, "v1"), "t_hdr");
+    await run(file("k3.csv", 0, "v2"), "t_hdr", "append");
+    expect(await count("t_hdr")).toBe(5);
+  }, 120_000);
 
   it("LEDGER: cada tentativa fica registrada com o veredito", async () => {
     const r = (await prisma.$queryRawUnsafe<{ outcome: string; verdict: string }[]>(

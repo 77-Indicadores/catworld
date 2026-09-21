@@ -63,7 +63,7 @@ d("import Postgres: atomicidade e integridade (real)", () => {
 
   async function run(
     path: string, table: string, mode: "replace" | "append" | "upsert" = "replace", keyColumn?: string,
-    opts: { rowCount?: number; id?: string; fullSnapshot?: boolean } = {},
+    opts: { rowCount?: number; id?: string; fullSnapshot?: boolean; clientPreview?: boolean } = {},
   ) {
     const prev = await previewFile(path);
     const id = opts.id ?? randomUUID();
@@ -73,7 +73,9 @@ d("import Postgres: atomicidade e integridade (real)", () => {
         data: {
           id, datasetId, originalFilename: `${table}.csv`, blobName: `rel/${id}.csv`, sizeBytes: 1n, mode, keyColumn: keyColumn ?? null,
           fullSnapshot: opts.fullSnapshot ?? false,
-          status: "IMPORTING", rowCount: BigInt(opts.rowCount ?? prev.rowCount), previewJson: JSON.stringify(prev), mappingJson: JSON.stringify(prev.columns),
+          status: "IMPORTING", rowCount: BigInt(opts.rowCount ?? prev.rowCount),
+          // preview "do servidor" (source): e a contagem que o gate aceita como esperada; opts.rowCount simula uma origem com mais linhas
+          previewJson: JSON.stringify({ ...prev, source: opts.clientPreview ? undefined : "server", rowCount: opts.rowCount ?? prev.rowCount }), mappingJson: JSON.stringify(prev.columns),
         },
       });
     }
@@ -282,6 +284,77 @@ d("import Postgres: atomicidade e integridade (real)", () => {
     expect(await fingerprint("t_pipe")).toBe(before);
     const stages = (await pool.query(`SELECT count(*)::int n FROM information_schema.tables WHERE table_schema=$1 AND table_name = $2`, [SCHEMA, `cw_stage_${id.replaceAll("-", "").slice(0, 20)}`])).rows[0].n;
     expect(stages).toBe(0);                                        // sem staging órfã
+  });
+
+  it("#2 INTEGRIDADE: o rowCount/preview do CLIENTE nao calibra o gate; vale a contagem do servidor (e a divergencia marca SUSPECT)", async () => {
+    // cliente diz 5000 linhas, o arquivo tem 800: antes o import era BARRADO pelo numero do cliente (ou, com cliente menor, deixava passar)
+    const id = randomUUID();
+    const r = await run(file("cl1.csv", 800, "v1"), "t_client_count", "replace", undefined, { rowCount: 5000, clientPreview: true, id });
+    expect(r.rowCount).toBe(800n);
+    const led = await prisma.$queryRawUnsafe<{ verdict: string; expected_rows: bigint; detail_json: string }[]>(`SELECT verdict, expected_rows, detail_json FROM cw_load_ledger WHERE upload_id = $1::uuid`, id);
+    expect(led[0]!.verdict).toBe("SUSPECT");
+    expect(Number(led[0]!.expected_rows)).toBe(800);
+    expect(JSON.parse(led[0]!.detail_json)).toMatchObject({ expectedSource: "server-count", clientRowCount: 5000 });
+    expect(JSON.parse(led[0]!.detail_json).reasons.map((x: { code: string }) => x.code)).toEqual(["CLIENT_COUNT_MISMATCH"]);
+    // cliente MENOR que o arquivo nao esconde uma carga truncada: o servidor conta o arquivo (aqui completo => OK, sem motivo)
+    const id2 = randomUUID();
+    await run(file("cl2.csv", 500, "v1"), "t_client_count2", "replace", undefined, { rowCount: 10, clientPreview: true, id: id2 });
+    const led2 = await prisma.$queryRawUnsafe<{ expected_rows: bigint }[]>(`SELECT expected_rows FROM cw_load_ledger WHERE upload_id = $1::uuid`, id2);
+    expect(Number(led2[0]!.expected_rows)).toBe(500);
+  });
+
+  it("#5 LEDGER com falha NAO desfaz uma carga publicada (o livro e gravado depois da transacao)", async () => {
+    const p = prisma as unknown as { $executeRaw: (...x: unknown[]) => unknown };
+    const orig = p.$executeRaw;
+    let ledgerCalls = 0;
+    p.$executeRaw = function (this: unknown, s: TemplateStringsArray, ...a: unknown[]) {
+      if (Array.isArray(s) && s.join("").includes("cw_load_ledger")) { ledgerCalls++; return Promise.reject(new Error("livro indisponivel")); }
+      return orig.call(this, s, ...a);
+    } as never;
+    try {
+      const id = randomUUID();
+      const r = await run(file("led1.csv", 120, "v1"), "t_ledger_fail", "replace", undefined, { id });
+      expect(r.rowCount).toBe(120n);
+      expect((await prisma.upload.findUnique({ where: { id } }))?.status).toBe("COMPLETED");
+      expect(await count("t_ledger_fail")).toBe(120);
+      expect(ledgerCalls).toBeGreaterThan(0);
+    } finally { p.$executeRaw = orig; }
+  });
+
+  it("#3 EXACTLY-ONCE: o append que CRIA a tabela grava a marca na mesma transacao (retentativa nao duplica)", async () => {
+    const id = randomUUID(); const f = file("ce1.csv", 300, "v1");
+    await run(f, "t_create_once", "append", undefined, { id });
+    expect(await count("t_create_once")).toBe(300);
+    expect((await pool.query(`SELECT count(*)::int n FROM cw_internal.applied_uploads WHERE upload_id = $1`, [id])).rows[0].n).toBe(1);
+    await run(f, "t_create_once", "append", undefined, { id }); // retentativa do MESMO upload
+    expect(await count("t_create_once")).toBe(300);              // antes: 600
+  });
+
+  it("#1 TIPOS: data/decimal AMBIGUOS no arquivo herdam DATE/DECIMAL da tabela existente (append e upsert), nao viram texto", async () => {
+    // carga 1 (nao ambigua: dia 25 > 12 e 1.234,50 so pode ser decimal com virgula) cria DATE e DECIMAL(?,2)
+    const f1 = join(dir, "amb1.csv"); writeFileSync(f1, "id,dia,valor\n1,25/01/2026,\"1.234,50\"\n2,26/01/2026,\"9,25\"\n");
+    await run(f1, "t_amb");
+    expect((await pool.query(`SELECT data_type FROM information_schema.columns WHERE table_schema=$1 AND table_name='t_amb' AND column_name='dia'`, [SCHEMA])).rows[0].data_type).toBe("date");
+    // carga 2: todos os dias <= 12 e "1.234" ambiguo: sozinha vira texto; contra a tabela deve usar dd/mm e virgula decimal
+    const f2 = join(dir, "amb2.csv"); writeFileSync(f2, "id,dia,valor\n3,01/02/2026,1.234\n4,03/04/2026,2.500\n");
+    expect((await previewFile(f2)).columns.find((c) => c.sqlName === "dia")!.sqlType).toBe("NVARCHAR(MAX)"); // premissa do bug
+    await run(f2, "t_amb", "append");
+    const got = (await pool.query(`SELECT id::int i, dia::text d, valor::text v FROM ${SCHEMA}.t_amb ORDER BY id::int`)).rows;
+    expect(got.map((r) => r.d)).toEqual(["2026-01-25", "2026-01-26", "2026-02-01", "2026-04-03"]);
+    expect([Number(got[2].v), Number(got[3].v)]).toEqual([1234, 2500]);   // convenção da tabela (virgula decimal): "1.234" = ponto de milhar
+    // upsert tambem
+    const f3 = join(dir, "amb3.csv"); writeFileSync(f3, "id,dia,valor\n4,05/06/2026,7,5\n".replace("7,5", "\"7,5\""));
+    await run(f3, "t_amb", "upsert", "id");
+    expect((await pool.query(`SELECT dia::text d FROM ${SCHEMA}.t_amb WHERE id::int = 4`)).rows[0].d).toBe("2026-06-05");
+  });
+
+  it("#1 TIPOS: ambiguo SEM convencao conhecida na tabela falha alto, nao repetivel, e nada e gravado", async () => {
+    await run(join(dir, "amb1.csv"), "t_amb_noconv");
+    const tbl = await prisma.datasetTable.findUniqueOrThrow({ where: { datasetId_sqlName: { datasetId, sqlName: "t_amb_noconv" } } });
+    await prisma.datasetVersion.deleteMany({ where: { tableId: tbl.id } });
+    const f2 = join(dir, "amb4.csv"); writeFileSync(f2, "id,dia,valor\n3,01/02/2026,9\n");
+    await expect(run(f2, "t_amb_noconv", "append")).rejects.toThrow(/ambíguas/);
+    expect(await count("t_amb_noconv")).toBe(2);
   });
 
   it("ARQUIVO SEM COLUNAS: upload FAILED com motivo, tabela intacta (antes: COMPLETED com 0 linhas)", async () => {

@@ -19,7 +19,9 @@ export type ReasonCode =
   | "EMPTY_REPLACE"           // substituição completa por 0 linhas sobre tabela que tinha dados
   | "DROP_GT_PCT"             // queda grande de linhas contra a versão anterior
   | "STAGED_MISMATCH"         // staging tem número diferente do que foi lido
-  | "RETRY_WITHOUT_EXPECTED"; // retentativa que reaproveitou carga anterior sem contagem esperada para conferir
+  | "RETRY_WITHOUT_EXPECTED"  // retentativa que reaproveitou carga anterior sem contagem esperada para conferir
+  | "EXPECTED_UNVERIFIED"     // o servidor nao conseguiu contar o arquivo por conta propria: sem prova da contagem esperada (o valor do cliente nao vale)
+  | "CLIENT_COUNT_MISMATCH";  // o cliente declarou uma contagem diferente da que o servidor contou (vale a do servidor)
 
 export type Reason = { code: ReasonCode; blocking: boolean; message: string };
 
@@ -40,6 +42,10 @@ export type LoadFacts = {
   scheduled?: boolean;
   /** esvaziar a tabela NAO bloqueia (so marca SUSPECT): consulta com janela e sem chave, onde resultado vazio e normal (virada de mes) */
   softEmpty?: boolean;
+  /** upload: nao ha contagem esperada feita pelo servidor (so o valor do cliente, que nao e prova) */
+  expectedUnverified?: boolean;
+  /** upload: o cliente declarou uma contagem diferente da contada pelo servidor */
+  clientCountDisagrees?: boolean;
 };
 
 export type IntegritySettings = { mode: "enforce" | "warn"; maxDropPct: number; allowEmpty: boolean };
@@ -61,6 +67,12 @@ export function evaluateLoad(f: LoadFacts, cfg: IntegritySettings = INTEGRITY_DE
     } else if (f.parsedRows > expected) {
       reasons.push({ code: "ROWS_ABOVE_EXPECTED", blocking: false, message: `Foram lidas ${f.parsedRows} linhas, mais que as ${expected} esperadas (leitores discordam).` });
     }
+  }
+  if (f.expectedUnverified && !f.deltaOnly) {
+    reasons.push({ code: "EXPECTED_UNVERIFIED", blocking: false, message: "O servidor não conseguiu contar o arquivo por conta própria: a contagem esperada não foi verificada (o valor enviado pelo cliente não é prova)." });
+  }
+  if (f.clientCountDisagrees && !f.deltaOnly) {
+    reasons.push({ code: "CLIENT_COUNT_MISMATCH", blocking: false, message: `O cliente declarou uma contagem diferente da contada pelo servidor (${expected}); vale a do servidor.` });
   }
   if (f.wasRetryReusingStaging && expected === 0 && !f.deltaOnly) {
     reasons.push({ code: "RETRY_WITHOUT_EXPECTED", blocking: false, message: "Retentativa reaproveitou carga anterior sem contagem esperada para conferir." });
@@ -89,6 +101,8 @@ export function integrityErrorMessage(e: Evaluation): string {
 }
 
 export class IntegrityError extends Error {
+  /** Deterministico: o worker nao repete (falha imediata com a mensagem clara). */
+  readonly nonRetryable = true as const;
   constructor(public evaluation: Evaluation, public facts: { expectedRows?: number; parsedRows?: number; prevRows?: number } = {}) {
     super(integrityErrorMessage(evaluation));
     this.name = "IntegrityError";
