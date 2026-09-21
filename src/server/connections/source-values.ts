@@ -149,7 +149,7 @@ export function convertSourceValue(value: unknown, type: string, ctx?: ConvertCo
   if (type.startsWith("DECIMAL")) return convertDecimal(value, type, ctx);
   if (type === "DATE") return normalizeDate(value, ctx);
   if (type === "DATETIME2") return normalizeTimestamp(value, ctx);
-  if (type === "TIME") return String(value);
+  if (type === "TIME") return String(value).trim().replace(/\s*[+-]\d{2}(?::?\d{2}(?::?\d{2})?)?$/, ""); // TIME nao guarda deslocamento (timetz legado)
   let s: string;
   if (typeof value === "string") s = value;
   else if (Buffer.isBuffer(value)) s = "\\x" + value.toString("hex"); // bytea/varbinary: hexadecimal, sem perda
@@ -203,6 +203,12 @@ export function compareWithCatalog<T extends ResolvedColumn>(current: T[], catal
     const oldSpec = parseDecimalType(old);
     const newSpec = parseDecimalType(col.sqlType);
     if (oldSpec && newSpec && newSpec.scale <= oldSpec.scale && newSpec.precision - newSpec.scale <= oldSpec.precision - oldSpec.scale) return { ...col, sqlType: old };
+    // Diferenca so de MAPEAMENTO (money = DECIMAL(19,4) x legado (18,4); numeric(20,6) x (18,4)): a tabela ja guarda os dados no tipo
+    // legado, entao NAO ha mudanca estrutural e nao se recarrega (nem se congela fonte com janela). Mantem o tipo e a regra de
+    // arredondamento legados; valor que estoura a faixa continua falhando alto (SOURCE_VALUE_OVERFLOW), nunca vira NULL.
+    if (oldSpec && newSpec) return { ...col, sqlType: old, ...(newSpec.scale > oldSpec.scale ? { legacyRound: true } : {}) };
+    // timetz: o legado gravava TIME (sem o deslocamento); o mapeamento novo e texto. Mesmo tipo de familia -> mantem o legado.
+    if (old === "TIME" && col.sqlType === TEXT_TYPE && /^timetz$|time with time zone/i.test(col.pgType ?? "")) return { ...col, sqlType: old };
     if (oldSpec && col.lossyNumeric && col.sqlType === TEXT_TYPE) return { ...col, sqlType: old, legacyRound: true };
     changes.push(`tipo de "${col.sqlName}" mudou de ${old} para ${col.sqlType}`);
     return col;
