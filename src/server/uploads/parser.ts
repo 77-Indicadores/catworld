@@ -6,7 +6,7 @@ import { pipeline } from "node:stream/promises";
 import type { Stream } from "node:stream";
 import ExcelJS from "exceljs";
 import { detectFileHints as detectHints, csvRecords, CsvFormatError, strictDecodeStream, normalizeEncoding, type FileHints } from "./csv-detect";
-import { sqlIdentifier } from "@/server/security/naming";
+import { sqlIdentifier, uniqueIdentifier } from "@/server/security/naming";
 import { hasDateTimePart, dateCandidates, isOrderAmbiguous, type DateOrder } from "./date-normalize";
 import { accumulateDecimal, decideDecimal, newDecimalAcc, type DecimalAcc, type DecSep } from "./decimal-format";
 import { formatDecimalType } from "@/lib/decimal-type";
@@ -115,7 +115,7 @@ function textSqlType(){
 // P5: All columns are always nullable — BULK INSERT treats empty CSV fields as NULL.
 //     Even columns that appear NOT NULL in sample rows can have empty/invalid values later in the file.
 function headerLooksIdentifier(header:string){return /(^|[_\s-])(cpf|cnpj|cep|telefone|phone|celular|whats|codigo|cod|sku|id|documento|doc)([_\s-]|$)/i.test(header)}
-function columnsFromStats(headers:string[],stats:ColumnStats[]):ParsedColumn[]{const used=new Map<string,number>();return headers.map((header,index)=>{let name=sqlIdentifier(header||`col_${index+1}`);const n=(used.get(name)??0)+1;used.set(name,n);if(n>1)name=`${name}_${n}`;const s=stats[index]??newStats();return{originalName:header,sqlName:name,...inferType(header,s),nullable:true}})}
+function columnsFromStats(headers:string[],stats:ColumnStats[]):ParsedColumn[]{const taken=new Set<string>();return headers.map((header,index)=>{const name=uniqueIdentifier(sqlIdentifier(header||`col_${index+1}`),taken);const s=stats[index]??newStats();return{originalName:header,sqlName:name,...inferType(header,s),nullable:true}})}
 /** Tipo da coluna a partir do arquivo INTEIRO. Nunca adivinha: ambíguo ou que não cabe exato vira texto. A convenção (decimalSep/dateOrder) é
  *  guardada mesmo quando o tipo final é texto (ex.: coluna "id"), para que um override de tipo explícito converta com a mesma regra. */
 function inferType(header:string,s:ColumnStats):{sqlType:string}&Partial<Pick<ParsedColumn,"decimalSep"|"decimalAmbiguous"|"dateOrder"|"dateAmbiguous">>{

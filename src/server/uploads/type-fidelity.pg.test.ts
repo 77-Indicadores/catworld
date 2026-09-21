@@ -112,4 +112,16 @@ d("fidelidade de valores no import Postgres (real)", () => {
     await expect(run("n,v\n1,1.234\n", "t_dov2", { v: "DECIMAL(10,2)" })).rejects.toThrow(/1\.234/);
     await expect(pool.query(`SELECT 1 FROM ${SCHEMA}.t_dov2`)).rejects.toThrow();   // nada foi publicado
   });
+
+  it("TIP-12/16: colunas cw_deleted_at do usuário e nomes longos com o mesmo prefixo de 63 bytes importam sem colidir", async () => {
+    const long = "c".repeat(70);
+    await run(`n,cw_deleted_at,${long}_a,${long}_b\n1,x,va,vb\n2,y,wa,wb\n`, "t_names");
+    const cols = (await pool.query(`SELECT column_name FROM information_schema.columns WHERE table_schema=$1 AND table_name='t_names' ORDER BY ordinal_position`, [SCHEMA])).rows.map((r) => r.column_name as string);
+    expect(cols.filter((c) => c.length > 63)).toEqual([]);
+    expect(new Set(cols).size).toBe(cols.length);
+    expect(cols).toContain("cw_deleted_at_col");
+    const r = (await pool.query(`SELECT * FROM ${SCHEMA}.t_names ORDER BY n::bigint`)).rows;
+    const vals = r.map((row) => Object.values(row).filter((v) => typeof v === "string" && /^(x|y|va|vb|wa|wb)$/.test(v)));
+    expect(vals).toEqual([["x", "va", "vb"], ["y", "wa", "wb"]]);
+  });
 });

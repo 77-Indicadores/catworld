@@ -16,7 +16,7 @@ import { createHash } from "node:crypto";
 import { prisma } from "@/server/db";
 import { withAdvisoryLock } from "@/server/db/advisory-lock";
 import { withImportLock } from "@/server/db/import-lock";
-import { sqlIdentifier } from "@/server/security/naming";
+import { sqlIdentifier, fitIdentifiers } from "@/server/security/naming";
 import { previewFile, rowsFromFile, type FilePreview, type ParsedColumn, type RowsFromFileOpts } from "./parser";
 import { convertForPg } from "./convert-values";
 import type { PgStorageConnection } from "@/server/storage/pg-storage";
@@ -163,8 +163,14 @@ async function importUploadPgLocked(
     return { tableId: upload.tableId ?? null, inserted: 0, updated: 0, rowCount: 0n };
   }
 
+  // Postgres corta identificador em 63 bytes em silêncio (duas colunas longas viram a mesma): encurta de forma determinística e única.
+  {
+    const fitted = fitIdentifiers(mapping.map(c => c.sqlName));
+    mapping = mapping.map((c, i) => (fitted[i] === c.sqlName ? c : { ...c, sqlName: fitted[i]! }));
+  }
+
   const ext = extname(upload.originalFilename).toLowerCase();
-  const tableName = upload.table?.sqlName ?? sqlIdentifier(upload.originalFilename.replace(/\.[^.]+$/, ""));
+  const tableName = fitIdentifiers([upload.table?.sqlName ?? sqlIdentifier(upload.originalFilename.replace(/\.[^.]+$/, ""))])[0]!;
   const schema = upload.dataset.schemaName;
   const stage = `cw_stage_${upload.id.replaceAll("-", "").slice(0, 20)}`;
 
