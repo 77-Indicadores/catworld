@@ -275,8 +275,8 @@ Verificação da branch: `tsc` limpo e suíte completa verde contra Postgres 16 
 
 ### O que continua em aberto
 
-- Ainda sem teste em SQL Server real: `kill -9` no meio do import seguido de retentativa e um `refreshDatasetSource` completo com destino SQL Server (o bulk exato foi provado direto na conexão).
-- Duas linhas manuais em `src/worker/index.ts` (repassar `manual`/`acceptDrop` do payload; chamar `purgeLedger()` na limpeza) e os patches de `docs/deferred-patches/`.
+- Testes em SQL Server real agora existem para `kill -9` no meio do import com retentativa (replace, append exactly-once e delta-replace) e para `refreshDatasetSource` de fonte Postgres para storage SQL Server (valores exatos, incremental, reconciliação, bloqueio de fonte vazia). Nenhum revelou defeito.
+- Continuam adiados os patches de `docs/deferred-patches/` (dependem de você commitar seus arquivos em andamento).
 - Confirmar no log do supervisor de produção a causa das quedas de conexão do lock e o horário.
 - Não houve otimização do import específico do SQL Server (20 a 48 min): falta medir por fase.
 - Correções de comportamento como `TIP-10` (não aparar texto, `""` ≠ NULL) e o hash `_cw_rh` **não foram alteradas** de propósito (mudariam chaves e deltas já gravados).
