@@ -232,7 +232,13 @@ Cada item deve nascer como teste que falha (harness em `importer-pg.reliability.
 
 ## 12. Status da implementação (branch `hardening/data-reliability`, local, sem push)
 
-Verificação da branch: `tsc` limpo, `eslint` sem erros nos arquivos alterados e suíte completa verde (106 arquivos, 1.260 testes, incluindo os que rodam contra Postgres real). Cada correção nasceu com teste; os de integridade e atomicidade (`importer-pg.reliability.pg.test.ts`, `import-lock.pg.test.ts`, `swap-lock.pg.test.ts`, `parser-reliability.test.ts`) foram conferidos falhando no código antigo. **Nada do caminho SQL Server foi executado contra um SQL Server real** (não havia instância): tudo dele é código revisado e testado por unidade.
+Verificação da branch: `tsc` limpo e suíte completa verde contra Postgres 16 e **SQL Server 2022 reais** (`CW_TEST_PG_URL` e `CW_TEST_MSSQL_URL`); rodando todos os arquivos em paralelo alguns testes de banco estouram timeout por contenção, mas passam isolados (`--no-file-parallelism` para uploads e storage). Cada correção nasceu com teste; os de integridade e atomicidade foram conferidos falhando no código antigo.
+
+**Rodada de revisão independente (3 revisões + testes em SQL Server real).** Achados corrigidos e integrados: paginação OData sem `$top` cortava em 10 mil linhas; `bulkInsert` do SQL Server arredondava DECIMAL largo e BIGINT >2^53 (agora exato, provado no SQL Server real); índice `cw_synced_at` só a cada duas cargas; guarda de queda/vazio sem exceção para refresh manual; append/upsert em tabela existente caindo para TEXT com data/decimal ambíguos (agora herda o tipo e a convenção); barra de integridade confiando em `rowCount` do cliente; exactly-once faltando no append que cria a tabela; erros determinísticos reententados 5×; `STRING_AGG`/`TRANSLATE` rejeitados sem motivo; `changes()` do SDK descartando linhas idênticas; e outros (ver `git log`). Dois bugs reais só apareceram no SQL Server real (colunas `cw_*` no merge legado; DECIMAL de 18 dígitos).
+
+**Produção (somente leitura, 21/09):** os três hotfixes de 20/09 (staging parcial, leitura de CSV, append PG) coincidem com zero casos de "gravou menos que o arquivo" (114 cargas concluídas depois, 5 com mais de 100 mil linhas), contra 4 a 11 casos por dia antes. Amostra curta: o veredicto exige o dia completo, incluindo `vendas_completo` e as tabelas do TMK.
+
+**Achado novo, ainda não corrigido em produção:** o worker sai com código 3 ("identidade em uso") logo depois de o contêiner reiniciar, porque a pulsação do processo antigo (PIDs reaproveitados) ainda está fresca (45 s). Com reinícios seguidos isso esgota o limite de reinício ("Restart limit reached"). Correção candidata: o supervisor, que já detém o advisory lock, não deve ser bloqueado pela pulsação de processo anterior do mesmo contêiner.
 
 | Item do plano | Situação | Onde |
 |---|---|---|
@@ -261,7 +267,7 @@ Verificação da branch: `tsc` limpo, `eslint` sem erros nos arquivos alterados 
 
 1. **Modo da barra de integridade.** O padrão é `enforce`: cargas que hoje publicam com linhas faltando passam a **falhar** e a tabela anterior fica. Sugestão: publicar com `mode=warn` (`PATCH /api/v1/settings/integrity`), observar `GET /api/health/integrity` por alguns dias e então ligar `enforce`.
 2. **Arquivos e colunas que antes "funcionavam" com dado errado agora falham ou viram TEXT:** linha com campos a mais que o cabeçalho, coluna decimal/data ambígua (`1,234`, `04/05/2026`), offsets de fuso diferentes de UTC, XLSX com dados em várias abas, bytes inválidos em Windows-1252, valores fora do tipo mapeado.
-3. **SQL Server:** DECIMAL com mais de 15 dígitos significativos falha (o driver escreve por `Number`); decidir entre aceitar ou mover a coluna para TEXT.
+3. **SQL Server:** DECIMAL com mais de 15 dígitos significativos agora entra exato (staging em texto + `ALTER COLUMN`), mais lento nessas colunas; fontes existentes com mapeamento antigo mantêm a coluna `DECIMAL(18,4)` e arredondam a 4 casas.
 4. **Fontes:** novas fontes com chave ganham reconciliação diária por padrão (leitura completa: pesada em ERPs grandes); float/numeric sem restrição viram TEXT em fontes novas; fontes existentes que precisam alargar tipo fazem uma recarga única.
 5. **Traduções T-SQL:** `LIKE` com `[a-c]`, `CONVERT(VARCHAR(n))` truncando, `CHARINDEX`/`REPLACE` sem diferenciar caixa e `coluna + '5'` rejeitado como ambíguo mudam o resultado de consultas existentes; `AVG(int)` truncado só sob opção.
 6. **OData e export:** filtro/ordenação não suportados agora dão 400/501 (antes devolviam a tabela toda); CSV com `dateFormat=iso` por padrão e uma linha final `# RESULTADO TRUNCADO` quando cortado.
@@ -269,7 +275,8 @@ Verificação da branch: `tsc` limpo, `eslint` sem erros nos arquivos alterados 
 
 ### O que continua em aberto
 
-- Teste ponta a ponta em SQL Server real (BIGINT negativo/>2^53, datetime, retentativa, append exactly-once, marca no destino).
+- Ainda sem teste em SQL Server real: `kill -9` no meio do import seguido de retentativa e um `refreshDatasetSource` completo com destino SQL Server (o bulk exato foi provado direto na conexão).
+- Duas linhas manuais em `src/worker/index.ts` (repassar `manual`/`acceptDrop` do payload; chamar `purgeLedger()` na limpeza) e os patches de `docs/deferred-patches/`.
 - Confirmar no log do supervisor de produção a causa das quedas de conexão do lock e o horário.
 - Não houve otimização do import específico do SQL Server (20 a 48 min): falta medir por fase.
 - Correções de comportamento como `TIP-10` (não aparar texto, `""` ≠ NULL) e o hash `_cw_rh` **não foram alteradas** de propósito (mudariam chaves e deltas já gravados).
