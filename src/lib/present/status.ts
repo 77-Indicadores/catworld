@@ -49,6 +49,8 @@ export type RefreshInput = {
   refreshCron: string | null;
   nextRefreshAt: string | null;
   lastRefreshedAt: string | null;
+  /** Ultima escrita da linha (ISO): para fonte "running" e o batimento (heartbeat) da trava, renovado a cada minuto (M2). */
+  updatedAt?: string | null;
 };
 
 const F = (kind: FreshnessKind, label: string, tone: Status, severity: number, reason: string | null = null): Freshness => ({ kind, label, tone, reason, severity });
@@ -60,9 +62,18 @@ export function presentRefreshFreshness(src: RefreshInput, now: Date = new Date(
   if (status === "running" || status === "queued") {
     // "Na fila"/"Atualizando" há muito tempo não é "em andamento": é parado. Antes esse estado voltava antes do teste de atraso e uma fonte
     // presa na fila por dias nunca aparecia como atrasada (docs/estudo-confiabilidade-dados.md, OBS-07).
+    // `nextRefreshAt` so avanca quando a rodada TERMINA: uma rodada saudavel de 40 min parece "atrasada" por ele. Por isso "rodando"
+    // se julga pelo batimento (updatedAt, renovado a cada minuto; parado ha mais de 20 min = dono morto) e, sem ele, por um limite
+    // bem maior (2 h). So a fila (nada roda ainda) usa os 30 min sobre o horario previsto (M2).
     const next = src.nextRefreshAt ? Date.parse(src.nextRefreshAt) : NaN;
-    if (Number.isFinite(next) && now.getTime() - next > RUNNING_STUCK_MS) {
-      const p = presentDateTime(src.nextRefreshAt, { now });
+    const beat = src.updatedAt ? Date.parse(src.updatedAt) : NaN;
+    const stuck = status === "queued"
+      ? Number.isFinite(next) && now.getTime() - next > RUNNING_STUCK_MS
+      : Number.isFinite(beat)
+        ? now.getTime() - beat > RUNNING_HEARTBEAT_STUCK_MS
+        : Number.isFinite(next) && now.getTime() - next > RUNNING_NO_HEARTBEAT_STUCK_MS;
+    if (stuck) {
+      const p = presentDateTime(status === "running" && Number.isFinite(beat) ? src.updatedAt : src.nextRefreshAt, { now });
       return F("stale", "Atrasada", "warning", 5, p ? `${status === "queued" ? "Na fila" : "Rodando"} desde antes de ${p.absolute}: possível travamento` : null);
     }
     return status === "running" ? F("running", "Atualizando", "warning", 4) : F("running", "Na fila", "warning", 4);
@@ -92,6 +103,10 @@ export function worstFreshness(list: Freshness[]): Freshness | null {
 
 /** Fila/execução parada além disto (depois do horário previsto) deixa de ser "em andamento" e vira atraso. */
 export const RUNNING_STUCK_MS = 30 * 60_000;
+/** Rodando sem NENHUM batimento por este tempo = dono morto (o batimento e de 1 min; a trava e retomada apos ~15 min). */
+export const RUNNING_HEARTBEAT_STUCK_MS = 20 * 60_000;
+/** Rodando, sem dado de batimento (derivada/cliente antigo): so um limite folgado sobre o horario previsto, para nao acusar rodada longa. */
+export const RUNNING_NO_HEARTBEAT_STUCK_MS = 2 * 3_600_000;
 
 /** Veredito da última carga da tabela (livro de integridade): qualquer coisa diferente de OK torna o dado suspeito. */
 export type IntegrityInput = { verdict: string; reason: string | null };
@@ -109,11 +124,15 @@ export type TableFreshnessInput = {
  * saber se está atrasada, então é neutro ("Atualizada há X") — sem julgar.
  */
 export function presentTableFreshness(t: TableFreshnessInput, now: Date = new Date()): Freshness {
+  const all = [...t.sources, ...(t.derived ? [t.derived] : [])];
+  // Pausada/desativada (TODAS as origens) vem ANTES do veredito: uma fonte pausada nao vai mais carregar, entao "possivelmente
+  // incompleta" ficaria para sempre sem como limpar (M1).
+  if (all.length > 0 && all.every((s) => s.active === false)) return F("paused", "Pausada", "inactive", 1);
   // A última carga foi barrada ou marcada suspeita: o dado pode estar incompleto. Vence qualquer "Em dia" (gravidade 7 > erro 6).
   if (t.integrity && t.integrity.verdict !== "OK") {
     return F("suspect", "Possivelmente incompleta", "error", 7, t.integrity.reason);
   }
-  const items = [...t.sources, ...(t.derived ? [t.derived] : [])].map((s) => presentRefreshFreshness(s, now));
+  const items = all.map((s) => presentRefreshFreshness(s, now));
   const worst = worstFreshness(items);
   if (worst) return worst;
   const p = presentDateTime(t.lastDataAt, { now });

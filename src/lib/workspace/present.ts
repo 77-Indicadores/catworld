@@ -5,14 +5,14 @@ import type { WorkspaceDerived, WorkspaceSource, WorkspaceTable } from "./types"
 export function sourceRefreshInput(s: WorkspaceSource): RefreshInput {
   return {
     mode: s.mode, active: s.active, lastStatus: s.lastStatus, lastError: s.lastError,
-    refreshCron: s.refreshCron, nextRefreshAt: s.nextRefreshAt, lastRefreshedAt: s.lastRefreshedAt,
+    refreshCron: s.refreshCron, nextRefreshAt: s.nextRefreshAt, lastRefreshedAt: s.lastRefreshedAt, updatedAt: s.updatedAt ?? null,
   };
 }
 
 export function derivedRefreshInput(d: WorkspaceDerived): RefreshInput {
   return {
     mode: "extract", active: d.active, lastStatus: d.lastStatus, lastError: d.lastError,
-    refreshCron: d.refreshCron, nextRefreshAt: d.nextRefreshAt, lastRefreshedAt: d.lastRefreshedAt,
+    refreshCron: d.refreshCron, nextRefreshAt: d.nextRefreshAt, lastRefreshedAt: d.lastRefreshedAt, updatedAt: d.updatedAt ?? null,
   };
 }
 
