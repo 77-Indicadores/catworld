@@ -280,7 +280,6 @@ async function qualifyTablesForPg(
     tableMap.get(key)!.push(row.table_schema);
   }
 
-  let result = sql;
   for (const table of unqualified) {
     const found = tableMap.get(table.toLowerCase()) ?? [];
     if (found.length > 1) {
@@ -290,15 +289,30 @@ async function qualifyTablesForPg(
         `Tabela '${table}' existe em múltiplos datasets do contexto: ${found.join(", ")}. Use schema.tabela para qualificar.`,
       );
     }
-    if (found.length === 1) {
-      result = qualifyTable(result, table, found[0]!);
-    }
   }
 
-  return result;
+  // ENT-02: o SQL segue INTACTO. Antes, uma reescrita por regex trocava CTE/coluna/alias homonimos pela tabela
+  // real. O search_path da transacao (beginReadOnly) ja resolve os nomes sem schema.
+  return sql;
 }
 
-function extractUnqualifiedTableRefs(sql: string): string[] {
+/** Troca literais de string e comentarios por espacos (mesmo comprimento): a busca de FROM/JOIN nao le dentro deles. */
+function blankLiteralsAndComments(sql: string): string {
+  return sql.replace(/N?'(?:[^']|'')*'|--[^\n]*|\/\*[\s\S]*?\*\//g, (m) => " ".repeat(m.length));
+}
+
+/** Nomes de CTE declarados (WITH x AS (...), y AS (...)): nao sao tabelas, nao entram na checagem de ambiguidade. */
+function cteNames(sql: string): Set<string> {
+  const names = new Set<string>();
+  const re = /(?:\bWITH\s+(?:RECURSIVE\s+)?|,\s*)"?([a-zA-Z_][a-zA-Z0-9_]*)"?\s*(?:\([^)]*\))?\s+AS\s*(?:NOT\s+MATERIALIZED\s*|MATERIALIZED\s*)?\(/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(sql)) !== null) names.add(m[1]!.toLowerCase());
+  return names;
+}
+
+function extractUnqualifiedTableRefs(rawSql: string): string[] {
+  const sql = blankLiteralsAndComments(rawSql);
+  const ctes = cteNames(sql);
   const re = /\b(?:FROM|JOIN|INNER\s+JOIN|LEFT\s+(?:OUTER\s+)?JOIN|RIGHT\s+(?:OUTER\s+)?JOIN|FULL\s+(?:OUTER\s+)?JOIN|CROSS\s+JOIN)\s+("?[a-zA-Z_][a-zA-Z0-9_]*"?)\b/gi;
   const results: string[] = [];
   let match: RegExpExecArray | null;
@@ -306,27 +320,8 @@ function extractUnqualifiedTableRefs(sql: string): string[] {
     const ref = match[1]!.replace(/"/g, "");
     const idx = match.index + match[0].lastIndexOf(match[1]!);
     if (sql[idx - 1] === "." || sql[idx + match[1]!.length] === ".") continue;
+    if (ctes.has(ref.toLowerCase())) continue;
     results.push(ref);
   }
   return [...new Set(results)];
-}
-
-function qualifyTable(sql: string, table: string, schema: string): string {
-  const qualified = `"${schema.replace(/"/g, '""')}"."${table.replace(/"/g, '""')}"`;
-  const escaped = table.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const pattern = new RegExp(`(?<!\\.)"?\\b${escaped}\\b"?`, "gi");
-  // Processa fora de literais de string
-  const parts = sql.split(/(N?'[^']*(?:''[^']*)*')/gi);
-  return parts
-    .map((part, i) => {
-      if (i % 2 === 1) return part;
-      return part.replace(pattern, (match, offset) => {
-        const before = part.slice(0, offset).trimEnd();
-        if (/\bAS$/i.test(before)) return match;
-        const after = part.slice(offset + match.length).trimStart();
-        if (/^AS\s*\(/i.test(after)) return match;
-        return qualified;
-      });
-    })
-    .join("");
 }
