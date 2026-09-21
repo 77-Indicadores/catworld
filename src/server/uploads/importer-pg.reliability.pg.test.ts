@@ -268,6 +268,22 @@ d("import Postgres: atomicidade e integridade (real)", () => {
     expect(visible).toBe(100);
   });
 
+  it("PIPELINE: erro num lote INSERIDO em paralelo ao parse falha o import (sem rejeição solta) e não toca a tabela", async () => {
+    await run(file("s1.csv", 2000, "v1"), "t_pipe");
+    const before = await fingerprint("t_pipe");
+    // 6000 linhas; a coluna valor foi mapeada como BIGINT e na linha 5000 chega "abc": o INSERT desse lote falha enquanto o parser já lê o próximo
+    const bad = file("s2.csv", 6000, "v2", { 5000: "5000,x,abc" });
+    const prev = await previewFile(bad);
+    const mapping = prev.columns.map((c) => (c.sqlName === "valor" ? { ...c, sqlType: "BIGINT" } : c));
+    const id = randomUUID();
+    await prisma.upload.create({ data: { id, datasetId, originalFilename: "t_pipe.csv", blobName: `rel/${id}.csv`, sizeBytes: 1n, mode: "replace", status: "IMPORTING", rowCount: 6000n, previewJson: JSON.stringify(prev), mappingJson: JSON.stringify(mapping) } });
+    await expect(importUploadPg(id, bad, conn)).rejects.toThrow();
+    expect(await count("t_pipe")).toBe(2000);
+    expect(await fingerprint("t_pipe")).toBe(before);
+    const stages = (await pool.query(`SELECT count(*)::int n FROM information_schema.tables WHERE table_schema=$1 AND table_name = $2`, [SCHEMA, `cw_stage_${id.replaceAll("-", "").slice(0, 20)}`])).rows[0].n;
+    expect(stages).toBe(0);                                        // sem staging órfã
+  });
+
   it("ARQUIVO SEM COLUNAS: upload FAILED com motivo, tabela intacta (antes: COMPLETED com 0 linhas)", async () => {
     await run(file("r1.csv", 50, "v1"), "t_nocols");
     const nocols = join(dir, "r2.csv"); writeFileSync(nocols, "");

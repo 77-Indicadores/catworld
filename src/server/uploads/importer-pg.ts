@@ -148,6 +148,12 @@ export async function importUploadPg(
     };
     await recordLedger(entry);
     if (e instanceof IntegrityError) await auditIntegrity({ ...entry, resourceId: uploadId });
+    // Limpa as tabelas temporárias DESTE upload (staging e mesclada): uma falha no meio da carga deixava cópias completas do arquivo no banco
+    // até a próxima retentativa (PER/OBS-13). Os nomes são únicos por upload; nunca toca a tabela de destino.
+    const suffix = uploadId.replaceAll("-", "").slice(0, 20);
+    for (const t of [`cw_stage_${suffix}`, `cw_mgd_${suffix}`]) {
+      await conn.execute(`DROP TABLE IF EXISTS ${pgQuote(pre.dataset.schemaName)}.${pgQuote(t)}`).catch(() => undefined);
+    }
     throw e;
   }
 }
@@ -244,24 +250,43 @@ async function importUploadPgLocked(
   let batch: Record<string, unknown>[] = [];
   const reclassifiedCols: string[] = [];
 
-  for await (const row of alreadyApplied ? emptyRows() : rowsFromFile(source, mapping, opts)) {
-    batch.push(row);
-    if (batch.length >= BATCH_SIZE) {
-      await flushBatch(conn, schema, stage, mapping, batch, true, reclassifiedCols);
-      total += batch.length;
-      batch = [];
-      const now = Date.now();
-      if (now - lastProgressMs > 10_000) {
-        void prisma.upload.update({
-          where: { id: upload.id },
-          data: { progress: Math.min(75, 35 + Math.floor(total / Math.max(knownRowCount, 1) * 40)) },
-        });
-        lastProgressMs = now;
+  // Pipeline com sobreposição (PER-02): enquanto o lote N é inserido no banco, o parser já lê o lote N+1. Antes era tudo serial
+  // (parse 22% + conversão 35% + INSERT 34% do tempo). No máximo UM lote em voo: memória limitada e a ordem dos INSERTs preservada.
+  // O erro de um lote em voo é capturado (nunca fica como rejeição não tratada, que derrubaria o worker) e relançado no próximo `drain`.
+  let inflight: Promise<void> | null = null;
+  let flushError: unknown = null;
+  const drain = async () => {
+    const p = inflight;
+    inflight = null;
+    if (p) await p;
+    if (flushError) throw flushError;
+  };
+  try {
+    for await (const row of alreadyApplied ? emptyRows() : rowsFromFile(source, mapping, opts)) {
+      batch.push(row);
+      if (batch.length >= BATCH_SIZE) {
+        const full = batch;
+        batch = [];
+        await drain();
+        inflight = flushBatch(conn, schema, stage, mapping, full, true, reclassifiedCols).catch((e) => { flushError = e; });
+        total += full.length;
+        const now = Date.now();
+        if (now - lastProgressMs > 10_000) {
+          void prisma.upload.update({
+            where: { id: upload.id },
+            data: { progress: Math.min(75, 35 + Math.floor(total / Math.max(knownRowCount, 1) * 40)) },
+          }).catch(() => undefined);
+          lastProgressMs = now;
+        }
       }
     }
+    await drain();
+    await flushBatch(conn, schema, stage, mapping, batch, true, reclassifiedCols);
+    total += batch.length;
+  } catch (e) {
+    await drain().catch(() => undefined); // espera o lote em voo terminar antes de propagar (não deixa INSERT solto no banco)
+    throw e;
   }
-  await flushBatch(conn, schema, stage, mapping, batch, true, reclassifiedCols);
-  total += batch.length;
   if (alreadyApplied) {
     console.warn("[importUploadPg] append já aplicado (marca exactly-once) — retentativa só reconcilia metadados upload=%s", uploadId);
     total = Number(marker!.rows);
