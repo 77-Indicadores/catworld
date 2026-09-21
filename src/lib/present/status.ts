@@ -19,7 +19,7 @@ export function normalizeRunStatus(raw: string | null | undefined): RunStatus {
   }
 }
 
-export type FreshnessKind = "ok" | "stale" | "failing" | "running" | "paused" | "manual" | "live" | "neutral" | "empty";
+export type FreshnessKind = "ok" | "stale" | "failing" | "running" | "paused" | "manual" | "live" | "neutral" | "empty" | "suspect";
 
 export type Freshness = {
   kind: FreshnessKind;
@@ -57,8 +57,16 @@ export function presentRefreshFreshness(src: RefreshInput, now: Date = new Date(
   if (src.active === false) return F("paused", "Pausada", "inactive", 1);
   const status = normalizeRunStatus(src.lastStatus);
   if (status === "failed") return F("failing", "Com erro", "error", 6, src.lastError);
-  if (status === "running") return F("running", "Atualizando", "warning", 4);
-  if (status === "queued") return F("running", "Na fila", "warning", 4);
+  if (status === "running" || status === "queued") {
+    // "Na fila"/"Atualizando" há muito tempo não é "em andamento": é parado. Antes esse estado voltava antes do teste de atraso e uma fonte
+    // presa na fila por dias nunca aparecia como atrasada (docs/estudo-confiabilidade-dados.md, OBS-07).
+    const next = src.nextRefreshAt ? Date.parse(src.nextRefreshAt) : NaN;
+    if (Number.isFinite(next) && now.getTime() - next > RUNNING_STUCK_MS) {
+      const p = presentDateTime(src.nextRefreshAt, { now });
+      return F("stale", "Atrasada", "warning", 5, p ? `${status === "queued" ? "Na fila" : "Rodando"} desde antes de ${p.absolute}: possível travamento` : null);
+    }
+    return status === "running" ? F("running", "Atualizando", "warning", 4) : F("running", "Na fila", "warning", 4);
+  }
   if (src.mode === "live") return F("live", "Ao vivo", "healthy", 2);
   if (!src.refreshCron && !src.nextRefreshAt) {
     return status === "ok" || src.lastRefreshedAt ? F("manual", "Manual", "healthy", 1, "Sem agenda: atualiza só quando você pedir") : F("empty", "Aguardando 1ª carga", "warning", 3);
@@ -82,8 +90,16 @@ export function worstFreshness(list: Freshness[]): Freshness | null {
   return list.reduce((worst, f) => (f.severity > worst.severity ? f : worst));
 }
 
+/** Fila/execução parada além disto (depois do horário previsto) deixa de ser "em andamento" e vira atraso. */
+export const RUNNING_STUCK_MS = 30 * 60_000;
+
+/** Veredito da última carga da tabela (livro de integridade): qualquer coisa diferente de OK torna o dado suspeito. */
+export type IntegrityInput = { verdict: string; reason: string | null };
+
 export type TableFreshnessInput = {
   lastDataAt: string | null;
+  /** veredito da última carga (cw_load_ledger); ausente = sem informação, não julga */
+  integrity?: IntegrityInput | null;
   sources: RefreshInput[];
   derived?: RefreshInput | null;
 };
@@ -93,6 +109,10 @@ export type TableFreshnessInput = {
  * saber se está atrasada, então é neutro ("Atualizada há X") — sem julgar.
  */
 export function presentTableFreshness(t: TableFreshnessInput, now: Date = new Date()): Freshness {
+  // A última carga foi barrada ou marcada suspeita: o dado pode estar incompleto. Vence qualquer "Em dia" (gravidade 7 > erro 6).
+  if (t.integrity && t.integrity.verdict !== "OK") {
+    return F("suspect", "Possivelmente incompleta", "error", 7, t.integrity.reason);
+  }
   const items = [...t.sources, ...(t.derived ? [t.derived] : [])].map((s) => presentRefreshFreshness(s, now));
   const worst = worstFreshness(items);
   if (worst) return worst;

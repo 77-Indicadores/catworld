@@ -6,6 +6,8 @@ export type FreshnessItem = { key: string; name: string; group: string; href?: s
 
 export type FreshnessSummary = {
   total: number;
+  /** a última carga foi barrada ou suspeita de estar incompleta */
+  suspect: FreshnessItem[];
   failing: FreshnessItem[];
   stale: FreshnessItem[];
   running: FreshnessItem[];
@@ -17,9 +19,10 @@ export type FreshnessSummary = {
 };
 
 export function summarizeFreshness(items: FreshnessItem[]): FreshnessSummary {
-  const s: FreshnessSummary = { total: items.length, failing: [], stale: [], running: [], healthy: 0, neutral: 0, paused: 0 };
+  const s: FreshnessSummary = { total: items.length, suspect: [], failing: [], stale: [], running: [], healthy: 0, neutral: 0, paused: 0 };
   for (const it of items) {
     switch (it.freshness.kind) {
+      case "suspect": s.suspect.push(it); break;
       case "failing": s.failing.push(it); break;
       case "stale": s.stale.push(it); break;
       case "running": s.running.push(it); break;
@@ -36,6 +39,7 @@ const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one :
 /** Selo do resumo: o pior problema primeiro; sem problema, "Em dia" só se algo agendado está em dia. */
 export function freshnessHeadline(s: FreshnessSummary): { tone: Status; label: string } {
   if (s.total === 0) return { tone: "inactive", label: "Sem tabelas" };
+  if (s.suspect.length) return { tone: "error", label: plural(s.suspect.length, "possivelmente incompleta", "possivelmente incompletas") };
   if (s.failing.length) return { tone: "error", label: plural(s.failing.length, "com erro", "com erro") };
   if (s.stale.length) return { tone: "warning", label: plural(s.stale.length, "atrasada", "atrasadas") };
   if (s.running.length) return { tone: "warning", label: "Atualizando" };

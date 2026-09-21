@@ -89,6 +89,29 @@ const src = (over: Partial<RefreshInput> = {}): RefreshInput => ({
   refreshCron: "0 * * * *", nextRefreshAt: "2026-09-19T18:00:00Z", lastRefreshedAt: "2026-09-19T17:00:00Z", ...over,
 });
 
+describe("integridade e fila parada (estudo de confiabilidade)", () => {
+  it("última carga barrada/suspeita vence 'Em dia' e o erro: 'Possivelmente incompleta'", () => {
+    const f = presentTableFreshness({ lastDataAt: "2026-09-19T17:00:00Z", sources: [src()], integrity: { verdict: "FAILED", reason: "Foram lidas 50000 linhas, mas a origem tem 828672." } }, NOW);
+    expect(f).toMatchObject({ kind: "suspect", label: "Possivelmente incompleta", tone: "error", severity: 7 });
+    expect(f.reason).toContain("828672");
+    expect(f.severity).toBeGreaterThan(presentRefreshFreshness(src({ lastStatus: "failed" }), NOW).severity);
+  });
+  it("veredito OK ou ausente não muda nada", () => {
+    expect(presentTableFreshness({ lastDataAt: null, sources: [src()], integrity: { verdict: "OK", reason: null } }, NOW).kind).toBe("ok");
+    expect(presentTableFreshness({ lastDataAt: null, sources: [src()] }, NOW).kind).toBe("ok");
+  });
+  it("tabela só de upload também é marcada (sem agenda, mas dado suspeito)", () => {
+    expect(presentTableFreshness({ lastDataAt: "2026-09-19T17:00:00Z", sources: [], integrity: { verdict: "SUSPECT", reason: null } }, NOW).kind).toBe("suspect");
+  });
+  it("fonte 'na fila'/'atualizando' há mais de 30 min depois do previsto é ATRASADA (parada), não 'em andamento'", () => {
+    const stuck = "2026-09-19T14:00:00Z"; // NOW é 2026-09-19T18:00Z: previsto há 4 h
+    expect(presentRefreshFreshness(src({ lastStatus: "queued", nextRefreshAt: stuck }), NOW)).toMatchObject({ kind: "stale", label: "Atrasada" });
+    expect(presentRefreshFreshness(src({ lastStatus: "running", nextRefreshAt: stuck }), NOW).kind).toBe("stale");
+    // dentro da tolerância continua "em andamento"
+    expect(presentRefreshFreshness(src({ lastStatus: "queued", nextRefreshAt: "2026-09-19T17:50:00Z" }), NOW).kind).toBe("running");
+  });
+});
+
 describe("presentRefreshFreshness", () => {
   it("em dia", () => expect(presentRefreshFreshness(src(), NOW)).toMatchObject({ kind: "ok", label: "Em dia", tone: "healthy" }));
   it("erro vence tudo e traz a mensagem", () => {

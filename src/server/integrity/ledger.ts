@@ -73,23 +73,36 @@ export async function auditIntegrity(e: LedgerEntry & { resourceId: string }): P
   }
 }
 
+/** Primeiro motivo legível do veredito (para o selo do dashboard). */
+function firstReason(detailJson: string | null): string | null {
+  if (!detailJson) return null;
+  try {
+    const d = JSON.parse(detailJson) as { reasons?: { message?: string }[]; error?: string };
+    return d.reasons?.[0]?.message ?? d.error ?? null;
+  } catch { return null; }
+}
+
 export type IntegritySummary = {
   windowHours: number;
   loads: number;
   failed: number;
   suspect: number;
   /** tabelas cujo ÚLTIMO veredito não foi OK */
-  tablesNeedingAttention: { tableId: string | null; tableName: string | null; verdict: string; lastAt: string; expectedRows: number | null; parsedRows: number | null }[];
+  tablesNeedingAttention: { tableId: string | null; tableName: string | null; verdict: string; lastAt: string; expectedRows: number | null; parsedRows: number | null; reason: string | null }[];
 };
 
 /** Resumo para o endpoint de saúde e o dashboard. */
 export async function summarizeIntegrity(windowHours = 24): Promise<IntegritySummary> {
   const counts = await prisma.$queryRaw<{ verdict: string; outcome: string; n: bigint }[]>`
     SELECT verdict, outcome, COUNT(*) AS n FROM cw_load_ledger WHERE created_at > now() - (${windowHours}::text || ' hours')::interval GROUP BY 1, 2`;
-  const last = await prisma.$queryRaw<{ table_id: string | null; table_name: string | null; verdict: string; created_at: Date; expected_rows: bigint | null; parsed_rows: bigint | null }[]>`
-    SELECT DISTINCT ON (COALESCE(table_id::text, table_name)) table_id, table_name, verdict, created_at, expected_rows, parsed_rows
-    FROM cw_load_ledger WHERE created_at > now() - interval '7 days'
-    ORDER BY COALESCE(table_id::text, table_name), created_at DESC`;
+  // Último veredito por TABELA (dataset + nome): a falha de uma tentativa não conhece o table_id, então a chave é dataset+nome e o id é
+  // resolvido pelo catálogo. Uma carga OK posterior encerra o alerta (a linha mais recente vence).
+  const last = await prisma.$queryRaw<{ table_id: string | null; table_name: string | null; verdict: string; created_at: Date; expected_rows: bigint | null; parsed_rows: bigint | null; detail_json: string | null }[]>`
+    SELECT DISTINCT ON (l.dataset_id, l.table_name)
+           COALESCE(l.table_id, (SELECT t.id FROM cw_tables t WHERE t.dataset_id = l.dataset_id AND t.sql_name = l.table_name)) AS table_id,
+           l.table_name, l.verdict, l.created_at, l.expected_rows, l.parsed_rows, l.detail_json
+    FROM cw_load_ledger l WHERE l.created_at > now() - interval '7 days' AND l.table_name IS NOT NULL
+    ORDER BY l.dataset_id, l.table_name, l.created_at DESC`;
   const n = (v: string, o?: string) => counts.filter((c) => c.verdict === v && (!o || c.outcome === o)).reduce((s, c) => s + Number(c.n), 0);
   return {
     windowHours,
@@ -99,6 +112,7 @@ export async function summarizeIntegrity(windowHours = 24): Promise<IntegritySum
     tablesNeedingAttention: last.filter((r) => r.verdict !== "OK").map((r) => ({
       tableId: r.table_id, tableName: r.table_name, verdict: r.verdict, lastAt: r.created_at.toISOString(),
       expectedRows: r.expected_rows === null ? null : Number(r.expected_rows), parsedRows: r.parsed_rows === null ? null : Number(r.parsed_rows),
+      reason: firstReason(r.detail_json),
     })),
   };
 }
