@@ -89,6 +89,8 @@ export function integrityErrorMessage(e: Evaluation): string {
 }
 
 export class IntegrityError extends Error {
+  /** Deterministico: o worker nao repete (falha imediata com a mensagem clara). */
+  readonly nonRetryable = true as const;
   constructor(public evaluation: Evaluation, public facts: { expectedRows?: number; parsedRows?: number; prevRows?: number } = {}) {
     super(integrityErrorMessage(evaluation));
     this.name = "IntegrityError";

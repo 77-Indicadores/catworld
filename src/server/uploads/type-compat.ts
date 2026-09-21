@@ -6,6 +6,7 @@
  * sumia). Regra: só é aceito ALARGAR (o valor sempre cabe sem perder informação); estreitar exige um replace, que recria a tabela.
  */
 import { parseDecimalType } from "@/lib/decimal-type";
+import { markNonRetryable } from "./non-retryable";
 
 const isText = (t: string) => t.startsWith("NVARCHAR") || t === "TEXT" || t.startsWith("VARCHAR") || t.startsWith("CHAR");
 
@@ -40,6 +41,11 @@ export function incompatibleColumns(
 export function incompatibleMessage(cols: { column: string; existing: string; incoming: string }[]): string {
   const list = cols.map((c) => `"${c.column}" é ${c.existing} e o arquivo traz ${c.incoming}`).join("; ");
   return `Tipos incompatíveis com a tabela existente: ${list}. O append/upsert não estreita colunas (perderia informação); use replace ou ajuste o arquivo.`;
+}
+
+/** Erro (nao repetivel pelo worker) de tipos incompativeis no append/upsert. */
+export function incompatibleError(cols: { column: string; existing: string; incoming: string }[]): Error {
+  return markNonRetryable(new Error(incompatibleMessage(cols)));
 }
 
 /** Tipo físico do SQL Server (sys.columns) → tipo canônico. */

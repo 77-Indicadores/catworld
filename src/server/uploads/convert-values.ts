@@ -13,6 +13,8 @@ import { normalizeDateLike, type DateOrder } from "./date-normalize";
 export type ConvertColumn = { sqlName?: string; sqlType: string; decimalSep?: DecSep | null; dateOrder?: DateOrder | null; /** dígitos significativos necessários (do arquivo inteiro); ausente em mapeamentos antigos */ decimalDigits?: number | null };
 
 export class ValueConversionError extends Error {
+  /** Deterministico: repetir o job nao muda o resultado (o worker nao gasta tentativas). */
+  readonly nonRetryable = true as const;
   constructor(column: ConvertColumn, value: string, why: string) {
     super(`Valor "${value.length > 60 ? value.slice(0, 60) + "…" : value}" não cabe no tipo ${column.sqlType}${column.sqlName ? ` da coluna ${column.sqlName}` : ""}: ${why}. O import foi interrompido para não gravar dado diferente do arquivo.`);
     this.name = "ValueConversionError";

@@ -17,6 +17,7 @@ import { downloadFile, deleteFile } from "@/server/storage";
 import { env } from "@/server/env";
 import { previewFile, applyTypeOverrides, type FilePreview } from "@/server/uploads/parser";
 import { importUpload } from "@/server/uploads/importer";
+import { isNonRetryable } from "@/server/uploads/non-retryable";
 import { FROM_PREVIEW, queueImportUploadAuto } from "@/server/uploads/actions";
 import { enqueueDueSourceRefreshes, enqueueDueReconciliations, refreshDatasetSource, nextRefreshFromCron } from "@/server/connections/sources";
 import { enqueueDueDerivedRefreshes, refreshDerivedTable } from "@/server/connections/derived";
@@ -406,7 +407,8 @@ async function completeJob(jobId: string) {
 
 async function fail(job: Claimed, error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
-  const retry = job.attempts < job.max_attempts;
+  // Erro deterministico (integridade, conversao de valor, tipo incompativel): repetir nao muda nada; falha ja, sem gastar tentativas.
+  const retry = job.attempts < job.max_attempts && !isNonRetryable(error);
 
   // Try to restore rowCount from previewJson when it was zeroed by a failed import
   let restoreRowCount: bigint | undefined;
@@ -648,7 +650,7 @@ async function loop(concurrencyId: number) {
       });
       await auditJob({
         jobId: job.id, jobType: job.type, success: false, workerLabel, durationMs: Date.now() - t0, attempts: job.attempts,
-        willRetry: job.attempts < job.max_attempts, error: e instanceof Error ? e.message : String(e), ...jobResource(job),
+        willRetry: job.attempts < job.max_attempts && !isNonRetryable(e), error: e instanceof Error ? e.message : String(e), ...jobResource(job),
       });
       try {
         await fail(job, e);

@@ -152,7 +152,7 @@ function inferType(header:string,s:ColumnStats):{sqlType:string}&Partial<Pick<Pa
 
 // Tipos canônicos aceitos como override: ver type-override.ts (também usado pela validação da API).
 export { normalizeTypeOverride };
-export class TypeOverrideError extends Error { constructor(message: string) { super(message); this.name = "TypeOverrideError"; } }
+export class TypeOverrideError extends Error { nonRetryable = true as const; constructor(message: string) { super(message); this.name = "TypeOverrideError"; } }
 
 /**
  * Aplica overrides de tipo (chave = sqlName ou originalName da coluna, case-insensitive) por cima da inferência automática.

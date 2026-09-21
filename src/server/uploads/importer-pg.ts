@@ -25,7 +25,7 @@ import { userColumnNames } from "@/server/storage/connection";
 import { IntegrityError, evaluateLoad, getIntegritySettings, type Evaluation } from "@/server/integrity/policy";
 import { auditIntegrity, evaluationDetail, ledgerInsert, recordLedger } from "@/server/integrity/ledger";
 import { PG_MARKER_DDL, PG_MARKER_INSERT, PG_MARKER_SELECT } from "./applied-marker";
-import { incompatibleColumns, incompatibleMessage } from "./type-compat";
+import { incompatibleColumns, incompatibleError } from "./type-compat";
 
 // ─── Type conversion ──────────────────────────────────────────────────────────
 
@@ -230,7 +230,7 @@ async function importUploadPgLocked(
     // Só é aceito ALARGAR o tipo: estreitar (DECIMAL em BIGINT, DATETIME em DATE) arredondava/truncava as linhas existentes em silêncio.
     // (arquivo só com cabeçalho não tem valores para estreitar nada: os tipos inferidos dele não valem)
     const narrowing = preview && preview.rowCount === 0 ? [] : incompatibleColumns(existingCols.filter((c) => userColumnNames([c]).length > 0), mapping);
-    if (narrowing.length) throw new Error(incompatibleMessage(narrowing));
+    if (narrowing.length) throw incompatibleError(narrowing);
   }
 
   // Marca exactly-once: se um append deste upload já foi confirmado (queda entre o COMMIT e os metadados), não recarrega nem
