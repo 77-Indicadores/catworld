@@ -5,6 +5,7 @@ import { canAccess } from "@/server/auth/permissions";
 import { ensureInternalPrincipal, executeReadOnly, grantSchema } from "@/server/azure/sql";
 import { executeLiveReadOnly, liveQuotedTable, type LiveConnection } from "@/server/connections/live";
 import { getStorageConnection } from "@/server/storage/connection";
+import { activeRowsPredicate } from "@/server/storage/active-rows";
 import { ApiError, handleApiError, ok } from "@/server/http";
 import { quoteIdentifier } from "@/server/security/naming";
 import {
@@ -226,8 +227,11 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       if (v != null) nextSinceBaseline = parseSince(String(v))?.iso ?? null;
     } catch { /* tabela pode não ter cw_synced_at ainda (dados anteriores à feature) */ }
 
+    // Amostra sem `since`: linha marcada como excluida (soft delete) nao e dado. Le como dono (a RLS nao vale): filtra aqui.
+    const activeWhere = await activeRowsPredicate(conn, table.dataset.schemaName, table.sqlName);
+    const activeSql = activeWhere ? ` WHERE ${activeWhere}` : "";
     if (conn.provider === "postgres") {
-      const rows = await conn.query<Record<string, unknown>>(`SELECT ${colList} FROM ${qTarget} LIMIT ${limit}`);
+      const rows = await conn.query<Record<string, unknown>>(`SELECT ${colList} FROM ${qTarget}${activeSql} LIMIT ${limit}`);
       return ok(rows, { columns: colNames.length ? colNames : (rows.length ? Object.keys(rows[0]!) : []), rowCount: rows.length, nextSince: nextSinceBaseline });
     }
 
@@ -236,7 +240,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     await grantSchema(actor.principal, table.dataset.schemaName, "READ", table.dataset.storageServerId);
     const result = await executeReadOnly(
       actor.principal,
-      `SELECT TOP ${limit} ${colNames.length ? colNames.map(c => quoteIdentifier(c)).join(", ") : "*"} FROM ${quoteIdentifier(table.dataset.schemaName)}.${quoteIdentifier(table.sqlName)}`,
+      `SELECT TOP ${limit} ${colNames.length ? colNames.map(c => quoteIdentifier(c)).join(", ") : "*"} FROM ${quoteIdentifier(table.dataset.schemaName)}.${quoteIdentifier(table.sqlName)}${activeSql}`,
       30, limit, [], 0, 120, table.dataset.storageServerId,
     );
     return ok(result.rows, { columns: result.columns, rowCount: result.rowCount, nextSince: nextSinceBaseline });

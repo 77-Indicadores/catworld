@@ -8,6 +8,7 @@ import { ApiError, handleApiError, isQueryTimeout, ok, publicQueryErrorMessage, 
 import { audit } from "@/server/audit";
 import { prisma } from "@/server/db";
 import { getStorageConnection } from "@/server/storage/connection";
+import { hideDeletedForStorage } from "@/server/sql-contract/hide-deleted-run";
 import { pgRoleForActor, runStorageQuery, type QueryResult } from "@/server/sql-contract/run";
 import { getContractMode } from "@/server/sql-contract/apply";
 import { getNormalizeDefault } from "@/server/sql-contract/format-default";
@@ -60,13 +61,14 @@ export async function POST(request: NextRequest) {
       let handedOff = false;
       try {
         const conn = await getStorageConnection(storageServerId);
+        const streamSql = await hideDeletedForStorage(conn, input.sql, schemas, "storage-stream");
         let ndjsonStream: ReadableStream<Uint8Array>;
         if (conn.provider === "postgres") {
           const { executeReadOnlyPgStream } = await import("@/server/storage/pg-query");
           const { PgStorageConnection } = await import("@/server/storage/pg-storage");
-          ndjsonStream = await executeReadOnlyPgStream(conn as InstanceType<typeof PgStorageConnection>, input.sql, streamTimeout, schemas, normalize, await pgRoleForActor(conn, actor, scope.accessible, storageServerId));
+          ndjsonStream = await executeReadOnlyPgStream(conn as InstanceType<typeof PgStorageConnection>, streamSql, streamTimeout, schemas, normalize, await pgRoleForActor(conn, actor, scope.accessible, storageServerId));
         } else {
-          ndjsonStream = await executeReadOnlyStream(actor.principal, input.sql, streamTimeout, schemas, storageServerId, normalize);
+          ndjsonStream = await executeReadOnlyStream(actor.principal, streamSql, streamTimeout, schemas, storageServerId, normalize);
         }
         handedOff = true;
         return new Response(releaseSlotWhenDone(ndjsonStream), {

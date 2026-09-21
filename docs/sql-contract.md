@@ -101,7 +101,7 @@ Igual nos quatro caminhos (`columns, rows, rowCount, truncated, executionTimeMs`
 ## Onde vive no codigo
 
 `src/server/sql-contract/`: `translate.ts` (T-SQL -> Postgres), `result.ts` (tipos do resultado),
-`run.ts` (entrada unica para o storage). Testes: `translate.test.ts`, `result.test.ts`.
+`run.ts` (entrada unica para o storage), `hide-deleted.ts` (esconde linhas excluidas na origem). Testes: `translate.test.ts`, `result.test.ts`, `hide-deleted.test.ts`.
 
 ## Acesso e somente leitura
 
@@ -125,10 +125,21 @@ Igual nos quatro caminhos (`columns, rows, rowCount, truncated, executionTimeMs`
 2. Postgres: transação `READ ONLY` + papel sem privilégios de servidor. Fonte live/extract: `default_transaction_read_only = on`.
 3. SQL Server: principal com grants de leitura.
 
+## Linhas excluidas na origem (soft delete) nunca aparecem
+
+Linhas marcadas por `detectDeletions` (`cw_deleted_at` preenchido; ver `source-contract.md`) sao escondidas de **todo** leitor SQL do storage, por um mecanismo unico: `hideDeletedRows` (`sql-contract/hide-deleted.ts`, ligado ao storage em `hide-deleted-run.ts`).
+
+- **Como:** o T-SQL do usuario e parseado (AST) e cada base table de FROM/JOIN — inclusive em subconsultas, corpos de CTE e ramos de UNION — que tenha a coluna `cw_deleted_at` vira `(SELECT * FROM schema.tabela WHERE cw_deleted_at IS NULL) AS <alias ou nome da tabela>`. Alias, `tabela.col`, `schema.tabela.col`, self-join, DISTINCT/GROUP BY, TOP e OFFSET/FETCH continuam valendo. Nomes de CTE nunca sao reescritos; tabela sem schema so e reescrita se resolver em exatamente um schema do escopo.
+- **Quando:** ANTES da traducao por dialeto, portanto igual para storage Postgres e SQL Server, em `/queries`, `/queries/export`, `stream` e no SQL das **tabelas derivadas** (`prepareDerivedSql`). Vale para **todos os atores** (ADMIN inclusive) e com `pg_isolation.mode = off`; em Postgres soma-se a RLS `cw_hide_deleted` (filtrar duas vezes e inofensivo). NAO se aplica a fonte **live** (consulta direto na origem, sem colunas cw_*), nem ao caminho `rows?since=` (que precisa ver as marcadas para devolver `removedKeys`).
+- **Modos do contrato (`off`/`shadow`/`fallback`/`strict`):** o modo escolhe o TRADUTOR (regex antigo x AST). O filtro e uma garantia de dados e roda **em todos os modos, inclusive `off`**, antes de qualquer tradutor.
+- **Sem efeito onde nao ha a coluna:** metadado (`listColumns`) cacheado por 60 s por tabela; se nenhuma tabela referenciada tem `cw_deleted_at`, o SQL segue **byte a byte** igual (mesmo resultado, avisos, plano e contadores). Consultas que reescrevem trocam o SQL enviado (tabela derivada no lugar da tabela); `SELECT *` continua devolvendo `cw_synced_at`/`cw_deleted_at` como antes.
+- **Limitacao (NAO reescreve, so conta):** SQL que o parser nao le (sintaxe Postgres como `::`, `TRY_CAST`/`TRY_CONVERT`, `x.*` de 3 partes, `JOIN ... ON cond, outra_tabela`) passa **sem filtro** e incrementa o contador `hide-deleted-skip` (Configuracoes > Contrato de SQL). Nesses casos so a RLS protege — ou seja, no Postgres apenas atores **nao-dono** (nao-admin com isolamento ligado); **ADMIN, isolamento `off` e SQL Server podem ver linhas marcadas**. Tambem fora: nome de 3 partes (`banco.schema.tabela`), `#temp`, funcoes de tabela.
+- Testes: `hide-deleted.test.ts` (AST; no SQL Server o T-SQL gerado e verificado so como texto, nao executado por falta de instancia) e `hide-deleted.pg.test.ts` (Postgres real, com `CW_TEST_PG_URL`).
+
 ## Contadores (para decidir quando ligar o `strict`)
 
 `GET /api/v1/settings/sql-contract` (e a tela Configurações > Contrato de SQL) mostram, **desta instância e desde o último
 início do processo**: quantas consultas foram traduzidas por caminho (`storage-pg`, `live-pg`, `derived`…), quantas de cada tipo
-(`shadow-diff`, `shadow-reject`, `fallback-reject`, `fallback-exec`) e as 30 consultas mais frequentes por **formato** (literais
+(`shadow-diff`, `shadow-reject`, `fallback-reject`, `fallback-exec`, `hide-deleted-skip`) e as 30 consultas mais frequentes por **formato** (literais
 viram `'?'`; nenhum valor é guardado). Um formato que aparece muito em `fallback-reject` é o que o modo estrito passaria a rejeitar.
 Com mais de uma instância, cada uma conta separado. O estado é um singleton do processo (`globalThis`), compartilhado entre rotas.
