@@ -284,6 +284,15 @@ d("import Postgres: atomicidade e integridade (real)", () => {
     expect(stages).toBe(0);                                        // sem staging órfã
   });
 
+  it("#3 EXACTLY-ONCE: o append que CRIA a tabela grava a marca na mesma transacao (retentativa nao duplica)", async () => {
+    const id = randomUUID(); const f = file("ce1.csv", 300, "v1");
+    await run(f, "t_create_once", "append", undefined, { id });
+    expect(await count("t_create_once")).toBe(300);
+    expect((await pool.query(`SELECT count(*)::int n FROM cw_internal.applied_uploads WHERE upload_id = $1`, [id])).rows[0].n).toBe(1);
+    await run(f, "t_create_once", "append", undefined, { id }); // retentativa do MESMO upload
+    expect(await count("t_create_once")).toBe(300);              // antes: 600
+  });
+
   it("#1 TIPOS: data/decimal AMBIGUOS no arquivo herdam DATE/DECIMAL da tabela existente (append e upsert), nao viram texto", async () => {
     // carga 1 (nao ambigua: dia 25 > 12 e 1.234,50 so pode ser decimal com virgula) cria DATE e DECIMAL(?,2)
     const f1 = join(dir, "amb1.csv"); writeFileSync(f1, "id,dia,valor\n1,25/01/2026,\"1.234,50\"\n2,26/01/2026,\"9,25\"\n");

@@ -200,6 +200,31 @@ d("import SQL Server: atomicidade, integridade e fidelidade (real)", () => {
     expectRows(await rows("t_retry"), 4000, "v2");           // antes: publicava as 50 linhas parciais
   }, 180_000);
 
+  it("#3 EXACTLY-ONCE: o append que CRIA a tabela grava a marca na mesma transacao (retentativa nao duplica)", async () => {
+    const id = randomUUID(); const f = file("ce1.csv", 300, "v1");
+    await run(f, "t_create_once", "append", undefined, { id });
+    expect(await count("t_create_once")).toBe(300);
+    expect((await pool.request().query(`SELECT COUNT(*) n FROM cw_internal.applied_uploads WHERE upload_id = '${id}'`)).recordset[0].n).toBe(1);
+    await run(f, "t_create_once", "append", undefined, { id });
+    expect(await count("t_create_once")).toBe(300);
+  }, 120_000);
+
+  it("#4 registro exactly-once criado em paralelo num banco novo: todos passam", async () => {
+    const dbName = `cw_marker_${Date.now().toString(36)}`;
+    await pool.request().query(`CREATE DATABASE ${dbName}`);
+    const cfg = { ...parseUrl(mssqlUrl!), database: dbName };
+    const { ensureMssqlMarker } = await import("./applied-marker");
+    const pools = await Promise.all(Array.from({ length: 8 }, () => new sql.ConnectionPool(cfg).connect()));
+    try {
+      const rs = await Promise.allSettled(pools.map((p) => ensureMssqlMarker((s) => p.request().query(s))));
+      expect(rs.filter((r) => r.status === "rejected").map((r) => String((r as PromiseRejectedResult).reason))).toEqual([]);
+      expect((await pools[0]!.request().query(`SELECT OBJECT_ID(N'cw_internal.applied_uploads', N'U') id`)).recordset[0].id).not.toBeNull();
+    } finally {
+      await Promise.all(pools.map((p) => p.close()));
+      await pool.request().query(`ALTER DATABASE ${dbName} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE ${dbName}`).catch(() => undefined);
+    }
+  }, 120_000);
+
   it("#1 TIPOS: data/decimal AMBIGUOS herdam DATE/DECIMAL da tabela existente (append), nao viram texto", async () => {
     const f1 = join(dir, "amb1.csv"); writeFileSync(f1, "id,dia,valor\n1,25/01/2026,\"1.234,50\"\n2,26/01/2026,\"9,25\"\n");
     await run(f1, "t_amb");

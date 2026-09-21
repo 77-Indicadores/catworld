@@ -2,7 +2,7 @@ import * as Sentry from "@sentry/nextjs";
 import { physicalDecimal, parseDecimalType, DECIMAL_LEGACY } from "@/lib/decimal-type";
 import { IntegrityError, evaluateLoad, getIntegritySettings, type Evaluation } from "@/server/integrity/policy";
 import { auditIntegrity, evaluationDetail, ledgerInsert, recordLedger } from "@/server/integrity/ledger";
-import { MSSQL_MARKER_DDL, MSSQL_MARKER_INSERT, MSSQL_MARKER_SELECT } from "./applied-marker";
+import { MSSQL_MARKER_INSERT, MSSQL_MARKER_SELECT, ensureMssqlMarker } from "./applied-marker";
 import { canonicalAccepts, incompatibleColumns, incompatibleError, mssqlPhysicalToCanonical } from "./type-compat";
 import { isInternalColumn } from "@/server/storage/connection";
 import { loadPrevMapping, resolveAgainstExisting } from "./existing-types";
@@ -321,11 +321,13 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
 
     // Marca exactly-once (append): se este upload já foi aplicado (queda entre o COMMIT e os metadados), não recarrega nem acrescenta
     // de novo — só reconcilia os metadados.
-    await writePool.request().query(MSSQL_MARKER_DDL);
+    // (so o append usa o registro; criar para todo modo corria em paralelo e falhava. Sem permissao: o append falha alto)
     let alreadyAppliedRows: number | null = null;
     if (upload.mode === "append") {
+      await ensureMssqlMarker((q) => writePool.request().query(q));
       const m = await pool.request().input("uploadId", sql.UniqueIdentifier, upload.id).query(MSSQL_MARKER_SELECT);
-      if (m.recordset.length > 0) alreadyAppliedRows = Number(m.recordset[0].rows);
+      // marca sem a tabela (apagada depois): nao ha o que reconciliar, recarrega
+      if (m.recordset.length > 0 && targetExists) alreadyAppliedRows = Number(m.recordset[0].rows);
     }
     const alreadyApplied = alreadyAppliedRows !== null;
 
@@ -518,6 +520,14 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
                 CREATE INDEX [IX__cw_rh] ON ${target} ([_cw_rh]);
                 DROP TABLE ${staging};
               `);
+              if (upload.mode === "append" && !targetExists) {
+                // Append que CRIA a tabela: marca exactly-once na MESMA transacao do create+insert
+                request.input("uploadId", sql.UniqueIdentifier, upload.id);
+                request.input("tableName", sql.NVarChar, tableName);
+                request.input("mode", sql.NVarChar, "append");
+                request.input("rows", sql.BigInt, total);
+                await request.query(MSSQL_MARKER_INSERT);
+              }
               inserted = total;
             } else if (upload.mode === "append") {
               await request.query(

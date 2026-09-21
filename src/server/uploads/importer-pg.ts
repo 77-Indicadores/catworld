@@ -24,7 +24,7 @@ import { pgQuote, canonicalToPg } from "@/server/storage/pg-storage";
 import { userColumnNames } from "@/server/storage/connection";
 import { IntegrityError, evaluateLoad, getIntegritySettings, type Evaluation } from "@/server/integrity/policy";
 import { auditIntegrity, evaluationDetail, ledgerInsert, recordLedger } from "@/server/integrity/ledger";
-import { PG_MARKER_DDL, PG_MARKER_INSERT, PG_MARKER_SELECT } from "./applied-marker";
+import { PG_MARKER_INSERT, PG_MARKER_SELECT, ensurePgMarker } from "./applied-marker";
 import { incompatibleColumns, incompatibleError } from "./type-compat";
 import { loadPrevMapping, resolveAgainstExisting } from "./existing-types";
 
@@ -242,11 +242,13 @@ async function importUploadPgLocked(
 
   // Marca exactly-once: se um append deste upload já foi confirmado (queda entre o COMMIT e os metadados), não recarrega nem
   // acrescenta de novo — só reconcilia os metadados. Vive no destino, fora dos datasets.
-  for (const ddl of PG_MARKER_DDL) await conn.execute(ddl);
+  // (so o append usa o registro; criar o schema/tabela para todo modo corria em paralelo e falhava — PG 23505)
+  if (upload.mode === "append") await ensurePgMarker(conn);
   const marker = upload.mode === "append"
     ? (await conn.queryParams<{ rows: string }>(PG_MARKER_SELECT, [upload.id]))[0]
     : undefined;
-  const alreadyApplied = marker !== undefined;
+  // Marca sem a tabela (foi apagada depois): nao ha o que reconciliar; recarrega em vez de "concluir" com tabela vazia.
+  const alreadyApplied = marker !== undefined && targetExists;
 
   // Drop staging anterior (retry idempotente)
   await conn.execute(`DROP TABLE IF EXISTS ${qStaging}`);
@@ -352,7 +354,13 @@ async function importUploadPgLocked(
   if (upload.mode === "replace" || !targetExists) {
     // fullSwap: staging tem estado completo → DROP target + RENAME staging (AccessExclusiveLock ~ms)
     // (o índice em _cw_rh já foi criado na staging acima; construí-lo duas vezes custava ~8% do import — PER-01)
-    await conn.atomicSwap(schema, stage, tableName, mappingWithRh, { targetExists });
+    // Append que CRIA a tabela: a marca exactly-once entra na MESMA transacao da troca (create+insert): sem ela, uma queda entre o swap e os
+    // metadados fazia a retentativa acrescentar o arquivo de novo (50.000 virava 100.000).
+    const markCreate = upload.mode === "append" && !targetExists;
+    await conn.atomicSwap(schema, stage, tableName, mappingWithRh, {
+      targetExists,
+      ...(markCreate ? { inSwapTx: async (client) => { await client.query(PG_MARKER_INSERT, [upload.id, tableName, "append", String(total)]); } } : {}),
+    });
     inserted = total;
 
   } else if (upload.mode === "upsert") {
