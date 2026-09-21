@@ -15,7 +15,8 @@ import { MAX_RESULT_BYTES, approxRowBytes } from "@/server/query/protection";
 import { contractTranslate, getContractMode, runWithContract } from "@/server/sql-contract/apply";
 import { addTieBreaker, type TieBreakResult } from "./paging";
 import { pgQuote, type PgStorageConnection } from "./pg-storage";
-import { mssqlKind, normalizeRows, pgKind, type ColumnKind } from "@/server/sql-contract/result";
+import { legacyPgRows, normalizeRows, pgKind, type ColumnKind } from "@/server/sql-contract/result";
+import { PG_STRING_TYPES } from "./pg-types";
 
 const DEFAULT_LIMIT = 10_000;
 
@@ -114,7 +115,7 @@ export async function executeReadOnlyPg(
       let tooLarge = false;
       // rowMode "array": objeto por linha perderia colunas de mesmo nome (ver columns.ts)
       // (os typings do pg nao declaram rowMode em Query, mas o driver aceita)
-      const query = new Query({ text, rowMode: "array" } as never);
+      const query = new Query({ text, rowMode: "array", types: PG_STRING_TYPES } as never);
       client!.query(query);
 
       query.on("row", (row: unknown[]) => {
@@ -174,7 +175,7 @@ export async function executeReadOnlyPg(
     const { rows, columns, kinds } = exec;
 
     const asObjects = rowsFromArrays(rows.slice(0, effectiveLimit), columns);
-    const limitedRows = normalize ? normalizeRows(asObjects, kinds, "pg") : asObjects;
+    const limitedRows = normalize ? normalizeRows(asObjects, kinds, "pg") : legacyPgRows(asObjects, kinds);
     const legacyCols = legacyFormatColumns(kinds, "pg");
 
     return {
@@ -257,16 +258,16 @@ export async function executeReadOnlyPgStream(
         let columns: string[] | null = null;
         let streamKinds: Record<string, ColumnKind> = {};
         while (!closed) {
-          const batch = await client.query({ text: "FETCH FORWARD 1000 FROM cw_stream_cur", rowMode: "array" });
+          const batch = await client.query({ text: "FETCH FORWARD 1000 FROM cw_stream_cur", rowMode: "array", types: PG_STRING_TYPES } as never) as unknown as { fields: { name: string; dataTypeID: number }[]; rows: unknown[][] };
           if (columns === null) {
             columns = dedupeColumnNames(batch.fields.map((f) => f.name));
-            if (normalize) streamKinds = Object.fromEntries(batch.fields.map((f, i) => [columns![i]!, pgKind(f.dataTypeID)]));
+            streamKinds = Object.fromEntries(batch.fields.map((f, i) => [columns![i]!, pgKind(f.dataTypeID)]));
             safeEnqueue(encoder.encode(JSON.stringify({ __columns__: columns }) + "\n"));
           }
           if (batch.rows.length === 0) break;
           for (const arr of batch.rows as unknown[][]) {
             const row = rowsFromArrays([arr], columns)[0]!;
-            if (normalize) normalizeRows([row], streamKinds, "pg");
+            if (normalize) normalizeRows([row], streamKinds, "pg"); else legacyPgRows([row], streamKinds);
             safeEnqueue(encoder.encode(JSON.stringify(row) + "\n"));
             rowCount++;
           }
