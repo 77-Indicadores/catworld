@@ -1,5 +1,9 @@
 import * as Sentry from "@sentry/nextjs";
 import { physicalDecimal } from "@/lib/decimal-type";
+import { IntegrityError, evaluateLoad, getIntegritySettings } from "@/server/integrity/policy";
+import { MSSQL_MARKER_DDL, MSSQL_MARKER_INSERT, MSSQL_MARKER_SELECT } from "./applied-marker";
+import { canonicalAccepts, incompatibleColumns, incompatibleMessage, mssqlPhysicalToCanonical } from "./type-compat";
+import { isInternalColumn } from "@/server/storage/connection";
 import { extname } from "node:path";
 import sql from "mssql";
 import { prisma } from "@/server/db";
@@ -9,7 +13,6 @@ import { sqlPool } from "@/server/azure/sql";
 import { getStoragePool } from "@/server/storage/pool";
 import { getStorageConnection, type ColDef } from "@/server/storage/connection";
 import { quoteIdentifier, sqlIdentifier } from "@/server/security/naming";
-import { isStagingPartial } from "./staging-guard";
 import { previewFile, rowsFromFile, type FilePreview, type ParsedColumn, type RowsFromFileOpts, type ParseStats } from "./parser";
 import { env } from "@/server/env";
 import { normalizeDateLike } from "./date-normalize";
@@ -241,9 +244,10 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
     mapping = (await previewFile(source as string)).columns;
   }
   if (!mapping.length) {
+    // Arquivo sem colunas não carrega nada e não pode contar como concluído (a tabela não foi tocada): FAILED, com motivo.
     await prisma.upload.update({
       where: { id: upload.id },
-      data: { status: "COMPLETED", progress: 100, rowCount: 0n, insertedCount: 0, updatedCount: 0, errorMessage: null },
+      data: { status: "FAILED", progress: 100, insertedCount: 0, updatedCount: 0, errorMessage: "Arquivo sem colunas: nada foi importado e a tabela não foi alterada." },
     });
     return { tableId: upload.tableId ?? null, inserted: 0, updated: 0, rowCount: 0n };
   }
@@ -288,7 +292,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
     const colDefs    = mapping.map(c => `${quoteIdentifier(c.sqlName)} ${stagingColType(c.sqlType)} NULL`).join(",") + ",[_cw_rh] CHAR(32) NULL";
     const colDefsMax = mapping.map(c => `${quoteIdentifier(c.sqlName)} NVARCHAR(MAX)  NULL`).join(",") + ",[_cw_rh] CHAR(32) NULL";
     // Set to false if truncation forces NVARCHAR(MAX) fallback — INSERT SELECT must use TRY_CONVERT then
-    let stagingIsTyped = true;
+    const stagingIsTyped = true;
 
     const targetExists = Number(
       (await pool.request().query(`SELECT CASE WHEN OBJECT_ID(N'${schema}.${tableName}',N'U') IS NULL THEN 0 ELSE 1 END AS ok`))
@@ -306,33 +310,39 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
     // Phase 2: SDK pre-computed delta — deltaJson holds JSON array of hashes to delete
     const phase2 = deltaReplace && upload.deltaJson != null;
     const toDelete: string[] = phase2 ? (JSON.parse(upload.deltaJson!) as string[]) : [];
+    // O arquivo deste upload só tem a DIFERENÇA. Se a tabela mudou desde que ela foi calculada (schema/coluna de hash), tratar como
+    // replace completo trocaria a tabela inteira por um arquivo parcial: recusa.
+    if (upload.deltaJson != null && !phase2) {
+      throw new Error("Este upload traz apenas a diferença (deltaJson), mas a tabela mudou desde que ela foi calculada. Reenvie o arquivo completo.");
+    }
 
     const ext = extname(upload.originalFilename).toLowerCase();
 
-    // ── Idempotency: if staging already exists and has rows, skip data loading ──
-    // This handles retries where the staging was populated but the transaction failed.
-    // BUG2-fix: if staging row count < knownRowCount (for full replace), it means the staging is
-    // incomplete from a mid-stream crash — drop it and re-import from scratch. Trusting a partial
-    // staging would mark the upload COMPLETED with fewer rows than the file actually contains.
-    const stagingRowCount = await checkStagingHasData(pool, schema, stage);
-    // Vale também para o replace por diferença (deltaReplace): sem phase2 o staging tem o arquivo inteiro (ver staging-guard.ts).
-    const stagingIsPartial = isStagingPartial({ stagingRowCount, knownRowCount, mode: upload.mode, targetExists, phase2 });
-
-    if (stagingIsPartial) {
-      console.warn("[importUpload] staging parcial detectado (%d/%d linhas) — descartando e reimportando upload=%s", stagingRowCount, knownRowCount, uploadId);
-      await writePool.request().query(`DROP TABLE ${staging}`).catch(() => {});
+    // ── Staging: SEMPRE recarrega do zero ──────────────────────────────────────────────────────────────────
+    // Reaproveitar a staging de uma tentativa anterior (o antigo "retry idempotente") publicou tabelas incompletas em produção
+    // (50 mil, 300 mil, 600 mil e 650 mil de 828.672 linhas): a staging de uma tentativa que morreu no meio fica com parte das linhas
+    // e nada prova que está completa (sem dono, sem token, contagem esperada nem sempre conhecida). Recarregar custa tempo;
+    // publicar dado incompleto custa o dado. Ver docs/estudo-confiabilidade-dados.md (MOT-05/MOT-09).
+    const leftoverStaging = await checkStagingHasData(pool, schema, stage);
+    if (leftoverStaging > 0) {
+      console.warn("[importUpload] staging de tentativa anterior descartada (%d linhas) — recarregando do zero upload=%s", leftoverStaging, uploadId);
     }
+    const stagingHasData = false;
 
-    const stagingHasData = !stagingIsPartial && stagingRowCount > 0;
-
-    if (!stagingHasData) {
-      await writePool.request().query(
-        `IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL DROP TABLE ${staging};
-         CREATE TABLE ${staging} (${colDefs})`,
-      );
-    } else if (stagingHasData) {
-      console.log("[importUpload] staging já populado (%d linhas), pulando carga (retry idempotente) upload=%s", stagingRowCount, uploadId);
+    // Marca exactly-once (append): se este upload já foi aplicado (queda entre o COMMIT e os metadados), não recarrega nem acrescenta
+    // de novo — só reconcilia os metadados.
+    await writePool.request().query(MSSQL_MARKER_DDL);
+    let alreadyAppliedRows: number | null = null;
+    if (upload.mode === "append") {
+      const m = await pool.request().input("uploadId", sql.UniqueIdentifier, upload.id).query(MSSQL_MARKER_SELECT);
+      if (m.recordset.length > 0) alreadyAppliedRows = Number(m.recordset[0].rows);
     }
+    const alreadyApplied = alreadyAppliedRows !== null;
+
+    await writePool.request().query(
+      `IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL DROP TABLE ${staging};
+       CREATE TABLE ${staging} (${colDefs})`,
+    );
 
     let total = 0, inserted = 0, updated = 0;
     let lastProgressMs = Date.now();
@@ -358,25 +368,13 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
         // ── Staging path (TDS bulk copy via mssql driver) ─────────────────────────
         const destTable = stage;
 
-        if (!stagingHasData) {
+        if (alreadyApplied) {
+          total = alreadyAppliedRows!;
+          phaseTimings.importMethod = "already-applied";
+        } else {
           phaseTimings.importMethod = "tds-primary";
           const _r = await tdsBulkCopy(writePool, source, mapping, schema, destTable, opts, knownRowCount, uploadId, onProgress, true, parseStats);
           total = _r.total; reclassifiedCols.push(..._r.reclassifiedCols);
-        } else {
-          // Idempotent retry: staging already populated, just count what's there.
-          // Detect whether staging was created as typed or NVARCHAR(MAX) (truncation fallback).
-          const countRes = await pool.request().query(`SELECT COUNT_BIG(*) n FROM ${staging}`);
-          total = Number(countRes.recordset[0].n);
-          phaseTimings.importMethod = "idempotent-retry";
-          const nonNvarcharCol = mapping.find(c => !c.sqlType.startsWith("NVARCHAR") && c.sqlType !== "TEXT");
-          if (nonNvarcharCol) {
-            const colTypeRes = await pool.request().query(
-              `SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS
-               WHERE TABLE_SCHEMA='${schema}' AND TABLE_NAME='${stage}' AND COLUMN_NAME='${nonNvarcharCol.sqlName}'`,
-            );
-            const dt = ((colTypeRes.recordset[0]?.DATA_TYPE as string | undefined) ?? "").toUpperCase();
-            stagingIsTyped = dt !== "NVARCHAR";
-          }
         }
 
         // Index staging._cw_rh so NOT EXISTS lookups are O(n log n) instead of O(n²)
@@ -412,6 +410,29 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
         // IX__cw_rh nessa tabela falha com "Column '_cw_rh' ... invalid for use
         // as a key column in an index" (visto em producao em cta_economia_por_veiculo
         // e outras tabelas que já passaram por upsert).
+        // ── Integridade ANTES de publicar: carregado x esperado x versão anterior ──────────────────────────────────
+        // (docs/estudo-confiabilidade-dados.md, OBS-01/OBS-05). Antes, a única checagem comparava a tabela com a própria contagem
+        // da staging, então nunca falhava. FAILED = não troca nada: a tabela anterior continua no ar, completa.
+        if (!alreadyApplied) {
+          const meta = upload.table ?? await prisma.datasetTable.findUnique({ where: { datasetId_sqlName: { datasetId: upload.dataset!.id, sqlName: tableName } }, select: { rowCount: true } });
+          const prevRows = targetExists ? Number(meta?.rowCount ?? (await storageConn.countRows(schema, tableName))) : 0;
+          const evaluation = evaluateLoad({
+            kind: "upload",
+            fullState: !phase2 && (upload.mode === "replace" || !targetExists || (upload.mode === "upsert" && upload.fullSnapshot)),
+            deltaOnly: phase2,
+            expectedRows: knownRowCount,
+            parsedRows: total,
+            stagedRows: total,
+            prevRows,
+            scheduled: false,
+          }, await getIntegritySettings());
+          if (evaluation.verdict === "FAILED") {
+            await writePool.request().query(`IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL DROP TABLE ${staging}`).catch(() => undefined);
+            throw new IntegrityError(evaluation);
+          }
+          if (evaluation.verdict === "SUSPECT") console.warn("[importUpload:integrity] SUSPECT upload=%s %s", uploadId, JSON.stringify(evaluation.reasons));
+        }
+
         const mappingWithRh: ColDef[] = [
           ...mapping.map(c => ({ name: c.sqlName, sqlType: c.sqlType, nullable: true })),
           { name: "_cw_rh", sqlType: "CHAR(32)", nullable: true },
@@ -426,6 +447,11 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
           // mergeSwap: mantém rows de target cujo key NÃO está em staging + todos de staging (lock ~ms)
           if (!upload.keyColumn) throw new Error("Upsert exige coluna-chave");
           const key = quoteIdentifier(upload.keyColumn);
+          // Chave nula nunca casa com nada: cada execução inseria a linha de novo. Recusa antes de mesclar.
+          const nullKeys = await pool.request().query(`SELECT COUNT_BIG(*) n FROM ${staging} WHERE ${key} IS NULL`);
+          if (Number(nullKeys.recordset[0].n) > 0) {
+            throw new Error(`Arquivo contém ${nullKeys.recordset[0].n} linha(s) com chave nula na coluna "${upload.keyColumn}": upsert exige chave preenchida em todas as linhas.`);
+          }
           const duplicates = await pool.request().query(
             `SELECT TOP 20 ${key} AS k, COUNT(*) n FROM ${staging} GROUP BY ${key} HAVING COUNT(*) > 1`,
           );
@@ -499,6 +525,12 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
                  OPTION (MAXDOP 1);
                  DROP TABLE ${staging}`,
               );
+              // exactly-once: a marca entra na MESMA transação do INSERT
+              request.input("uploadId", sql.UniqueIdentifier, upload.id);
+              request.input("tableName", sql.NVarChar, tableName);
+              request.input("mode", sql.NVarChar, "append");
+              request.input("rows", sql.BigInt, total);
+              await request.query(MSSQL_MARKER_INSERT);
               inserted = total;
             }
 
@@ -555,8 +587,8 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
       phaseTimings.deltaMode = deltaMode;
       if (reclassifiedCols.length) phaseTimings.reclassifiedCols = reclassifiedCols;
       phaseTimings.toDeleteCount = updated;
-      phaseTimings.stagingWasPartial = stagingIsPartial;
-      phaseTimings.wasIdempotentRetry = stagingHasData;
+      phaseTimings.stagingWasPartial = leftoverStaging > 0; // sobra de tentativa anterior (descartada)
+      phaseTimings.wasIdempotentRetry = alreadyApplied;      // append já aplicado (marca exactly-once)
       phaseTimings.rowsPerSecond = totalMs > 0 ? Math.round(total / (totalMs / 1000)) : null;
       console.log("[importUpload:perf]", JSON.stringify({ uploadId: upload.id, file: upload.originalFilename, rows: Number(actual), ...phaseTimings }));
 
@@ -655,7 +687,7 @@ async function schemaMatchesSilent(pool: sql.ConnectionPool, schema: string, tab
       .input("table", sql.NVarChar, table)
       .query("SELECT c.name, ty.name type_name, c.precision, c.scale, c.is_nullable FROM sys.columns c JOIN sys.types ty ON c.user_type_id=ty.user_type_id WHERE c.object_id=OBJECT_ID(QUOTENAME(@schema)+'.'+QUOTENAME(@table)) ORDER BY c.column_id");
     const rows = result.recordset as { name: string; type_name: string; precision: number; scale: number; is_nullable: boolean }[];
-    const dataRows = rows.filter(r => r.name !== "_cw_rh");
+    const dataRows = rows.filter(r => !isInternalColumn(r.name));
     const actual = dataRows.map(r => r.name);
     const expected = mapping.map(c => c.sqlName);
     if (JSON.stringify(actual) !== JSON.stringify(expected)) return false;
@@ -668,7 +700,7 @@ async function assertCompatible(request: sql.Request, schema: string, table: str
     .input("schema", sql.NVarChar, schema)
     .input("table", sql.NVarChar, table)
     .query("SELECT c.name, t.name type_name, c.precision, c.scale FROM sys.columns c JOIN sys.types t ON c.user_type_id=t.user_type_id WHERE c.object_id=OBJECT_ID(QUOTENAME(@schema)+'.'+QUOTENAME(@table)) ORDER BY c.column_id");
-  const actualRows = result.recordset.filter((r: Record<string, unknown>) => String(r.name) !== "_cw_rh") as { name: string; type_name: string; precision: number; scale: number }[];
+  const actualRows = result.recordset.filter((r: Record<string, unknown>) => !isInternalColumn(String(r.name))) as { name: string; type_name: string; precision: number; scale: number }[];
   const actual = actualRows.map(r => r.name);
   const expected = columns.map(c => c.sqlName);
   if (JSON.stringify(actual) !== JSON.stringify(expected))
@@ -678,16 +710,9 @@ async function assertCompatible(request: sql.Request, schema: string, table: str
 }
 
 function physicalTypeMatches(row: { type_name: string; precision?: number; scale?: number }, expected: string) {
-  const type = row.type_name.toLowerCase();
-  // Numeric compatibility: BIGINT ↔ decimal/numeric/int/smallint/tinyint/bigint
-  if (expected === "BIGINT") return ["bigint", "int", "smallint", "tinyint", "decimal", "numeric"].includes(type);
-  // DECIMAL from file may land on decimal/numeric/int family in table
-  if (expected.startsWith("DECIMAL")) return ["decimal", "numeric", "bigint", "int", "smallint", "tinyint"].includes(type);
-  // Date compatibility: DATE and DATETIME2 are interchangeable for append
-  if (expected === "DATE" || expected === "DATETIME2") return ["date", "datetime2", "datetime", "smalldatetime"].includes(type);
-  if (expected === "TIME") return type === "time";
-  // NVARCHAR covers nvarchar, varchar, char, nchar, text
-  return ["nvarchar", "varchar", "char", "nchar", "text"].includes(type);
+  // Só é aceito ALARGAR: o valor do arquivo sempre cabe na coluna física sem perder informação (ver type-compat.ts).
+  // Antes, DECIMAL aceitava coluna inteira e DATETIME2 aceitava coluna DATE (1,5 virava 2; a hora sumia).
+  return canonicalAccepts(mssqlPhysicalToCanonical(row), expected);
 }
 
 export function convert(v: unknown, type: string) {

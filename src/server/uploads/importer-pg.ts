@@ -22,6 +22,9 @@ import { normalizeDateLike } from "./date-normalize";
 import type { PgStorageConnection } from "@/server/storage/pg-storage";
 import { pgQuote, canonicalToPg } from "@/server/storage/pg-storage";
 import { userColumnNames } from "@/server/storage/connection";
+import { IntegrityError, evaluateLoad, getIntegritySettings } from "@/server/integrity/policy";
+import { PG_MARKER_DDL, PG_MARKER_INSERT, PG_MARKER_SELECT } from "./applied-marker";
+import { incompatibleColumns, incompatibleMessage } from "./type-compat";
 
 // ─── Type conversion ──────────────────────────────────────────────────────────
 
@@ -146,6 +149,8 @@ function colDefs(mapping: ParsedColumn[], withRh: boolean): string {
 
 // ─── Main entry point ─────────────────────────────────────────────────────────
 
+async function* emptyRows(): AsyncGenerator<Record<string, unknown>> { /* nada: o append já foi aplicado */ }
+
 export async function importUploadPg(
   uploadId: string,
   source: string | NodeJS.ReadableStream,
@@ -185,9 +190,10 @@ async function importUploadPgLocked(
     mapping = (await previewFile(source as string)).columns;
   }
   if (!mapping.length) {
+    // Arquivo sem colunas não carrega nada e não pode contar como concluído (a tabela não foi tocada): FAILED, com motivo.
     await prisma.upload.update({
       where: { id: upload.id },
-      data: { status: "COMPLETED", progress: 100, rowCount: 0n, insertedCount: 0, updatedCount: 0, errorMessage: null },
+      data: { status: "FAILED", progress: 100, insertedCount: 0, updatedCount: 0, errorMessage: "Arquivo sem colunas: nada foi importado e a tabela não foi alterada." },
     });
     return { tableId: upload.tableId ?? null, inserted: 0, updated: 0, rowCount: 0n };
   }
@@ -222,7 +228,19 @@ async function importUploadPgLocked(
     if (JSON.stringify(existingNames) !== JSON.stringify(incomingNames)) {
       throw new Error(`Schema incompatível. Esperado: ${incomingNames.join(", ")}; atual: ${existingNames.join(", ")}`);
     }
+    // Só é aceito ALARGAR o tipo: estreitar (DECIMAL em BIGINT, DATETIME em DATE) arredondava/truncava as linhas existentes em silêncio.
+    // (arquivo só com cabeçalho não tem valores para estreitar nada: os tipos inferidos dele não valem)
+    const narrowing = preview && preview.rowCount === 0 ? [] : incompatibleColumns(existingCols.filter((c) => userColumnNames([c]).length > 0), mapping);
+    if (narrowing.length) throw new Error(incompatibleMessage(narrowing));
   }
+
+  // Marca exactly-once: se um append deste upload já foi confirmado (queda entre o COMMIT e os metadados), não recarrega nem
+  // acrescenta de novo — só reconcilia os metadados. Vive no destino, fora dos datasets.
+  for (const ddl of PG_MARKER_DDL) await conn.execute(ddl);
+  const marker = upload.mode === "append"
+    ? (await conn.queryParams<{ rows: string }>(PG_MARKER_SELECT, [upload.id]))[0]
+    : undefined;
+  const alreadyApplied = marker !== undefined;
 
   // Drop staging anterior (retry idempotente)
   await conn.execute(`DROP TABLE IF EXISTS ${qStaging}`);
@@ -233,7 +251,7 @@ async function importUploadPgLocked(
   let batch: Record<string, unknown>[] = [];
   const reclassifiedCols: string[] = [];
 
-  for await (const row of rowsFromFile(source, mapping, opts)) {
+  for await (const row of alreadyApplied ? emptyRows() : rowsFromFile(source, mapping, opts)) {
     batch.push(row);
     if (batch.length >= BATCH_SIZE) {
       await flushBatch(conn, schema, stage, mapping, batch, true, reclassifiedCols);
@@ -251,6 +269,34 @@ async function importUploadPgLocked(
   }
   await flushBatch(conn, schema, stage, mapping, batch, true, reclassifiedCols);
   total += batch.length;
+  if (alreadyApplied) {
+    console.warn("[importUploadPg] append já aplicado (marca exactly-once) — retentativa só reconcilia metadados upload=%s", uploadId);
+    total = Number(marker!.rows);
+  }
+
+  // ── Integridade ANTES de publicar: carregado x esperado x versão anterior ─────────────────────────────────
+  // (docs/estudo-confiabilidade-dados.md, OBS-01/OBS-05). O esperado vem da contagem do arquivo (preview), independente da carga.
+  // FAILED = não troca nada: a tabela anterior continua no ar, completa.
+  if (!alreadyApplied) {
+    // Linhas da versão anterior: pelo metadado da tabela DESTINO (o upload novo nem sempre traz `tableId`); sem metadado, conta a tabela física.
+    const meta = upload.table ?? await prisma.datasetTable.findUnique({ where: { datasetId_sqlName: { datasetId: upload.dataset.id, sqlName: tableName } }, select: { rowCount: true } });
+    const prevRows = targetExists ? Number(meta?.rowCount ?? (await conn.countRows(schema, tableName))) : 0;
+    const cfg = await getIntegritySettings();
+    const evaluation = evaluateLoad({
+      kind: "upload",
+      fullState: upload.mode === "replace" || !targetExists || (upload.mode === "upsert" && upload.fullSnapshot),
+      expectedRows: knownRowCount,
+      parsedRows: total,
+      stagedRows: total,
+      prevRows: prevRows,
+      scheduled: false,
+    }, cfg);
+    if (evaluation.verdict === "FAILED") {
+      await conn.execute(`DROP TABLE IF EXISTS ${qStaging}`).catch(() => undefined);
+      throw new IntegrityError(evaluation);
+    }
+    if (evaluation.verdict === "SUSPECT") console.warn("[importUploadPg:integrity] SUSPECT upload=%s %s", uploadId, JSON.stringify(evaluation.reasons));
+  }
 
   if (reclassifiedCols.length) {
     console.warn("[importUploadPg] colunas reclassificadas BIGINT→NVARCHAR por overflow 64-bit: %s upload=%s",
@@ -283,6 +329,11 @@ async function importUploadPgLocked(
     if (!upload.keyColumn) throw new Error("Upsert exige coluna-chave");
     const key = pgQuote(upload.keyColumn);
     try {
+      // Chave nula nunca casa com nada (NULL = NULL é falso): cada execução inseria a linha de novo. Recusa antes de mesclar.
+      const nullKeys = await conn.withClient((client) => client.query<{ n: string }>(`SELECT COUNT(*)::text AS n FROM ${qStaging} WHERE ${key} IS NULL`));
+      if (Number(nullKeys.rows[0]?.n ?? 0) > 0) {
+        throw new Error(`Arquivo contém ${nullKeys.rows[0]!.n} linha(s) com chave nula na coluna "${upload.keyColumn}": upsert exige chave preenchida em todas as linhas.`);
+      }
       // Verifica chaves duplicadas no arquivo
       const dupRes = await conn.withClient((client) => client.query<{ k: unknown; n: string }>(
         `SELECT ${key} AS k, COUNT(*) n FROM ${qStaging} GROUP BY ${key} HAVING COUNT(*) > 1 LIMIT 20`,
@@ -310,6 +361,7 @@ async function importUploadPgLocked(
       try {
         if (upload.mode === "append") {
           await client.query(`INSERT INTO ${qTarget} (${colList}) SELECT ${colList} FROM ${qStaging}`);
+          await client.query(PG_MARKER_INSERT, [upload.id, tableName, "append", String(total)]); // mesma transação: exactly-once
           await client.query(`DROP TABLE ${qStaging}`);
           inserted = total;
 
