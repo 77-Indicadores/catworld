@@ -73,7 +73,7 @@ d("crash do processo no meio do import (SQL Server real)", () => {
     for (let i = from; i < from + n; i++) {
       if (!ws.write(`${i},${tag} ${i} ${"x".repeat(40)},${i}.5\n`)) await new Promise((r) => ws.once("drain", r));
     }
-    await new Promise<void>((r) => ws.end(r));
+    await new Promise<void>((r) => ws.end(() => r()));
     return p;
   }
 
