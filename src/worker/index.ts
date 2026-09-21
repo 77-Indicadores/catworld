@@ -4,6 +4,7 @@ import { isSourceBusyError } from "./source-failure";
 import { getUploadFilesDays, purgeExpiredUploadFiles } from "@/server/uploads/file-retention";
 import { releaseAllImportLocks } from "@/server/db/import-lock";
 import { deleteInBatches } from "@/server/db/batched-delete";
+import { purgeLedger } from "@/server/integrity/ledger";
 import { JobCancelledError, runWithCancelToken, watchJobStatus } from "@/server/db/job-cancel";
 import { createWriteStream } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -144,6 +145,7 @@ async function runMetadataCleanup() {
     // Em lotes (um DELETE único de 1,5M linhas levava ~29 s de uma vez: locks, pico de WAL e risco de statement_timeout).
     const deletedJobs = await deleteInBatches("cw_jobs", `status IN ('COMPLETED','FAILED') AND created_at < NOW() - ($1 || ' days')::INTERVAL`, [String(jobsDays)]);
     const deletedAudit = await deleteInBatches("cw_audit_events", `created_at < NOW() - ($1 || ' days')::INTERVAL`, [String(auditDays)]);
+    await purgeLedger().catch((e) => console.error("[cleanup] purgeLedger falhou:", e instanceof Error ? e.message : e)); // livro de cargas: 90 dias
 
     // Fetch blobNames before deleting so we can clean up the files on disk.
     const expiredUploads = await prisma.$queryRawUnsafe<{ blob_name: string }[]>(
@@ -302,11 +304,11 @@ async function work(job: Claimed) {
   }
 
   if (job.type === "SOURCE_REFRESH") {
-    const payload = JSON.parse(job.payload_json ?? "{}") as { datasetSourceId?: string; reconciliation?: boolean };
+    const payload = JSON.parse(job.payload_json ?? "{}") as { datasetSourceId?: string; reconciliation?: boolean; manual?: boolean; acceptDrop?: boolean };
     if (!payload.datasetSourceId) throw new Error("SOURCE_REFRESH sem datasetSourceId");
     const hb = startHeartbeat(job.id);
     try {
-      await refreshDatasetSource(payload.datasetSourceId, { reconciliation: !!payload.reconciliation });
+      await refreshDatasetSource(payload.datasetSourceId, { reconciliation: !!payload.reconciliation, manual: !!payload.manual, acceptDrop: !!payload.acceptDrop });
     } finally {
       clearInterval(hb);
     }
