@@ -51,6 +51,42 @@ d("pg-query: escopo de tabelas (ENT-02)", () => {
     expect(r2.rows.map((x) => x.id)).toEqual([1, 2, 3]);
   });
 
+  // ---- ENT-03: a uniao das paginas e exatamente a tabela, mesmo com ORDER BY nao unico ----
+  it("paginacao com OFFSET e ORDER BY nao unico: uniao das paginas == tabela (multiconjunto)", async () => {
+    await pool.query(`CREATE TABLE "${SCH}".pg1 AS SELECT g AS id, (g % 7) AS k, md5(g::text) AS h FROM generate_series(1, 20000) g`);
+    // embaralha o layout fisico para o empate nao sair na ordem "natural"
+    await pool.query(`CREATE TABLE "${SCH}".pg2 AS SELECT * FROM "${SCH}".pg1 ORDER BY h`);
+    const expected = (await pool.query(`SELECT id, k, h FROM "${SCH}".pg2`)).rows.map((r) => `${r.id}|${r.k}|${r.h}`).sort();
+    const cases = [
+      "SELECT id, k, h FROM pg2 ORDER BY k",
+      "SELECT id, k, h FROM pg2", // sem ORDER BY
+      "SELECT id, k, h FROM pg2 ORDER BY k DESC",
+    ];
+    for (const sql of cases) {
+      const seen: string[] = [];
+      let offset = 0;
+      let warned = false;
+      for (let guard = 0; guard < 50; guard++) {
+        const r = await executeReadOnlyPg(conn, sql, 60, 1500, [SCH], offset, false, null);
+        if (r.warnings?.length) warned = true;
+        seen.push(...r.rows.map((x) => `${x.id}|${x.k}|${x.h}`));
+        if (!r.truncated) break;
+        offset += r.rowCount;
+      }
+      expect(seen.length, sql).toBe(expected.length);
+      expect([...seen].sort(), sql).toEqual(expected);
+      if (!/ORDER BY/i.test(sql)) expect(warned, "aviso SEM_ORDER_BY").toBe(true);
+    }
+  }, 120_000);
+
+  it("a ordem do ORDER BY do usuario e respeitada (chave primaria) e TOP+offset seguem validos", async () => {
+    const r = await executeReadOnlyPg(conn, "SELECT TOP 100 id FROM pg1 ORDER BY k, id", 60, 30, [SCH], 60, false, null);
+    expect(r.rowCount).toBe(30);
+    const ids = r.rows.map((x) => x.id as number);
+    const all = (await pool.query(`SELECT id FROM "${SCH}".pg1 ORDER BY k, id LIMIT 100`)).rows.map((x) => x.id);
+    expect(ids).toEqual(all.slice(60, 90));
+  });
+
   it("nome existente em 2 datasets continua ambiguo, mas CTE homonima nao dispara ambiguidade", async () => {
     const S2 = `${SCH}_b`;
     await pool.query(`CREATE SCHEMA "${S2}"; CREATE TABLE "${S2}".vendas (id int); INSERT INTO "${S2}".vendas VALUES (9)`);

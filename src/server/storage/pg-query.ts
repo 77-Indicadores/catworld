@@ -13,6 +13,7 @@ import { dedupeColumnNames, rowsFromArrays } from "@/server/sql-contract/columns
 import { legacyFormatColumns } from "@/server/sql-contract/result";
 import { MAX_RESULT_BYTES, approxRowBytes } from "@/server/query/protection";
 import { contractTranslate, getContractMode, runWithContract } from "@/server/sql-contract/apply";
+import { addTieBreaker, type TieBreakResult } from "./paging";
 import { pgQuote, type PgStorageConnection } from "./pg-storage";
 import { mssqlKind, normalizeRows, pgKind, type ColumnKind } from "@/server/sql-contract/result";
 
@@ -56,6 +57,8 @@ export async function executeReadOnlyPg(
   truncated: boolean;
   executionTimeMs: number;
   legacyFormatColumns?: string[];
+  /** Avisos de entrega (ex.: paginacao sem ordem estavel). */
+  warnings?: string[];
 }> {
   const validated = validateReadOnlySql(sql);
   if (!validated.safe) throw new ApiError(400, "UNSAFE_SQL", validated.reason);
@@ -72,9 +75,9 @@ export async function executeReadOnlyPg(
   // subconsulta). O teto de 10000 por pagina vale sempre. Antes o TOP virava o LIMIT de fora e o offset valia ANTES dele.
   const effectiveLimit = limit;
   const inner = topLimit !== null ? `${statement} LIMIT ${topLimit}` : statement;
-  const paged = offset > 0
-    ? `SELECT * FROM (${inner}) AS _cw_q LIMIT ${effectiveLimit + 1} OFFSET ${offset}`
-    : `SELECT * FROM (${inner}) AS _cw_q LIMIT ${effectiveLimit + 1}`;
+  const pageOf = (s: string) => `SELECT * FROM (${s}) AS _cw_q LIMIT ${effectiveLimit + 1}${offset > 0 ? ` OFFSET ${offset}` : ""}`;
+  const withTop = (s: string) => (topLimit !== null ? `${s} LIMIT ${topLimit}` : s);
+  const warnings: string[] = [];
 
   const timeoutMs = Math.min(Math.max(timeout, 1), 120) * 1000;
 
@@ -94,9 +97,6 @@ export async function executeReadOnlyPg(
     // — não impede 100% do tráfego já em trânsito, mas evita continuar
     // acumulando linhas em memória e nunca chega a serializar/cachear a
     // resposta inteira.
-    const rows: unknown[][] = [];
-    let approxBytes = 0;
-    let tooLarge = false;
     // processID existe em runtime (PoolClient é sempre um Client de fato),
     // mas não está no tipo PoolClient dos typings do pg.
     const pid = (client as unknown as { processID?: number }).processID;
@@ -107,11 +107,14 @@ export async function executeReadOnlyPg(
       `Resultado excede ${Math.round(MAX_RESULT_BYTES / (1024 * 1024))}MB (colunas muito largas). Selecione menos colunas, filtre mais linhas, ou use "stream": true.`,
     );
 
-    let kinds: Record<string, ColumnKind> = {};
-    const columns = await new Promise<string[]>((resolve, reject) => {
+    interface Exec { rows: unknown[][]; columns: string[]; kinds: Record<string, ColumnKind>; oids: number[] }
+    const execQuery = (text: string): Promise<Exec> => new Promise<Exec>((resolve, reject) => {
+      const rows: unknown[][] = [];
+      let approxBytes = 0;
+      let tooLarge = false;
       // rowMode "array": objeto por linha perderia colunas de mesmo nome (ver columns.ts)
       // (os typings do pg nao declaram rowMode em Query, mas o driver aceita)
-      const query = new Query({ text: paged, rowMode: "array" } as never);
+      const query = new Query({ text, rowMode: "array" } as never);
       client!.query(query);
 
       query.on("row", (row: unknown[]) => {
@@ -132,10 +135,43 @@ export async function executeReadOnlyPg(
       query.on("end", (result) => {
         if (tooLarge) return reject(tooLargeError());
         const names = dedupeColumnNames(result.fields.map((f) => f.name));
-        kinds = Object.fromEntries(result.fields.map((f, i) => [names[i]!, pgKind(f.dataTypeID)]));
-        resolve(names);
+        const kinds = Object.fromEntries(result.fields.map((f, i) => [names[i]!, pgKind(f.dataTypeID)]));
+        resolve({ rows, columns: names, kinds, oids: result.fields.map((f) => f.dataTypeID) });
       });
     });
+
+    // ENT-03: paginacao deterministica. Com offset > 0 (ou 1a pagina truncada, que levara a proxima pagina), o
+    // ORDER BY de topo ganha o desempate por todas as colunas; sem isso o OFFSET duplica/perde linhas empatadas.
+    let exec: Exec;
+    let tie: TieBreakResult | null = null;
+    if (offset > 0) {
+      const d = await execQuery(`SELECT * FROM (${inner}) AS _cw_q LIMIT 0`);
+      tie = addTieBreaker(statement, d.oids);
+    } else {
+      exec = await execQuery(pageOf(inner));
+      if (exec.rows.length > effectiveLimit) tie = addTieBreaker(statement, exec.oids);
+    }
+    if (tie?.applied) {
+      try {
+        exec = await execQuery(pageOf(withTop(tie.sql)));
+        if (tie.skippedColumns > 0) warnings.push("PAGINACAO_PARCIAL: colunas json/xml nao entram no desempate da paginacao; linhas iguais em todas as outras colunas podem trocar de ordem entre paginas.");
+      } catch (err) {
+        if (isQueryTimeout(err) || err instanceof ApiError || !/^42/.test(String((err as { code?: string }).code ?? ""))) throw err;
+        // desempate nao aplicavel a esta consulta (ex.: SELECT DISTINCT com ordenacao incompativel): transacao abortada, refaz sem ele
+        await client.query("ROLLBACK");
+        await beginReadOnly(client, { timeoutMs, role, schemas });
+        exec = await execQuery(pageOf(inner));
+        warnings.push("PAGINACAO_NAO_DETERMINISTICA: nao foi possivel garantir ordem estavel; paginas com OFFSET podem repetir ou perder linhas empatadas. Use o modo stream.");
+      }
+    } else if (offset > 0) {
+      exec = await execQuery(pageOf(inner));
+      warnings.push("PAGINACAO_NAO_DETERMINISTICA: nao foi possivel garantir ordem estavel; paginas com OFFSET podem repetir ou perder linhas empatadas. Use o modo stream.");
+    }
+    exec = exec!;
+    if (tie?.applied && !tie.hadOrderBy && exec.rows.length > 0) {
+      warnings.push("SEM_ORDER_BY: a consulta paginada nao tem ORDER BY; o Catworld ordenou por todas as colunas para que as paginas sejam consistentes. Defina um ORDER BY unico para controlar a ordem.");
+    }
+    const { rows, columns, kinds } = exec;
 
     const asObjects = rowsFromArrays(rows.slice(0, effectiveLimit), columns);
     const limitedRows = normalize ? normalizeRows(asObjects, kinds, "pg") : asObjects;
@@ -147,6 +183,7 @@ export async function executeReadOnlyPg(
       rowCount: limitedRows.length,
       truncated: rows.length > effectiveLimit,
       ...(normalize || legacyCols.length === 0 ? {} : { legacyFormatColumns: legacyCols }),
+      ...(warnings.length > 0 ? { warnings } : {}),
       executionTimeMs: Date.now() - started,
     };
   } finally {

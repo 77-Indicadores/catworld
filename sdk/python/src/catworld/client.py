@@ -329,10 +329,28 @@ class CatworldClient:
         columns: list[str] = []
         rows: list[dict[str, Any]] = []
         execution_time_ms: int = 0
+        for kind, value in self._stream_events(payload):
+            if kind == "columns":
+                columns = value
+            elif kind == "row":
+                rows.append(value)
+            else:
+                execution_time_ms = value.get("executionTimeMs", 0)
+                logger.info("Stream concluído: %s linha(s) em %sms", value.get("rowCount", "?"), execution_time_ms)
+        return QueryResult({"rows": rows, "columns": columns, "rowCount": len(rows), "executionTimeMs": execution_time_ms})
 
+    def _stream_events(self, payload: dict[str, Any]) -> Iterator[tuple[str, Any]]:
+        """Le o NDJSON de ``/api/v1/queries`` (stream) validando o protocolo.
+
+        Emite ``("columns", [...])``, ``("row", {...})`` e, por fim, ``("done", {...})``.
+        Um stream que termina sem ``__done__`` (queda de conexao, corte do proxy), uma linha que nao
+        e JSON valido, ou um ``rowCount`` diferente do numero de linhas recebidas levantam
+        ``ConnectionError`` — nunca devolvem um resultado parcial como se fosse completo.
+        """
+        count = 0
+        got_done = False
         with self._client.stream("POST", "/api/v1/queries", json=payload, timeout=None) as response:
             if not response.is_success:
-                # Lê o corpo de erro normalmente
                 body = response.read()
                 try:
                     error = _json.loads(body).get("error", {})
@@ -341,31 +359,38 @@ class CatworldClient:
                 except Exception:
                     code = None
                     message = body.decode(errors="replace") or f"HTTP {response.status_code}"
-                from .exceptions import from_api_error
                 raise from_api_error(code, message)
 
-            for raw_line in response.iter_lines():
+            for line_no, raw_line in enumerate(response.iter_lines(), start=1):
                 line = raw_line.strip()
                 if not line:
                     continue
                 try:
                     obj = _json.loads(line)
-                except _json.JSONDecodeError:
-                    continue
+                except _json.JSONDecodeError as exc:
+                    raise ConnectionError(f"Stream corrompido: linha {line_no} nao e JSON valido ({exc.msg}).") from exc
+                if not isinstance(obj, dict):
+                    raise ConnectionError(f"Stream corrompido: linha {line_no} nao e um objeto JSON.")
 
                 if "__columns__" in obj:
-                    columns = obj["__columns__"]
+                    yield "columns", obj["__columns__"]
                 elif "__done__" in obj:
-                    execution_time_ms = obj.get("executionTimeMs", 0)
-                    logger.info("Stream concluído: %s linha(s) em %sms", obj.get("rowCount", "?"), execution_time_ms)
+                    expected = obj.get("rowCount")
+                    if expected is not None and expected != count:
+                        raise ConnectionError(f"Stream incompleto: servidor informou {expected} linha(s), recebi {count}.")
+                    if obj.get("truncated"):
+                        warnings.warn("O servidor truncou o resultado do stream (limite de resultado atingido); os dados estao incompletos.", RuntimeWarning, stacklevel=3)
+                    got_done = True
+                    yield "done", obj
                     break
                 elif "__error__" in obj:
-                    from .exceptions import from_api_error
                     raise from_api_error(obj.get("code"), obj.get("message", "Erro desconhecido no stream"))
                 else:
-                    rows.append(obj)
+                    count += 1
+                    yield "row", obj
+        if not got_done:
+            raise ConnectionError(f"Stream interrompido antes de __done__ apos {count} linha(s): o resultado esta incompleto.")
 
-        return QueryResult({"rows": rows, "columns": columns, "rowCount": len(rows), "executionTimeMs": execution_time_ms})
 
     def iter_query(
         self,
@@ -374,12 +399,18 @@ class CatworldClient:
         dataset_id: str | None = None,
         project_id: str | None = None,
         normalize: bool = False,
+        stream: bool = True,
     ) -> Iterator[QueryResult]:
-        """Itera sobre os resultados de uma query página a página (10.000 linhas por página).
+        """Itera sobre os resultados de uma query em lotes de ate 10.000 linhas.
 
-        Útil para processar grandes volumes sem carregar tudo na memória.
+        Util para processar grandes volumes sem carregar tudo na memoria.
+
+        Por padrao (``stream=True``) le UMA consulta em streaming (um unico snapshot: nao ha
+        linhas repetidas ou perdidas entre lotes) e a valida ate o ``__done__``. Com
+        ``stream=False`` pagina com OFFSET: o servidor desempata a ordem, mas prefira o
+        stream — paginacao por OFFSET so e consistente se os dados nao mudarem entre as paginas.
         """
-        yield from self._iter_query(sql, timeout=timeout, dataset_id=dataset_id, project_id=project_id, normalize=normalize)
+        yield from self._iter_query(sql, timeout=timeout, dataset_id=dataset_id, project_id=project_id, normalize=normalize, stream=stream)
 
     def _iter_query(
         self,
@@ -388,6 +419,7 @@ class CatworldClient:
         dataset_id: str | None = None,
         project_id: str | None = None,
         normalize: bool = False,
+        stream: bool = True,
     ) -> Iterator[QueryResult]:
         live_source_id = self._resolve_live_source_for_query(sql, dataset_id, project_id)
         if live_source_id:
@@ -395,15 +427,41 @@ class CatworldClient:
             return
 
         context = f"dataset={dataset_id}" if dataset_id else f"project={project_id}" if project_id else "sem contexto"
+        if stream:
+            payload: dict[str, Any] = {"sql": sql, "stream": True}
+            if normalize:
+                payload["normalize"] = True
+            if dataset_id:
+                payload["datasetId"] = dataset_id
+            if project_id:
+                payload["projectId"] = project_id
+            logger.info("Executando query em modo streaming em lotes [%s]", context)
+            columns: list[str] = []
+            batch: list[dict[str, Any]] = []
+            for kind, value in self._stream_events(payload):
+                if kind == "columns":
+                    columns = value
+                elif kind == "row":
+                    batch.append(value)
+                    if len(batch) >= _PAGE_SIZE:
+                        yield QueryResult({"rows": batch, "columns": columns, "rowCount": len(batch)})
+                        batch = []
+            if batch or not columns:
+                yield QueryResult({"rows": batch, "columns": columns, "rowCount": len(batch)})
+            return
+
         offset = 0
         while True:
             logger.info("Executando query [%s, timeout=%ss, offset=%s]", context, timeout, offset)
             page = self._query_page(sql, timeout=timeout, limit=_PAGE_SIZE, offset=offset, dataset_id=dataset_id, project_id=project_id, normalize=normalize)
             logger.info("Página: %s linha(s) em %sms", page.get("rowCount", "?"), page.get("executionTimeMs", "?"))
             yield page
-            if len(page.rows) < _PAGE_SIZE:
+            got = len(page.rows)
+            # `truncated` e a fonte da verdade: o servidor pode devolver paginas menores que _PAGE_SIZE (teto proprio)
+            more = page.get("truncated") if "truncated" in page else got >= _PAGE_SIZE
+            if not more or got == 0:
                 break
-            offset += _PAGE_SIZE
+            offset += got
 
     def _query_page(
         self,
