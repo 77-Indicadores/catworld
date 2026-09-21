@@ -103,6 +103,8 @@ export function parseSince(raw: string): ParsedSince | null {
     const om = Number(digits.slice(2, 4) || "0");
     norm = fromMicros(toMicros(norm) - sign * BigInt((oh * 60 + om) * 60) * 1_000_000n);
   }
+  // ano 0000 (ou fora de 0001-9999 apos o offset) nao existe no Postgres: 400 em vez de 500
+  if (norm.length !== 26 || Number(norm.slice(0, 4)) < 1) return null;
   return { txt: norm, sqlLiteral: `'${norm}'`, iso: isoFromTs(norm) };
 }
 

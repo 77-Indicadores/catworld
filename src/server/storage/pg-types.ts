@@ -14,11 +14,16 @@
 import { types } from "pg";
 
 const TEXT_OIDS = new Set<number>([1082 /* date */, 1114 /* timestamp */, 1184 /* timestamptz */]);
+/** Arrays das mesmas tres: date[] (1182), timestamp[] (1115), timestamptz[] (1185). Sem isso `ARRAY['2024-03-10'::date]` virava datetime deslocado pelo fuso do Node. */
+const TEXT_ARRAY_OIDS = new Set<number>([1182, 1115, 1185]);
 const identity = (v: string) => v;
+/** text[] (1009): parser de array do pg cujos elementos ficam como TEXTO (identidade). */
+const textArray = () => types.getTypeParser(1009 as never, "text") as (v: string) => unknown;
 
 export const PG_STRING_TYPES = {
   getTypeParser(oid: number, format?: "text" | "binary") {
     if (TEXT_OIDS.has(oid)) return identity;
+    if (TEXT_ARRAY_OIDS.has(oid)) return textArray();
     return types.getTypeParser(oid, format as never);
   },
 };

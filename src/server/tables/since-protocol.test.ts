@@ -132,3 +132,11 @@ describe.each(["UTC", "Asia/Tokyo", "America/Sao_Paulo", "America/New_York"])("i
     expect(s.nextSinceTxt).toBe("2026-09-19 10:00:00.250000");
   });
 });
+
+describe("parseSince: ano invalido devolve null (400), nunca 500", () => {
+  it("ano 0000 e underflow por offset", () => {
+    expect(parseSince("0000-01-01T00:00:00Z")).toBeNull();
+    expect(parseSince("0001-01-01T00:00:00+03:00")).toBeNull();
+    expect(parseSince("0001-01-01T00:00:00Z")?.txt).toBe("0001-01-01 00:00:00.000000");
+  });
+});
