@@ -95,3 +95,18 @@ describe("guarda de identidade (dois workers com o mesmo rótulo)", () => {
     expect(LIVENESS_FRESH_MS).toBeGreaterThan(15_000);
   });
 });
+
+describe("waitIdentityFree (pulsação de processo do contêiner anterior)", () => {
+  it("espera a pulsação envelhecer e libera em vez de sair com código 3", async () => {
+    const { waitIdentityFree } = await import("./runtime");
+    let t = 0;
+    const r = await waitIdentityFree({ check: async () => t < 40_000, sleep: async (ms) => { t += ms; }, now: () => t });
+    expect(r).toBe(true);
+  });
+  it("desiste depois do limite quando o outro processo continua vivo", async () => {
+    const { waitIdentityFree } = await import("./runtime");
+    let t = 0;
+    const r = await waitIdentityFree({ check: async () => true, sleep: async (ms) => { t += ms; }, now: () => t, maxWaitMs: 10_000 });
+    expect(r).toBe(false);
+  });
+});

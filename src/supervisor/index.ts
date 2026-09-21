@@ -29,7 +29,7 @@ function spawnWorker(profile: CoreProfile): ChildHandle {
   const child = fork(WORKER_ENTRY, ["--profile", profile.name], {
     execArgv: ["--import", "tsx"],
     stdio: ["ignore", "inherit", "inherit", "ipc"],
-    env: process.env,
+    env: { ...process.env, CW_SUPERVISED: "1" },
   });
   return {
     get pid() { return child.pid; },

@@ -107,6 +107,29 @@ export function identityConflict(
   return true; // outro host com pulsação fresca
 }
 
+/**
+ * Sob o supervisor (que detém o advisory lock e já garante uma instância por perfil), a pulsação fresca de um processo
+ * ANTERIOR não é conflito definitivo: depois de um reinício do contêiner ela é do processo morto (e os PIDs se repetem,
+ * então `isPidAlive` acusa um irmão). Espera a pulsação envelhecer (LIVENESS_FRESH_MS) em vez de sair com código 3 e
+ * entrar em loop de crash até esgotar o limite de reinício. Devolve true se a identidade ficou livre a tempo.
+ */
+export async function waitIdentityFree(opts: {
+  check: () => Promise<boolean>; // true = ainda há conflito
+  sleep: (ms: number) => Promise<void>;
+  now: () => number;
+  maxWaitMs?: number;
+  pollMs?: number;
+}): Promise<boolean> {
+  const maxWait = opts.maxWaitMs ?? LIVENESS_FRESH_MS + 15_000;
+  const poll = opts.pollMs ?? 2_000;
+  const start = opts.now();
+  for (;;) {
+    if (!(await opts.check())) return true;
+    if (opts.now() - start >= maxWait) return false;
+    await opts.sleep(poll);
+  }
+}
+
 export function isPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);

@@ -26,7 +26,7 @@ import { pickInt } from "@/server/worker/config";
 import { auditJob } from "@/server/audit-request";
 import { startHeartbeat, currentRssMb, recordJobMetric, resolveJobTableId, writeWorkerLiveness, readWorkerLiveness, clearWorkerLiveness } from "./metrics";
 import { setDuckdbMemoryLimit } from "@/server/worker/runtime-limits";
-import { WorkerState, abortAndWait, identityConflict, isPidAlive, listProfileNames, loadProfile, parseProfileArg, type WorkerProfileRow } from "./runtime";
+import { WorkerState, abortAndWait, identityConflict, isPidAlive, waitIdentityFree, listProfileNames, loadProfile, parseProfileArg, type WorkerProfileRow } from "./runtime";
 
 // Camada 1 (auditoria): o processo do worker (tsx src/worker/index.ts) roda fora
 // do ciclo de vida do Next.js — instrumentation.ts (que inicializa o Sentry pro
@@ -716,9 +716,15 @@ async function bootstrapProfile(): Promise<WorkerProfileRow> {
     process.exit(4);
   }
   const live = await readWorkerLiveness(p.name).catch(() => undefined);
+  const conflict = async () => identityConflict(await readWorkerLiveness(p.name).catch(() => undefined), { host: hostname(), pid: process.pid }, Date.now(), isPidAlive);
   if (identityConflict(live, { host: hostname(), pid: process.pid }, Date.now(), isPidAlive)) {
-    console.error(`[worker] já existe outro processo ativo com o perfil "${p.name}" (pulsação recente). Pare o serviço antigo antes de subir este.`);
-    process.exit(3);
+    // Sob o supervisor a pulsação fresca costuma ser do processo do contêiner anterior: espera envelhecer em vez de crashar.
+    const freed = process.env.CW_SUPERVISED === "1"
+      && await waitIdentityFree({ check: conflict, sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: Date.now });
+    if (!freed) {
+      console.error(`[worker] já existe outro processo ativo com o perfil "${p.name}" (pulsação recente). Pare o serviço antigo antes de subir este.`);
+      process.exit(3);
+    }
   }
   return p;
 }
