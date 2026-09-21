@@ -21,6 +21,7 @@ import { previewFile, rowsFromFile, type FilePreview, type ParsedColumn, type Ro
 import { normalizeDateLike } from "./date-normalize";
 import type { PgStorageConnection } from "@/server/storage/pg-storage";
 import { pgQuote, canonicalToPg } from "@/server/storage/pg-storage";
+import { userColumnNames } from "@/server/storage/connection";
 
 // ─── Type conversion ──────────────────────────────────────────────────────────
 
@@ -214,7 +215,9 @@ async function importUploadPgLocked(
   const targetExists = await conn.tableExists(schema, tableName);
   if ((upload.mode === "append" || upload.mode === "upsert") && targetExists) {
     const existingCols = await conn.listColumns(schema, tableName);
-    const existingNames = existingCols.filter(c => c.name !== "_cw_rh").map(c => c.name);
+    // colunas internas (_cw_rh, cw_synced_at, cw_deleted_at) não fazem parte do schema do usuário — ver CW_SYNCED_AT em storage/connection.ts.
+    // Sem isso, todo append/upsert em tabela existente falhava com "Schema incompatível ... atual: ..., cw_synced_at, cw_deleted_at".
+    const existingNames = userColumnNames(existingCols);
     const incomingNames = mapping.map(c => c.sqlName);
     if (JSON.stringify(existingNames) !== JSON.stringify(incomingNames)) {
       throw new Error(`Schema incompatível. Esperado: ${incomingNames.join(", ")}; atual: ${existingNames.join(", ")}`);

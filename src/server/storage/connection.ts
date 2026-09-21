@@ -21,6 +21,11 @@ export { KEYS_CHECK_MAX_RATIO, KEYS_CHECK_RATIO_MIN_LIVE } from "./delete-detect
 export const CW_SYNCED_AT = "cw_synced_at";
 export const CW_DELETED_AT = "cw_deleted_at";
 
+/** Nomes das colunas do USUÁRIO: sem as internas (_cw_rh, cw_synced_at, cw_deleted_at). */
+export function userColumnNames(cols: readonly { name: string }[]): string[] {
+  return cols.map((c) => c.name).filter((n) => n !== "_cw_rh" && n !== CW_SYNCED_AT && n !== CW_DELETED_AT);
+}
+
 export type ColDef = {
   name: string;
   /** Tipo canônico: BIGINT | DECIMAL(18,4) | DATE | DATETIME2 | TIME | NVARCHAR(MAX) | CHAR(32) (só _cw_rh) */

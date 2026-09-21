@@ -10,9 +10,14 @@ const url = process.env.CW_TEST_PG_URL;
 const d = url ? describe : describe.skip;
 
 d("EXPIRED_FILES_SQL (Postgres real)", () => {
-  const pool = new Pool({ connectionString: url });
+  // Schema próprio e search_path só nesta conexão: as tabelas de mentira (cw_uploads...) NUNCA tocam as de verdade do banco.
+  const S = `fr_${Date.now().toString(36)}`;
+  const pool = new Pool({ connectionString: url, max: 1, options: `-c search_path=${S}` });
   beforeAll(async () => {
-    await pool.query(`DROP TABLE IF EXISTS cw_dataset_versions, cw_uploads;
+    const admin = new Pool({ connectionString: url, max: 1 });
+    await admin.query(`CREATE SCHEMA ${S}`);
+    await admin.end();
+    await pool.query(`
       CREATE TABLE cw_uploads (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), blob_name text, status text, created_at timestamp);
       CREATE TABLE cw_dataset_versions (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), upload_id uuid);`);
     const ins = async (blob: string, status: string, ageDays: number, withVersion: boolean) => {
@@ -25,7 +30,7 @@ d("EXPIRED_FILES_SQL (Postgres real)", () => {
     await ins("falhou-velho", "FAILED", 40, false);            // não é COMPLETED: fora desta regra
     await ins("importando", "IMPORTING", 40, false);           // em andamento: nunca
   });
-  afterAll(async () => { await pool.query(`DROP TABLE IF EXISTS cw_dataset_versions, cw_uploads`); await pool.end(); });
+  afterAll(async () => { await pool.query(`DROP SCHEMA ${S} CASCADE`); await pool.end(); });
 
   const names = async (days: number) => (await pool.query(EXPIRED_FILES_SQL, [days])).rows.map((r) => r.blob_name).sort();
 
