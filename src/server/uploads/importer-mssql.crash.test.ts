@@ -71,7 +71,7 @@ d("crash do processo no meio do import (SQL Server real)", () => {
     const ws = createWriteStream(p);
     ws.write("id,nome,valor\n");
     for (let i = from; i < from + n; i++) {
-      if (!ws.write(`${i},${tag} ${i} ${"x".repeat(40)},${i}.5\n`)) await new Promise((r) => ws.once("drain", r));
+      if (!ws.write(`${i},${tag} ${i} ${"x".repeat(40)},${i}.5\n`)) await new Promise<void>((r) => ws.once("drain", () => r()));
     }
     await new Promise<void>((r) => ws.end(() => r()));
     return p;
