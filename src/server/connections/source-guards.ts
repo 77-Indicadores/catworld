@@ -25,6 +25,19 @@ export function resolveColumn<T extends NamedCol>(columns: T[], name: string | n
     ?? null;
 }
 
+/**
+ * FON-08: o incremento e a chave definem O QUE foi lido e ATE ONDE. Trocar qualquer um deles (ou a consulta, ou o modo) com a
+ * marca d'agua antiga faz a proxima leitura pular linhas em silencio; a marca e zerada e a proxima rodada le tudo.
+ */
+export function shouldResetDelta(
+  input: { deltaColumn?: string | null; keyColumn?: string | null; sourceSql?: string | null; mode?: string },
+  current: { deltaColumn: string | null; keyColumn: string | null; sourceSql: string | null; mode: string },
+): boolean {
+  const differs = (a: string | null | undefined, b: string | null) => a !== undefined && (a ?? null) !== (b ?? null);
+  return differs(input.deltaColumn, current.deltaColumn) || differs(input.keyColumn, current.keyColumn)
+    || differs(input.sourceSql, current.sourceSql) || (input.mode !== undefined && input.mode !== current.mode);
+}
+
 // ── Escalada de verificacoes de exclusao ignoradas (FON-12) ─────────────────────────────────────────────────────────
 
 export const KEYS_SKIP_CODES = ["KEYS_CHECK_UNSAFE", "KEYS_CHECK_FAILED", "KEYS_READ_FAILED"] as const;
