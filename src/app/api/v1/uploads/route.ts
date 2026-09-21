@@ -1,4 +1,5 @@
 import type { NextRequest } from "next/server";
+import { tableNameCollisionWarning } from "@/server/uploads/name-collision";
 import { randomUUID } from "node:crypto";
 import { extname } from "node:path";
 import { z } from "zod";
@@ -105,7 +106,9 @@ export async function POST(r: NextRequest) {
       },
     });
 
-    return ok({ upload, sas: await uploadTarget(upload.id) }, undefined, 201);
+    // Colisão de nome (Obras.csv x obras.csv = mesma tabela): não bloqueia, mas o cliente é avisado.
+    const collision = input.datasetId && !input.tableId ? await tableNameCollisionWarning(input.datasetId, input.filename).catch(() => null) : null;
+    return ok({ upload, sas: await uploadTarget(upload.id) }, collision ? { warnings: [collision] } : undefined, 201);
   } catch (e) {
     return handleApiError(e);
   }
