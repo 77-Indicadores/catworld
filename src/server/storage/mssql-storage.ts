@@ -37,6 +37,8 @@ function parseMssqlUrl(url: string): sql.config {
   };
 }
 
+const RH = "_cw_rh"; // coluna interna de hash da linha (MD5 hex), quando a tabela a tem
+
 // ─── Type mapping ─────────────────────────────────────────────────────────────
 
 export function canonicalToMssql(sqlType: string): string {
@@ -382,6 +384,7 @@ export class MssqlStorageConnection implements StorageConnection {
     );
 
     let marked = 0;
+    let preserveStamp = false;
 
     try {
       await p.request().query(`CREATE TABLE ${qMgd} (${colDefsWithMeta})`);
@@ -412,6 +415,7 @@ export class MssqlStorageConnection implements StorageConnection {
           `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = N'${esc(schema)}' AND TABLE_NAME = N'${esc(target)}'`,
         );
         const tgtCols = new Set((tgtColsRes.recordset as { COLUMN_NAME: string }[]).map(r => r.COLUMN_NAME));
+        preserveStamp = tgtCols.has(RH) && tgtCols.has(CW_SYNCED_AT) && tgtCols.has(CW_DELETED_AT) && cols.some(c => c.name === RH);
         const selectList = cols
           .map(c => (tgtCols.has(c.name) ? `t.${mssqlQuote(c.name)}` : `NULL`))
           .join(", ");
@@ -440,9 +444,20 @@ export class MssqlStorageConnection implements StorageConnection {
       // Copia todos os rows de staging (novos / atualizados) — sempre "vivas": carimba
       // cw_synced_at=agora e cw_deleted_at=NULL (undelete automático se a chave tinha
       // sido excluída antes e voltou a aparecer na origem).
+      // Com a coluna de hash `_cw_rh` nos dois lados, a linha cujo CONTEUDO nao mudou (mesmo hash, viva) mantem o cw_synced_at
+      // anterior (H4): reler linhas iguais nao as reapresenta em `rows?since=`. Sem `_cw_rh`, toda linha lida e carimbada agora.
       const insReq = p.request();
       setReqTimeout(insReq, 7_200_000);
-      await insReq.query(
+      if (preserveStamp) {
+        const sCols = cols.map(c => `s.${mssqlQuote(c.name)}`).join(", ");
+        const rh = mssqlQuote(RH);
+        await insReq.query(
+          `INSERT INTO ${qMgd} (${colListWithMeta})
+           SELECT ${sCols}, COALESCE(p.sa, SYSUTCDATETIME()), NULL FROM ${qStg} s
+           LEFT JOIN (SELECT ${key} AS k, ${rh} AS rh, MAX(${qSyncedAt}) AS sa FROM ${qTgt} WHERE ${qDeletedAt} IS NULL GROUP BY ${key}, ${rh}) p
+             ON p.k = s.${key} AND p.rh = s.${rh} OPTION (MAXDOP 1)`,
+        );
+      } else await insReq.query(
         `INSERT INTO ${qMgd} (${colListWithMeta}) SELECT ${colList}, SYSUTCDATETIME(), NULL FROM ${qStg} OPTION (MAXDOP 1)`,
       );
 

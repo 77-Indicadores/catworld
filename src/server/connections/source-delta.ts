@@ -4,7 +4,10 @@
  * Problemas que este modulo fecha:
  *  - `>` estrito perdia linhas com valor IGUAL a marca (empates) e commits tardios: agora le `>= marca - janela` e o upsert por
  *    chave torna a sobreposicao inofensiva;
- *  - linhas com delta NULL nunca eram lidas: agora entram em toda rodada (`OR col IS NULL`), o upsert e idempotente;
+ *  - linhas com delta NULL nunca eram lidas: agora entram na PRIMEIRA carga e em toda RECONCILIACAO (leituras sem predicado). O
+ *    incremental NAO as le (H4): re-le-las e re-carimba-las a cada rodada derrubava `rows?since=` (a maior parte da tabela
+ *    reaparecia sempre). Trade-off: uma linha NOVA que ja nasce com delta NULL so chega na proxima reconciliacao (diaria por
+ *    padrao). Quem precisa delas a cada rodada usa `includeNull: true` (custo: releitura + novo carimbo);
  *  - um valor no futuro (2099) congelava a fonte: a marca nunca passa de `relogio da origem + tolerancia`;
  *  - a marca vinha de `Date` (fuso do processo, ms): agora e texto canonico UTC com microssegundos, vindo do valor cru.
  */
@@ -96,10 +99,10 @@ export function lowerBound(wm: string, kind: DeltaKind, lookbackMinutes: number)
 }
 
 /**
- * Predicado do incremento: `col >= limite OR col IS NULL`. Empates e NULL entram; o upsert por chave deduplica.
+ * Predicado do incremento: `col >= limite` (com `includeNull`, `OR col IS NULL`). Empates entram; o upsert por chave deduplica.
  * O literal e sempre validado (nunca concatena texto livre sem escapar).
  */
-export function buildDeltaPredicate(o: { kind: DeltaKind; quotedColumn: string; watermark: string; dialect: Dialect; lookbackMinutes?: number }): string {
+export function buildDeltaPredicate(o: { kind: DeltaKind; quotedColumn: string; watermark: string; dialect: Dialect; lookbackMinutes?: number; includeNull?: boolean }): string {
   const { kind, quotedColumn: col, watermark, dialect } = o;
   const lb = lowerBound(watermark, kind, o.lookbackMinutes ?? DEFAULT_LOOKBACK_MINUTES);
   let lit: string;
@@ -111,5 +114,5 @@ export function buildDeltaPredicate(o: { kind: DeltaKind; quotedColumn: string; 
   } else {
     lit = `'${lb.replace(/'/g, "''")}'`;
   }
-  return `(${col} >= ${lit} OR ${col} IS NULL)`;
+  return o.includeNull ? `(${col} >= ${lit} OR ${col} IS NULL)` : `(${col} >= ${lit})`;
 }

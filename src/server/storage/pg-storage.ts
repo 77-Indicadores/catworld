@@ -51,6 +51,8 @@ export function canonicalToPg(sqlType: string): string {
   return "TEXT"; // NVARCHAR(MAX) e qualquer outro
 }
 
+const RH = "_cw_rh"; // coluna interna de hash da linha (MD5 hex), quando a tabela a tem
+
 /** Postgres type → canonical */
 function pgToCanonical(r: {
   data_type: string;
@@ -330,6 +332,7 @@ export class PgStorageConnection implements StorageConnection {
     await this._pool.query(`DROP TABLE IF EXISTS ${qMgd}`);
 
     let marked = 0;
+    let preserveStamp = false;
 
     try {
       await this._pool.query(`CREATE TABLE ${qMgd} (${colDefsWithMeta})`);
@@ -350,6 +353,7 @@ export class PgStorageConnection implements StorageConnection {
           [schema, target],
         );
         const tgtCols = new Set(tgtColsRes.rows.map(r => r.column_name));
+        preserveStamp = tgtCols.has(RH) && tgtCols.has(CW_SYNCED_AT) && tgtCols.has(CW_DELETED_AT) && cols.some(c => c.name === RH);
         const selectList = cols
           .map(c => (tgtCols.has(c.name) ? `t.${pgQuote(c.name)}` : `NULL`))
           .join(", ");
@@ -378,7 +382,19 @@ export class PgStorageConnection implements StorageConnection {
 
       // Copia todos os rows de staging (novos / atualizados) — sempre "vivas": carimba
       // cw_synced_at=agora e cw_deleted_at=NULL (undelete automático).
-      await this._pool.query(
+      // Com a coluna de hash `_cw_rh` nos dois lados, a linha cujo CONTEUDO nao mudou (mesmo hash, viva) mantem o cw_synced_at
+      // anterior: reler linhas iguais (delta com janela de sobreposicao) nao as reapresenta em `rows?since=` (H4). Sem `_cw_rh`
+      // nao ha comparacao barata: toda linha lida e carimbada agora (comportamento anterior; documentado em docs/data-integrity.md).
+      if (preserveStamp) {
+        const sCols = cols.map(c => `s.${pgQuote(c.name)}`).join(", ");
+        const rh = pgQuote(RH);
+        await this._pool.query(
+          `INSERT INTO ${qMgd} (${colListWithMeta})
+           SELECT ${sCols}, COALESCE(p.sa, now()), NULL FROM ${qStg} s
+           LEFT JOIN (SELECT ${key} AS k, ${rh} AS rh, MAX(${qSyncedAt}) AS sa FROM ${qTgt} WHERE ${qDeletedAt} IS NULL GROUP BY ${key}, ${rh}) p
+             ON p.k = s.${key} AND p.rh = s.${rh}`,
+        );
+      } else await this._pool.query(
         `INSERT INTO ${qMgd} (${colListWithMeta}) SELECT ${colList}, now(), NULL FROM ${qStg}`,
       );
 

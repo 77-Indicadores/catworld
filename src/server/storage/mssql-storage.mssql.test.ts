@@ -64,6 +64,25 @@ d("MssqlStorageConnection (SQL Server real)", () => {
     expect(r[0]!.dt).toBe("2024-03-10");
   });
 
+  it("H4: merge com _cw_rh preserva cw_synced_at da linha que nao mudou", async () => {
+    const hcols = [{ name: "id", sqlType: "BIGINT", nullable: false }, { name: "v", sqlType: "NVARCHAR(MAX)", nullable: true }, { name: "_cw_rh", sqlType: "CHAR(32)", nullable: true }];
+    const load = async (rows: unknown[][], exists: boolean) => {
+      await st.createTable(SCHEMA, "stg_h", hcols);
+      await st.bulkInsert(SCHEMA, "stg_h", hcols, rows);
+      await st.atomicSwap(SCHEMA, "stg_h", "t_h", hcols, { targetExists: exists, keyColumn: "id", mergedName: "mgd_h" });
+    };
+    const stamps = async () => Object.fromEntries((await st.query<{ id: string; ts: string }>(`SELECT CAST(id AS NVARCHAR(20)) id, CONVERT(NVARCHAR(40), cw_synced_at, 121) ts FROM [${SCHEMA}].[t_h]`)).map((r) => [r.id, r.ts]));
+    const h = (s: string) => s.padEnd(32, "0");
+    await load([[1, "a", h("h1")], [2, "b", h("h2")]], false);
+    const first = await stamps();
+    await new Promise((r) => setTimeout(r, 1100));
+    await load([[1, "a", h("h1")], [2, "b2", h("h2x")], [3, "c", h("h3")]], true);
+    const second = await stamps();
+    expect(second["1"]).toBe(first["1"]);
+    expect(second["2"]! > first["2"]!).toBe(true);
+    expect(second["3"]! > first["2"]!).toBe(true);
+  });
+
   it("H2: cada swap deixa exatamente um indice em cw_synced_at (fullSwap e merge, varias rodadas)", async () => {
     const cols = [{ name: "id", sqlType: "BIGINT", nullable: false }, { name: "v", sqlType: "NVARCHAR(MAX)", nullable: true }];
     const idx = async (t: string) => (await st.query<{ n: number }>(

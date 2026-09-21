@@ -57,3 +57,11 @@ Processo web, worker e supervisor rodam em **UTC** (`TZ=UTC` no Dockerfile, `ens
 - Trocas de tabela no Postgres usam `lock_timeout` de 3 s com retentativa (um leitor longo não trava mais todos os leitores).
 - Índice em `cw_synced_at` criado antes do swap (consumo `rows?since=`).
 - Retenção de jobs e auditoria apaga em lotes de 20 mil linhas.
+
+## 7. Fontes conectadas: opções por fonte, guarda de queda e delta
+
+- **Sem migração:** as opções por fonte vivem em `cw_system_settings` (`source.options.<id>` = JSON `{ allowEmpty, maxDropPct, onInvalid, strict }`; `source.run.<id>` = marca de uso único da próxima rodada). Alteradas por `PATCH /api/v1/dataset-sources/:id` (`options`, auditado).
+- **Fonte legada** (sem registro de opções): valor irrepresentável (infinity, data BC) vira NULL com aviso `INVALID_VALUES_NULLED`; decimal de ponto flutuante com mais de 15 dígitos é arredondado com aviso `LEGACY_PRECISION`. **Fonte nova** grava `strict` + `onInvalid: "fail"` e falha a carga nesses casos.
+- **Guarda de queda/vazio (fonte de tabela sem chave ou reconciliação):** agendada e sem override = protegida (FAILED). Atualização **manual** (`POST /dataset-sources/:id/refresh`) não é agendada: queda grande só marca SUSPECT; esvaziar exige `acceptDrop: true` (auditado). Consulta com janela e sem chave nunca é barrada (publica e marca SUSPECT). A reconciliação enfileirada pela escalada de verificações ignoradas pode apagar o que a verificação de chaves já mediu (+2 pontos).
+- **Delta:** o incremental não lê linhas de delta NULL (só a 1ª carga e a reconciliação); uma linha nova que nasce com delta NULL chega na próxima reconciliação. O merge só preserva `cw_synced_at` de linha inalterada quando a tabela tem a coluna `_cw_rh` (hash); sem ela, toda linha lida é re-carimbada.
+- **Reconciliação padrão** de fonte nova é espalhada por hash do id (minuto 0-59, hora 1-5 UTC).
