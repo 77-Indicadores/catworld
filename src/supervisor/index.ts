@@ -12,9 +12,11 @@ import pg from "pg";
 import { prisma } from "@/server/db";
 import { env } from "@/server/env";
 import { Supervisor, type ChildHandle, type CoreProfile } from "./core";
+import { ensureUtcTimezone } from "@/server/runtime-tz";
 import { createCoreDb } from "./db";
 import { retakeLeadership } from "./leadership";
 
+ensureUtcTimezone(); // os workers herdam o ambiente: todos em UTC
 const TICK_MS = 3000;
 const STANDBY_RETRY_MS = 10_000;
 const LOCK_NAME = "catworld.supervisor";

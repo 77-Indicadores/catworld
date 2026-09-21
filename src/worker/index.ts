@@ -1,3 +1,4 @@
+import { ensureUtcTimezone } from "@/server/runtime-tz";
 import { buildClaimSql } from "./claim";
 import { isSourceBusyError } from "./source-failure";
 import { getUploadFilesDays, purgeExpiredUploadFiles } from "@/server/uploads/file-retention";
@@ -37,6 +38,9 @@ process.on("uncaughtException", (e) => { Sentry.captureException(e); console.err
 process.on("unhandledRejection", (e) => { Sentry.captureException(e); console.error("[worker] unhandledRejection:", e); });
 
 type Claimed = { id: string; type: string; upload_id: string | null; payload_json: string | null; attempts: number; max_attempts: number; weight: number };
+
+// Fuso do processo em UTC antes de qualquer leitura/gravação de data (FON-03): o driver e o Date do JS interpretam timestamp sem fuso no fuso local.
+ensureUtcTimezone();
 
 // Identidade e config deste processo: o perfil (banco), escolhido por `--profile <nome>` — sem variável de ambiente.
 let profile: WorkerProfileRow;
