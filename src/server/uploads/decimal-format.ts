@@ -73,7 +73,7 @@ export function accumulateDecimal(acc: DecimalAcc, value: string): void {
 }
 
 export type DecimalVerdict =
-  | { kind: "decimal"; sep: DecSep; spec: DecimalSpec }
+  | { kind: "decimal"; sep: DecSep; spec: DecimalSpec; /** dígitos significativos NECESSÁRIOS (antes do piso 18,4) */ neededDigits: number }
   | { kind: "ambiguous" }       // as duas convenções servem para todos os valores e dão números diferentes: não adivinhar
   | { kind: "too-wide" }        // não cabe em 38 dígitos: TEXT
   | { kind: "none" };           // algum valor não é decimal
@@ -99,5 +99,5 @@ export function decideDecimal(acc: DecimalAcc): DecimalVerdict {
   const probe = "9".repeat(acc.maxInt[sep]) + (acc.maxScale[sep] ? "." + "9".repeat(acc.maxScale[sep]) : "");
   const fit = fitDecimal([probe]);
   if (!fit) return { kind: "too-wide" };
-  return { kind: "decimal", sep, spec: widenToLegacyFloor(fit) };
+  return { kind: "decimal", sep, spec: widenToLegacyFloor(fit), neededDigits: fit.precision };
 }

@@ -368,6 +368,19 @@ export class MssqlStorageConnection implements StorageConnection {
         //  - senao (delta parcial): preserva como está — ausência só significa "não mudou neste lote".
         // Schema drift: colunas novas da origem (ausentes no target) entram como NULL;
         // colunas so do target sao descartadas.
+        // Tabela criada pelo caminho de replace "cru" do importer (ou anterior ao soft delete) NÃO tem cw_synced_at/cw_deleted_at: o merge
+        // referenciava t.cw_deleted_at e falhava com "Invalid column name" (visto contra SQL Server real). Acrescenta as colunas que faltam.
+        const metaRes = await p.request().query(
+          `SELECT COL_LENGTH(N'${esc(schema)}.${esc(target)}', N'${esc(CW_SYNCED_AT)}') AS s, COL_LENGTH(N'${esc(schema)}.${esc(target)}', N'${esc(CW_DELETED_AT)}') AS d`,
+        );
+        const metaRow = metaRes.recordset[0] as { s: number | null; d: number | null };
+        if (metaRow.s === null) {
+          const addSynced = p.request(); setReqTimeout(addSynced, 7_200_000);
+          await addSynced.query(`ALTER TABLE ${qTgt} ADD ${qSyncedAt} DATETIME2 NOT NULL CONSTRAINT ${mssqlQuote(`DF_${target}_${CW_SYNCED_AT}`.slice(0, 120))} DEFAULT SYSUTCDATETIME()`);
+        }
+        if (metaRow.d === null) {
+          await p.request().query(`ALTER TABLE ${qTgt} ADD ${qDeletedAt} DATETIME2 NULL`);
+        }
         const tgtColsRes = await p.request().query(
           `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = N'${esc(schema)}' AND TABLE_NAME = N'${esc(target)}'`,
         );

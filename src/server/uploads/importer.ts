@@ -17,7 +17,7 @@ import { quoteIdentifier, sqlIdentifier } from "@/server/security/naming";
 import { previewFile, rowsFromFile, type FilePreview, type ParsedColumn, type RowsFromFileOpts, type ParseStats } from "./parser";
 import { env } from "@/server/env";
 import { normalizeDateLike } from "./date-normalize";
-import { convertForTds, decimalTsqlExpr } from "./convert-values";
+import { convertForTds, decimalTsqlExpr, isWideDecimal } from "./convert-values";
 
 
 function sqlTypeDef(type: string): string {
@@ -57,9 +57,10 @@ export function typedSelectExpr(column: ParsedColumn, alias: string): string {
 // ─── Typed staging helpers ────────────────────────────────────────────────────
 
 /** SQL type for the staging table column — mirrors typedCsvField in importer-bulk-blob.ts */
-function stagingColType(sqlType: string): string {
+function stagingColType(col: { sqlType: string; decimalDigits?: number | null }): string {
+  const sqlType = col.sqlType;
   if (sqlType === "BIGINT") return "BIGINT";
-  if (sqlType.startsWith("DECIMAL")) return physicalDecimal(sqlType, "mssql");
+  if (sqlType.startsWith("DECIMAL")) return isWideDecimal(col) ? "NVARCHAR(64)" : physicalDecimal(sqlType, "mssql"); // largo: texto exato, vira DECIMAL depois da carga
   if (sqlType === "DATE") return "DATE";
   if (sqlType === "DATETIME2") return "DATETIME2";
   if (sqlType === "TIME") return "TIME";
@@ -68,9 +69,14 @@ function stagingColType(sqlType: string): string {
 }
 
 /** mssql column type for TDS bulk copy into a typed staging table */
-function tdsColType(sqlType: string): sql.ISqlType | (() => sql.ISqlType) {
+function tdsColType(col: { sqlType: string; decimalDigits?: number | null }): sql.ISqlType | (() => sql.ISqlType) {
+  const sqlType = col.sqlType;
   if (sqlType === "BIGINT") return sql.BigInt;
-  if (sqlType.startsWith("DECIMAL")) { const d = parseDecimalType(sqlType) ?? DECIMAL_LEGACY; return sql.Decimal(d.precision, d.scale); }
+  if (sqlType.startsWith("DECIMAL")) {
+    if (isWideDecimal(col)) return sql.NVarChar(64); // o driver escreve DECIMAL via Number: acima de 15 dígitos vai como texto
+    const d = parseDecimalType(sqlType) ?? DECIMAL_LEGACY;
+    return sql.Decimal(d.precision, d.scale);
+  }
   if (sqlType === "DATE") return sql.Date;
   if (sqlType === "DATETIME2") return sql.DateTime2;
   if (sqlType === "TIME") return sql.Time;
@@ -131,7 +137,7 @@ async function tdsBulkCopy(
     const bulk = new sql.Table(`${schema}.${destTable}`);
     bulk.create = false;
     for (const c of mapping) {
-      bulk.columns.add(c.sqlName, typed ? tdsColType(c.sqlType) : sql.NVarChar(sql.MAX), { nullable: true });
+      bulk.columns.add(c.sqlName, typed ? tdsColType(c) : sql.NVarChar(sql.MAX), { nullable: true });
     }
     bulk.columns.add("_cw_rh", sql.Char(32), { nullable: true });
     const { createHash: ch } = await import("node:crypto");
@@ -258,7 +264,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
     // Typed staging: Node.js pre-converts values (typedCsvField) so BULK INSERT writes native types
     // and the delta INSERT SELECT becomes a direct column copy — no TRY_CONVERT on Azure SQL (saves DTU).
     // colDefsMax is kept as fallback when a NVARCHAR value exceeds 4000 chars (rare truncation error).
-    const colDefs    = mapping.map(c => `${quoteIdentifier(c.sqlName)} ${stagingColType(c.sqlType)} NULL`).join(",") + ",[_cw_rh] CHAR(32) NULL";
+    const colDefs    = mapping.map(c => `${quoteIdentifier(c.sqlName)} ${stagingColType(c)} NULL`).join(",") + ",[_cw_rh] CHAR(32) NULL";
     const colDefsMax = mapping.map(c => `${quoteIdentifier(c.sqlName)} NVARCHAR(MAX)  NULL`).join(",") + ",[_cw_rh] CHAR(32) NULL";
     // Set to false if truncation forces NVARCHAR(MAX) fallback — INSERT SELECT must use TRY_CONVERT then
     const stagingIsTyped = true;
@@ -346,6 +352,11 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
           phaseTimings.importMethod = "tds-primary";
           const _r = await tdsBulkCopy(writePool, source, mapping, schema, destTable, opts, knownRowCount, uploadId, onProgress, true, parseStats);
           total = _r.total; reclassifiedCols.push(..._r.reclassifiedCols);
+          // DECIMAL largo entrou como texto exato (NVARCHAR(64)): converte a coluna da staging para o tipo final. Falha alto se algum valor
+          // não couber (nunca arredonda); a staging vira a tabela no swap, então o tipo da staging é o tipo publicado.
+          for (const c of mapping.filter((m) => isWideDecimal(m))) {
+            await writePool.request().query(`ALTER TABLE ${staging} ALTER COLUMN ${quoteIdentifier(c.sqlName)} ${physicalDecimal(c.sqlType, "mssql")} NULL`);
+          }
         }
 
         // Index staging._cw_rh so NOT EXISTS lookups are O(n log n) instead of O(n²)

@@ -10,7 +10,7 @@ import { parseDecimalType, decimalFits, DECIMAL_LEGACY, type DecimalSpec } from 
 import { canonicalDecimal, type DecSep } from "./decimal-format";
 import { normalizeDateLike, type DateOrder } from "./date-normalize";
 
-export type ConvertColumn = { sqlName?: string; sqlType: string; decimalSep?: DecSep | null; dateOrder?: DateOrder | null };
+export type ConvertColumn = { sqlName?: string; sqlType: string; decimalSep?: DecSep | null; dateOrder?: DateOrder | null; /** dígitos significativos necessários (do arquivo inteiro); ausente em mapeamentos antigos */ decimalDigits?: number | null };
 
 export class ValueConversionError extends Error {
   constructor(column: ConvertColumn, value: string, why: string) {
@@ -68,9 +68,18 @@ export function convertForPg(v: unknown, col: ConvertColumn | string): string | 
 const TDS_MAX_DECIMAL_DIGITS = 15; // o driver (tedious) escreve DECIMAL via Number: acima de 15 dígitos significativos perderia exatidão
 
 /**
+ * DECIMAL com mais de 15 dígitos NÃO pode ir pelo bulk tipado (o driver passa por Number e arredondaria). Essas colunas entram na staging
+ * como texto (NVARCHAR(64)) e são convertidas para DECIMAL(p,s) por um ALTER COLUMN depois da carga, exatas (visto contra SQL Server real).
+ */
+export function isWideDecimal(col: { sqlType: string; decimalDigits?: number | null }): boolean {
+  // Só é "largo" quando o ARQUIVO precisa de mais de 15 dígitos: o piso DECIMAL(18,4) sozinho não muda o caminho (a maioria das colunas
+  // cabe em 15 e continua no bulk tipado, sem o ALTER COLUMN extra). Mapeamento antigo (sem decimalDigits): comportamento anterior.
+  return !!parseDecimalType(col.sqlType) && (col.decimalDigits ?? 0) > TDS_MAX_DECIMAL_DIGITS;
+}
+
+/**
  * SQL Server via TDS (bulk copy tipado). BIGINT sai como `bigint` (negativos e >2^53 exatos); datas são construídas em UTC
- * (o driver usa useUTC=true), sem passar pelo fuso do processo. DECIMAL com mais de 15 dígitos significativos LANÇA: o driver
- * só sabe escrevê-lo via Number e arredondaria (precisa de verificação com SQL Server real / outro caminho).
+ * (o driver usa useUTC=true), sem passar pelo fuso do processo. DECIMAL(p>15,s) sai como texto exato (ver isWideDecimal).
  */
 export function convertForTds(v: unknown, col: ConvertColumn | string): unknown {
   const c: ConvertColumn = typeof col === "string" ? { sqlType: col } : col;
@@ -80,6 +89,7 @@ export function convertForTds(v: unknown, col: ConvertColumn | string): unknown 
   if (sqlType === "BIGINT") return bigintOrThrow(s, c);
   if (sqlType.startsWith("DECIMAL")) {
     const { canon } = decimalOrThrow(s, c);
+    if (isWideDecimal(c)) return canon; // texto exato: a coluna de staging é NVARCHAR(64) e vira DECIMAL(p,s) depois da carga
     const digits = canon.replace("-", "").replace(".", "").replace(/^0+(?=\d)/, "").length;
     if (digits > TDS_MAX_DECIMAL_DIGITS) throw new ValueConversionError(c, s, `tem ${digits} dígitos significativos e o driver TDS só grava DECIMAL com exatidão até ${TDS_MAX_DECIMAL_DIGITS}`);
     return Number(canon);

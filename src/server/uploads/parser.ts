@@ -14,7 +14,7 @@ import { normalizeTypeOverride } from "./type-override";
 import { rowTexts, isBlankRow } from "./xlsx-values";
 
 /** decimalSep/dateOrder: convenção da COLUNA decidida pelo arquivo inteiro (mapeamentos antigos não têm; ver decimal-format.ts e date-normalize.ts). *Ambiguous: ficou TEXT porque a convenção não pôde ser decidida. */
-export type ParsedColumn={originalName:string;sqlName:string;sqlType:string;nullable:boolean;decimalSep?:DecSep;decimalAmbiguous?:boolean;dateOrder?:DateOrder;dateAmbiguous?:boolean};
+export type ParsedColumn={originalName:string;sqlName:string;sqlType:string;nullable:boolean;decimalSep?:DecSep;decimalAmbiguous?:boolean;dateOrder?:DateOrder;dateAmbiguous?:boolean;decimalDigits?:number};
 export type FilePreview={columns:ParsedColumn[];rows:Record<string,unknown>[];rowCount:number;encoding:string;separator:string|null;sheetNames:string[]};
 export type RowsFromFileOpts={encoding?:string;separator?:string;ext?:string};
 export type ParseStats={parseMethod?:"duckdb"|"csv-parse"|"xlsx"|"stream";parseMs?:number;fileEncoding?:string;fileSeparator?:string;fallbackReason?:string};
@@ -129,12 +129,12 @@ function headerLooksIdentifier(header:string){return /(^|[_\s-])(cpf|cnpj|cep|te
 function columnsFromStats(headers:string[],stats:ColumnStats[]):ParsedColumn[]{const taken=new Set<string>();return headers.map((header,index)=>{const name=uniqueIdentifier(sqlIdentifier(header||`col_${index+1}`),taken);const s=stats[index]??newStats();return{originalName:header,sqlName:name,...inferType(header,s),nullable:true}})}
 /** Tipo da coluna a partir do arquivo INTEIRO. Nunca adivinha: ambíguo ou que não cabe exato vira texto. A convenção (decimalSep/dateOrder) é
  *  guardada mesmo quando o tipo final é texto (ex.: coluna "id"), para que um override de tipo explícito converta com a mesma regra. */
-function inferType(header:string,s:ColumnStats):{sqlType:string}&Partial<Pick<ParsedColumn,"decimalSep"|"decimalAmbiguous"|"dateOrder"|"dateAmbiguous">>{
+function inferType(header:string,s:ColumnStats):{sqlType:string}&Partial<Pick<ParsedColumn,"decimalSep"|"decimalAmbiguous"|"dateOrder"|"dateAmbiguous"|"decimalDigits">>{
  const text=textSqlType();
  if(s.sampleCount===0)return{sqlType:text};
  const dv=decideDecimal(s.dec);
- const conv:Partial<Pick<ParsedColumn,"decimalSep"|"decimalAmbiguous"|"dateOrder"|"dateAmbiguous">>={};
- if(dv.kind==="decimal")conv.decimalSep=dv.sep;
+ const conv:Partial<Pick<ParsedColumn,"decimalSep"|"decimalAmbiguous"|"dateOrder"|"dateAmbiguous"|"decimalDigits">>={};
+ if(dv.kind==="decimal"){conv.decimalSep=dv.sep;conv.decimalDigits=dv.neededDigits}
  if(dv.kind==="ambiguous")conv.decimalAmbiguous=true;
  const dateOk=s.okDmy||s.okMdy;
  if(dateOk){if(s.okDmy&&s.okMdy&&s.dateAmbiguous)conv.dateAmbiguous=true;else conv.dateOrder=s.okDmy?"dmy":"mdy"}
