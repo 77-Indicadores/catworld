@@ -4,6 +4,8 @@ import { validateReadOnlySql } from "@/server/security/sql-safety";
 import { ApiError } from "@/server/http";
 import { sqlIdentifier } from "@/server/security/naming";
 import { resolveEffectiveTarget, type SshTunnelConnection } from "./ssh-tunnel";
+import { SOURCE_SESSION_SETTINGS, sourceTypes } from "./source-pg-types";
+import { TEXT_TYPE, decimalOrText, numericFromTypmod } from "./source-values";
 
 export type PgConnection = SshTunnelConnection & {
   server: string;
@@ -20,6 +22,10 @@ export type SourceColumn = {
   sqlType: string;
   nullable: boolean;
   pgType?: string;
+  /** numerico que nao cabe em DECIMAL(p,s) exato (float, numeric sem escala): vira texto; ver source-values.compareWithCatalog */
+  lossyNumeric?: boolean;
+  /** coluna legada preservada como DECIMAL: escala excedente arredonda (como sempre foi); NaN/estouro falham */
+  legacyRound?: boolean;
 };
 
 function config(connection: PgConnection, target: { host: string; port: number }): ClientConfig {
@@ -104,13 +110,17 @@ export async function tableColumns(connection: PgConnection, schema: string, tab
        ORDER BY ordinal_position`,
       [schema, table],
     );
-    return result.rows.map((row) => ({
-      originalName: row.column_name,
-      sqlName: sqlIdentifier(row.column_name),
-      sqlType: mapPgType(row),
-      nullable: row.is_nullable !== "NO",
-      pgType: row.udt_name || row.data_type,
-    }));
+    return result.rows.map((row) => {
+      const m = mapPgType(row);
+      return {
+        originalName: row.column_name,
+        sqlName: sqlIdentifier(row.column_name),
+        sqlType: m.sqlType,
+        nullable: row.is_nullable !== "NO",
+        pgType: row.udt_name || row.data_type,
+        ...(m.lossyNumeric ? { lossyNumeric: true } : {}),
+      };
+    });
   });
 }
 
@@ -118,13 +128,17 @@ export async function queryColumns(connection: PgConnection, query: string): Pro
   const statement = safeStatement(query);
   return withPg(connection, async (client) => {
     const result = await pgQuery(client, `SELECT * FROM (${statement}) cw_source_probe LIMIT 0`);
-    return (result.fields ?? []).map((field) => ({
-      originalName: field.name,
-      sqlName: sqlIdentifier(field.name),
-      sqlType: mapPgOid(field.dataTypeID),
-      nullable: true,
-      pgType: String(field.dataTypeID),
-    }));
+    return (result.fields ?? []).map((field) => {
+      const m = mapPgOid(field.dataTypeID, field.dataTypeModifier);
+      return {
+        originalName: field.name,
+        sqlName: sqlIdentifier(field.name),
+        sqlType: m.sqlType,
+        nullable: true,
+        pgType: String(field.dataTypeID),
+        ...(m.lossyNumeric ? { lossyNumeric: true } : {}),
+      };
+    });
   });
 }
 
@@ -157,9 +171,20 @@ export async function executePostgresReadOnly(connection: PgConnection, query: s
 export async function* streamPostgresRows(connection: PgConnection, query: string, batchSize = 1000): AsyncGenerator<Record<string, unknown>[]> {
   const statement = safeStatement(query);
   const tunnel = await resolveEffectiveTarget(connection, 5432);
-  const client = new Client(config(connection, tunnel));
-  await client.connect();
+  const client = new Client({ ...config(connection, tunnel), types: sourceTypes });
+  // Sem listener, um `error` do socket (rede caiu, servidor reiniciou) num cliente ocioso derruba o processo inteiro
+  // (unhandled 'error' event). Guarda o erro; a proxima consulta do cursor rejeita normalmente e o refresh falha com mensagem.
+  let clientError: Error | null = null;
+  client.on("error", (err) => { clientError = err; console.warn(`[source-stream] erro na conexao da origem: ${err.message}`); });
   try {
+    await client.connect();
+  } catch (e) {
+    await tunnel.close().catch(() => undefined);
+    throw e;
+  }
+  try {
+    // Sessao fixa (UTC, interval ISO, bytea hex): o texto cru das datas nao depende de fuso do processo nem do servidor da origem.
+    for (const stmt of SOURCE_SESSION_SETTINGS) await pgQuery(client, stmt);
     // Cursor numa transacao unica (snapshot REPEATABLE READ): nada some nem se repete se a origem mudar durante a extracao
     // (LIMIT/OFFSET sem ORDER BY, como era, nao garante isso).
     await pgQuery(client, "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
@@ -170,6 +195,7 @@ export async function* streamPostgresRows(connection: PgConnection, query: strin
       yield result.rows as Record<string, unknown>[];
       if (result.rows.length < batchSize) break;
     }
+    if (clientError) throw clientError;
   } finally {
     await client.query("ROLLBACK").catch(() => undefined);
     await client.end().catch(() => undefined);
@@ -213,21 +239,34 @@ function postgresError(error: unknown) {
   return error;
 }
 
-function mapPgType(row: { data_type: string; udt_name: string; numeric_precision: number | null; numeric_scale: number | null }) {
+type Mapped = { sqlType: string; lossyNumeric?: boolean };
+
+function mapPgType(row: { data_type: string; udt_name: string; numeric_precision: number | null; numeric_scale: number | null }): Mapped {
   const type = (row.udt_name || row.data_type).toLowerCase();
-  if (["int2", "int4", "int8", "smallint", "integer", "bigint"].includes(type)) return "BIGINT";
-  if (["numeric", "decimal", "float4", "float8", "real", "double precision"].includes(type)) return "DECIMAL(18,4)";
-  if (["date"].includes(type)) return "DATE";
-  if (["timestamp", "timestamptz", "timestamp without time zone", "timestamp with time zone"].includes(type)) return "DATETIME2";
-  if (["time", "timetz", "time without time zone", "time with time zone"].includes(type)) return "TIME";
-  return "NVARCHAR(MAX)";
+  if (["int2", "int4", "int8", "smallint", "integer", "bigint"].includes(type)) return { sqlType: "BIGINT" };
+  if (["numeric", "decimal"].includes(type)) return decimalOrText(row.numeric_precision, row.numeric_scale);
+  if (["float4", "float8", "real", "double precision"].includes(type)) return { sqlType: TEXT_TYPE, lossyNumeric: true };
+  if (["date"].includes(type)) return { sqlType: "DATE" };
+  if (["timestamp", "timestamptz", "timestamp without time zone", "timestamp with time zone"].includes(type)) return { sqlType: "DATETIME2" };
+  // timetz guarda o deslocamento; TIME do storage nao: texto preserva o valor.
+  if (["time", "time without time zone"].includes(type)) return { sqlType: "TIME" };
+  return { sqlType: TEXT_TYPE };
 }
 
-function mapPgOid(oid: number) {
-  if ([20, 21, 23].includes(oid)) return "BIGINT";
-  if ([700, 701, 1700].includes(oid)) return "DECIMAL(18,4)";
-  if (oid === 1082) return "DATE";
-  if ([1114, 1184].includes(oid)) return "DATETIME2";
-  if ([1083, 1266].includes(oid)) return "TIME";
-  return "NVARCHAR(MAX)";
+function mapPgOid(oid: number, typmod?: number): Mapped {
+  if ([20, 21, 23].includes(oid)) return { sqlType: "BIGINT" };
+  if (oid === 1700) { const n = numericFromTypmod(typmod); return decimalOrText(n.precision, n.scale); }
+  if ([700, 701].includes(oid)) return { sqlType: TEXT_TYPE, lossyNumeric: true };
+  if (oid === 1082) return { sqlType: "DATE" };
+  if ([1114, 1184].includes(oid)) return { sqlType: "DATETIME2" };
+  if (oid === 1083) return { sqlType: "TIME" };
+  return { sqlType: TEXT_TYPE };
+}
+
+/** Relogio da origem (UTC), para limitar a marca d'agua de fontes incrementais. */
+export async function sourceClockPg(connection: PgConnection): Promise<Date> {
+  return withPg(connection, async (client) => {
+    const r = await client.query<{ now: string }>("SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS now");
+    return new Date(r.rows[0]!.now);
+  });
 }
