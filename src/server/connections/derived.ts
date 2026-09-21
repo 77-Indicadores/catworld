@@ -1,19 +1,22 @@
 import { randomUUID } from "crypto";
 import { prisma } from "@/server/db";
 import { withAdvisoryLock } from "@/server/db/advisory-lock";
-import { getStorageConnection } from "@/server/storage/connection";
+import { getStorageConnection, type StorageConnection } from "@/server/storage/connection";
 import { validateReadOnlySql } from "@/server/security/sql-safety";
+import { hideDeletedForStorage } from "@/server/sql-contract/hide-deleted-run";
 import { contractTranslate } from "@/server/sql-contract/apply";
 import { ApiError } from "@/server/http";
 import { nextRefreshFromCron } from "./sources";
 import { evaluateLoad, getIntegritySettings, IntegrityError } from "@/server/integrity/policy";
 
 /** Contrato de SQL: a derivada e escrita em T-SQL, validada como read-only e traduzida por backend. */
-export async function prepareDerivedSql(querySql: string, provider: string): Promise<string> {
+export async function prepareDerivedSql(querySql: string, provider: string, conn?: StorageConnection): Promise<string> {
   const v = validateReadOnlySql(querySql);
   if (!v.safe) throw new ApiError(400, "UNSAFE_SQL", v.reason);
-  if (provider === "sqlserver") return v.statement;
-  const { sql, topLimit } = await contractTranslate(v.statement, "postgres", "derived", "passthrough");
+  // A derivada roda como dono do storage (RLS nao vale) e o SQL Server nao tem RLS: filtra as linhas excluidas na origem aqui.
+  const stmt = conn ? await hideDeletedForStorage(conn, v.statement, [], "derived") : v.statement;
+  if (provider === "sqlserver") return stmt;
+  const { sql, topLimit } = await contractTranslate(stmt, "postgres", "derived", "passthrough");
   return topLimit !== null ? `${sql} LIMIT ${topLimit}` : sql;
 }
 
@@ -75,7 +78,7 @@ export async function refreshDerivedTable(derivedTableId: string) {
   await prisma.derivedTable.update({ where: { id: derivedTableId }, data: { lastStatus: "running" } });
 
   try {
-    const querySql = await prepareDerivedSql(dt.querySql, conn.provider);
+    const querySql = await prepareDerivedSql(dt.querySql, conn.provider, conn);
     // Cria tabela staging como resultado do querySql (sintaxe depende do provider)
     if (conn.provider === "sqlserver") {
       const qSchema = `[${schema}]`;

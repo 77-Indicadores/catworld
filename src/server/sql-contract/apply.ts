@@ -153,6 +153,11 @@ export async function runWithContract<T>(
 /** Forma canonica so para comparar: o gerador acrescenta ASC e reformata espacos/caixa sem mudar o sentido. */
 const canon = (sql: string) => sql.replace(/\s+ASC\b/gi, "").replace(/\s+/g, "").toLowerCase();
 
+/** Registra um evento do contrato (contador + log), sem dados. */
+export function logContractEvent(kind: string, path: string, sql: string, message?: string) {
+  log(kind, path, sql, message);
+}
+
 /** Log sem dados: literais viram '?', SQL truncado, hash para agrupar iguais. */
 function log(kind: string, path: string, sql: string, message?: string) {
   const shape = mapOutsideLiterals(sql, (s) => s).replace(/N?'(?:[^']|'')*'/g, "'?'").replace(/\s+/g, " ").trim();
