@@ -144,53 +144,105 @@ class CatworldClient:
     def rows(self, table_id: str, limit: int = 100):
         return self._request("GET", f"/api/v1/tables/{table_id}/rows", params={"limit": limit})
 
-    def changes(self, table_id: str, since: str | _datetime.datetime | None = None, limit: int = 1000, follow: bool = True) -> dict:
+    @staticmethod
+    def _since_param(since: str | _datetime.datetime) -> str:
+        """`since` como ISO-8601 em UTC. datetime sem fuso e tratado como UTC (nunca como hora local do cliente)."""
+        if isinstance(since, _datetime.datetime):
+            if since.tzinfo is not None:
+                since = since.astimezone(_datetime.timezone.utc).replace(tzinfo=None)
+            return since.isoformat(timespec="microseconds") + "Z"
+        return since
+
+    @staticmethod
+    def _row_fingerprint(stamp: str, row: Any) -> str:
+        digest = _hashlib.sha1(_json.dumps(row, sort_keys=True, default=str, ensure_ascii=False).encode("utf-8")).hexdigest()
+        return f"{stamp}|{digest}"
+
+    def changes(
+        self,
+        table_id: str,
+        since: str | _datetime.datetime | None = None,
+        limit: int = 1000,
+        follow: bool = True,
+        seen: list[str] | None = None,
+    ) -> dict:
         """Puxa so o que mudou numa tabela extract desde `since` (ISO string ou datetime).
 
-        Retorna {"rows": [...], "removedKeys": [...] | None, "nextSince": str}.
+        Retorna {"rows": [...], "removedKeys": [...] | None, "nextSince": str, "seen": [...]}.
         `removedKeys` e None se a fonte nunca teve upsert habilitado (sem keyColumn,
-        sem como saber o que foi excluido). Guarde `nextSince` e passe como `since` na
-        proxima chamada para continuar de onde parou — se nada mudou, `nextSince` volta
+        sem como saber o que foi excluido). Guarde `nextSince` e `seen` e passe-os na
+        proxima chamada (`since=nextSince, seen=seen`) — se nada mudou, `nextSince` volta
         igual ao `since` recebido, entao e seguro chamar em loop (polling).
 
-        `since=None` na primeira chamada busca a tabela inteira como baseline (ainda
-        sujeita a `limit`); use o `nextSince` retornado para as chamadas seguintes.
+        `since=None` na primeira chamada busca a tabela inteira como baseline, PAGINADA: com
+        `follow=True` (padrao) o SDK segue `hasMore`/`nextCursor` ate esgotar. Sem `follow`,
+        confira `hasMore` no retorno antes de usar `nextSince`.
 
-        `follow=True` (padrao): se o servidor indicar que ha mais paginas (`hasMore`), segue
-        o cursor ate esgotar e devolve TODAS as mudancas (o resultado pode passar de `limit`).
-        Sem isso, lotes de sync maiores que `limit` perdiam linhas em silencio.
+        Janela de seguranca: o servidor recua o `nextSince` alguns minutos (uma transacao lenta
+        pode commitar depois de outra mais nova). Linhas dentro da janela voltam na chamada
+        seguinte; o SDK as remove por impressao digital (carimbo + conteudo da linha) usando `seen`.
+        `removedKeys` e idempotente: aplicar a mesma exclusao duas vezes e inofensivo.
+
+        `since` sem fuso (ou datetime ingenuo) e UTC; os valores de `nextSince` sao sempre UTC (`...Z`)
+        com microssegundos — guarde-os como texto, sem converter para datetime com milissegundos.
         """
-        params: dict[str, Any] = {"limit": limit}
+        base: dict[str, Any] = {"limit": limit, "stamps": 1}
+        params = dict(base)
         if since is not None:
-            params["since"] = since.isoformat() if isinstance(since, _datetime.datetime) else since
-        body = self._request_full("GET", f"/api/v1/tables/{table_id}/rows", params=params)
-        meta = body.get("meta") or {}
-        rows: list[Any] = list(body.get("data") or [])
-        removed = meta.get("removedKeys")
-        next_since = meta.get("nextSince")
+            params["since"] = self._since_param(since)
+        original_since = params.get("since")
+
+        rows: list[Any] = []
+        removed: list[Any] | None = None
+        next_since: str | None = None
+        fingerprints: dict[str, None] = {fp: None for fp in (seen or [])}
+        delivered: dict[str, None] = {}
+        has_more = False
 
         pages = 0
-        while follow and meta.get("hasMore") and "since" in params and pages < 100_000:
-            pages += 1
-            page_params: dict[str, Any] = {"limit": limit}
-            if meta.get("nextCursor"):
-                page_params["since"] = params["since"]
-                page_params["cursor"] = meta["nextCursor"]
-            elif meta.get("nextSince") and meta["nextSince"] != page_params.get("since", params["since"]):
-                page_params["since"] = meta["nextSince"]
-            else:
-                break  # sem cursor e sem progresso possivel: nao entra em laco
-            body = self._request_full("GET", f"/api/v1/tables/{table_id}/rows", params=page_params)
+        while True:
+            body = self._request_full("GET", f"/api/v1/tables/{table_id}/rows", params=params)
             meta = body.get("meta") or {}
-            rows.extend(body.get("data") or [])
+            data = body.get("data") or []
+            stamps = meta.get("rowStamps")
+            for i, row in enumerate(data):
+                if isinstance(stamps, list) and i < len(stamps):
+                    fp = self._row_fingerprint(str(stamps[i]), row)
+                    if fp in fingerprints:
+                        continue  # ja entregue numa chamada anterior (linha dentro da janela de seguranca)
+                    fingerprints[fp] = None
+                    delivered[fp] = None
+                rows.append(row)
             if meta.get("removedKeys"):
                 removed = (removed or []) + list(meta["removedKeys"])
+            elif removed is None and meta.get("removedKeys") is not None:
+                removed = []
             next_since = meta.get("nextSince") or next_since
-            params["since"] = page_params["since"] if "cursor" not in page_params else params["since"]
+            has_more = bool(meta.get("hasMore"))
+
+            pages += 1
+            if not (follow and has_more) or pages >= 100_000:
+                break
+            if meta.get("nextCursor"):
+                params = dict(base)
+                if original_since is not None:
+                    params["since"] = original_since
+                params["cursor"] = meta["nextCursor"]
+            elif meta.get("nextSince") and meta["nextSince"] != params.get("since"):
+                params = dict(base)
+                params["since"] = meta["nextSince"]
+                original_since = params["since"]
+            else:
+                break  # sem cursor e sem progresso possivel: nao entra em laco
+
+        # guarda so as impressoes digitais que ainda podem voltar (carimbo >= nextSince)
+        keep = [fp for fp in fingerprints if next_since is None or fp.split("|", 1)[0] >= next_since]
         return {
             "rows": rows,
             "removedKeys": removed,
             "nextSince": next_since,
+            "hasMore": has_more,
+            "seen": keep,
         }
 
     def source_info(self, source_id: str):
