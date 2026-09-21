@@ -33,6 +33,8 @@ export interface ContractTranslation {
   sql: string;
   /** TOP N do SELECT mais externo (nao emitido como LIMIT — quem pagina decide). */
   topLimit: number | null;
+  /** Avisos que acompanham o resultado (ex.: `LEGACY_TRANSLATION` quando o modo fallback usa o tradutor antigo). */
+  warnings?: string[];
 }
 
 const parser = new Parser();
