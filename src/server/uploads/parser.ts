@@ -4,9 +4,8 @@ import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import type { Stream } from "node:stream";
-import { parse } from "csv-parse";
-import iconv from "iconv-lite";
 import ExcelJS from "exceljs";
+import { detectFileHints as detectHints, csvRecords, CsvFormatError, strictDecodeStream, normalizeEncoding, type FileHints } from "./csv-detect";
 import { sqlIdentifier } from "@/server/security/naming";
 import { hasDateTimePart, dateCandidates, isOrderAmbiguous, type DateOrder } from "./date-normalize";
 import { accumulateDecimal, decideDecimal, newDecimalAcc, type DecimalAcc, type DecSep } from "./decimal-format";
@@ -22,28 +21,10 @@ export async function previewFile(path:string):Promise<FilePreview>{
  const ext=extname(path).toLowerCase(); if(ext===".csv")return previewCsv(path); if(ext===".xlsx")return previewXlsx(path); if(ext===".xls")throw new Error("XLS legado deve ser convertido pelo worker antes da leitura"); throw new Error("Formato não suportado. Use CSV, XLSX ou XLS");
 }
 
-// P4: Read first 64 KB once to detect both encoding and separator
-async function detectFileHints(path:string):Promise<{encoding:string;separator:string}>{
- const fd=await import("node:fs/promises");
- const handle=await fd.open(path,"r");
- const buffer=Buffer.alloc(65536);
- const{bytesRead}=await handle.read(buffer,0,buffer.length,0);
- await handle.close();
- const sample=buffer.subarray(0,bytesRead);
-
- let encoding:string;
- if(sample[0]===0xef&&sample[1]===0xbb&&sample[2]===0xbf){encoding="utf8"}
- else{try{new TextDecoder("utf-8",{fatal:true}).decode(sample);encoding="utf8"}catch{encoding="win1252"}}
-
- const text=iconv.decode(sample,encoding);
- const candidates=[";",",","\t"];
- const separator=candidates.map(c=>({c,score:text.split(/\r?\n/).slice(0,10).reduce((n,l)=>n+(l.split(c).length-1),0)})).sort((a,b)=>b.score-a.score)[0].c;
-
- return{encoding,separator};
-}
-
+// Encoding, dialeto e leitura estrita de registros vivem em csv-detect.ts (arquivo inteiro, sem U+FFFD em silêncio, separador sem adivinhar).
+const detectFileHints=detectHints;
 function csvPipeStream(source:NodeJS.ReadableStream,encoding:string,separator:string):AsyncIterable<string[]>{
- return source.pipe(iconv.decodeStream(encoding)).pipe(parse({delimiter:separator,bom:true,relax_column_count:true,relax_quotes:true,skip_empty_lines:true})) as AsyncIterable<string[]>;
+ return csvRecords(source,encoding,separator);
 }
 
 async function previewCsv(path:string){
@@ -213,29 +194,34 @@ export async function* rowsFromFile(
  const ext=typeof source==="string"?extname(source).toLowerCase():(opts?.ext??".csv");
 
  if(ext===".csv"){
-  // Fast path: file on disk + UTF-8 encoding → use DuckDB (11× faster than csv-parse).
-  // DuckDB CSV reader only supports UTF-8/UTF-16 — non-UTF-8 files go directly to csv-parse.
+  // Fast path: file on disk → DuckDB com o dialeto JÁ DETECTADO (auto_detect=false): não pode discordar do preview.
+  // DuckDB só lê UTF-8: outros encodings (UTF-16, Windows-1252) são transcodificados (estrito) para um arquivo temporário.
+  // csv-parse é o último recurso (e o único caminho para fim de linha misto).
   if(typeof source==="string"){
-   const fileEncoding=opts?.encoding??((await detectFileHints(source)).encoding);
-   // For non-UTF-8 files: transcode to a temp UTF-8 file so DuckDB (UTF-8 only) can read it.
-   // This gives DuckDB speed even for win1252/latin1 files — csv-parse is the last resort.
-   const {separator} = await detectFileHints(source);
+   const hints:FileHints=await detectFileHints(source);
+   const fileEncoding=opts?.encoding?normalizeEncoding(opts.encoding):hints.encoding;
+   const separator=hints.separator;
    if(stats){stats.fileEncoding=fileEncoding;stats.fileSeparator=separator}
-   if(fileEncoding!=="utf8"){
+   const dialect={separator,headerFields:hints.headerFields,skipLines:hints.sepDirective?1:0};
+   if(hints.mixedEol){
+    // CRLF, LF e CR no mesmo arquivo: o csv-parse trata os tres como fim de registro; o DuckDB nao e usado (nao pode fundir registros)
+    if(stats){stats.parseMethod="csv-parse";stats.fallbackReason="mixed-eol"}
+   }else if(fileEncoding!=="utf8"){
     const tmpDir=await mkdtemp(join(tmpdir(),"cw-duckdb-"));
     const tmpFile=join(tmpDir,"converted.csv");
     let usedDuckDB=false;
     try{
-     await pipeline(createReadStream(source),iconv.decodeStream(fileEncoding),createWriteStream(tmpFile,{encoding:"utf8"}));
+     await pipeline(createReadStream(source),strictDecodeStream(fileEncoding),createWriteStream(tmpFile,{encoding:"utf8"}));
      const{rowsFromCsvDuckDB}=await import("./parser-duckdb");
      if(stats)stats.parseMethod="duckdb";
      const t0=Date.now();
-     yield* neverFallBackMidStream(rowsFromCsvDuckDB(tmpFile,columns));
+     yield* neverFallBackMidStream(rowsFromCsvDuckDB(tmpFile,columns,dialect));
      usedDuckDB=true;
      if(stats)stats.parseMs=Date.now()-t0;
     }catch(e){
      if(e instanceof DuckDbMidStreamError)throw e; // já entregou linhas: cair no csv-parse duplicaria tudo
-     if(!usedDuckDB){if(stats){stats.parseMethod="csv-parse";stats.fallbackReason=`duckdb-failed: ${e instanceof Error?e.message.slice(0,200):String(e)}`}console.warn("[parser] DuckDB (non-UTF8 transcoded) falhou, usando csv-parse:",e instanceof Error?e.message:e);}
+     if(e instanceof CsvFormatError)throw e;       // byte inválido no encoding: nunca "consertar" com caractere de substituição
+     if(!usedDuckDB){if(stats){stats.parseMethod="csv-parse";stats.fallbackReason=`duckdb-failed: ${e instanceof Error?e.message.slice(0,200):String(e)}`}console.warn("[parser] DuckDB (transcodificado) falhou, usando csv-parse:",e instanceof Error?e.message:e);}
      else throw e;
     }finally{
      await rm(tmpDir,{recursive:true,force:true}).catch(()=>{});
@@ -246,7 +232,7 @@ export async function* rowsFromFile(
      const{rowsFromCsvDuckDB}=await import("./parser-duckdb");
      if(stats)stats.parseMethod="duckdb";
      const t0=Date.now();
-     yield* neverFallBackMidStream(rowsFromCsvDuckDB(source,columns));
+     yield* neverFallBackMidStream(rowsFromCsvDuckDB(source,columns,dialect));
      if(stats)stats.parseMs=Date.now()-t0;
      return;
     }catch(e){
@@ -255,7 +241,7 @@ export async function* rowsFromFile(
      if(stats){stats.parseMethod="csv-parse";stats.fallbackReason=`duckdb-failed: ${e instanceof Error?e.message.slice(0,200):String(e)}`}
     }
    }
-   // csv-parse fallback (DuckDB failed or unavailable)
+   // csv-parse (DuckDB falhou ou não se aplica): leitura estrita — encoding sem substituição, linha com campos a mais = erro
    if(stats&&!stats.parseMethod)stats.parseMethod="csv-parse";
    const t0csv=Date.now();
    const readable=createReadStream(source);
