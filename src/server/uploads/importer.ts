@@ -8,6 +8,7 @@ import { sqlPool } from "@/server/azure/sql";
 import { getStoragePool } from "@/server/storage/pool";
 import { getStorageConnection, type ColDef } from "@/server/storage/connection";
 import { quoteIdentifier, sqlIdentifier } from "@/server/security/naming";
+import { isStagingPartial } from "./staging-guard";
 import { previewFile, rowsFromFile, type FilePreview, type ParsedColumn, type RowsFromFileOpts, type ParseStats } from "./parser";
 import { env } from "@/server/env";
 import { normalizeDateLike } from "./date-normalize";
@@ -313,8 +314,8 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
     // incomplete from a mid-stream crash — drop it and re-import from scratch. Trusting a partial
     // staging would mark the upload COMPLETED with fewer rows than the file actually contains.
     const stagingRowCount = await checkStagingHasData(pool, schema, stage);
-    const isFullReplaceMode = (upload.mode === "replace" || !targetExists) && !deltaReplace && !phase2;
-    const stagingIsPartial = stagingRowCount > 0 && isFullReplaceMode && knownRowCount > 0 && stagingRowCount < knownRowCount;
+    // Vale também para o replace por diferença (deltaReplace): sem phase2 o staging tem o arquivo inteiro (ver staging-guard.ts).
+    const stagingIsPartial = isStagingPartial({ stagingRowCount, knownRowCount, mode: upload.mode, targetExists, phase2 });
 
     if (stagingIsPartial) {
       console.warn("[importUpload] staging parcial detectado (%d/%d linhas) — descartando e reimportando upload=%s", stagingRowCount, knownRowCount, uploadId);
