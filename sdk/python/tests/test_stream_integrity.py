@@ -68,3 +68,20 @@ def test_iter_query_truncated_flag_drives_paging():
     c._resolve_live_source_for_query = lambda *a, **k: None  # type: ignore[method-assign]
     pages = list(c.iter_query("SELECT a FROM t", stream=False))
     assert calls == [0, 3] and len(pages) == 2
+
+
+def test_iter_query_empty_result_yields_one_empty_page_with_metadata():
+    c = _client(_nd({"__columns__": ["a"]}, {"__done__": True, "rowCount": 0, "executionTimeMs": 7}))
+    pages = list(c.iter_query("SELECT a FROM t"))
+    assert len(pages) == 1
+    assert pages[0].rows == [] and pages[0].columns == ["a"]
+    assert pages[0]["executionTimeMs"] == 7
+
+
+def test_iter_query_last_page_carries_done_metadata():
+    rows = [{"a": i} for i in range(10_005)]
+    c = _client(_nd({"__columns__": ["a"]}, *rows, {"__done__": True, "rowCount": 10_005, "executionTimeMs": 9, "truncated": False}))
+    pages = list(c.iter_query("SELECT a FROM t"))
+    assert [len(p.rows) for p in pages] == [10_000, 5]
+    assert pages[-1]["executionTimeMs"] == 9 and pages[-1]["truncated"] is False
+    assert next(iter(c.iter_query("SELECT a FROM t"))).rows[0]["a"] == 0

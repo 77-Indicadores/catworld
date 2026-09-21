@@ -165,6 +165,7 @@ class CatworldClient:
         limit: int = 1000,
         follow: bool = True,
         seen: list[str] | None = None,
+        seen_limit: int = 100_000,
     ) -> dict:
         """Puxa so o que mudou numa tabela extract desde `since` (ISO string ou datetime).
 
@@ -183,6 +184,12 @@ class CatworldClient:
         seguinte; o SDK as remove por impressao digital (carimbo + conteudo da linha) usando `seen`.
         `removedKeys` e idempotente: aplicar a mesma exclusao duas vezes e inofensivo.
 
+        `seen` guarda uma impressao digital POR OCORRENCIA: linhas identicas com o mesmo carimbo (comuns em tabelas
+        sem chave) entram repetidas, e a deduplicacao e por multiplicidade (entrega max(0, ocorrencias_agora -
+        entregues_antes)); nunca descarta uma linha que ainda nao foi entregue. Acima de `seen_limit` entradas o SDK
+        compacta os carimbos maiores em contadores `carimbo|#N` (dedupe so pelo carimbo: as N primeiras linhas daquele
+        carimbo, na ordem do servidor, contam como entregues). Listas antigas (uma entrada por linha) continuam validas.
+
         `since` sem fuso (ou datetime ingenuo) e UTC; os valores de `nextSince` sao sempre UTC (`...Z`)
         com microssegundos — guarde-os como texto, sem converter para datetime com milissegundos.
         """
@@ -195,8 +202,17 @@ class CatworldClient:
         rows: list[Any] = []
         removed: list[Any] | None = None
         next_since: str | None = None
-        fingerprints: dict[str, None] = {fp: None for fp in (seen or [])}
-        delivered: dict[str, None] = {}
+        # multiplicidade: quantas vezes cada impressao digital ja foi entregue; `carimbo|#N` = N linhas do carimbo (compactado)
+        before: dict[str, int] = {}
+        stamp_before: dict[str, int] = {}
+        for entry in seen or []:
+            st, _, digest = entry.partition("|")
+            if digest.startswith("#") and digest[1:].isdigit():
+                stamp_before[st] = stamp_before.get(st, 0) + int(digest[1:])
+            else:
+                before[entry] = before.get(entry, 0) + 1
+        occ: dict[str, int] = {}
+        stamp_occ: dict[str, int] = {}
         has_more = False
 
         pages = 0
@@ -207,11 +223,16 @@ class CatworldClient:
             stamps = meta.get("rowStamps")
             for i, row in enumerate(data):
                 if isinstance(stamps, list) and i < len(stamps):
-                    fp = self._row_fingerprint(str(stamps[i]), row)
-                    if fp in fingerprints:
-                        continue  # ja entregue numa chamada anterior (linha dentro da janela de seguranca)
-                    fingerprints[fp] = None
-                    delivered[fp] = None
+                    stamp = str(stamps[i])
+                    if stamp in stamp_before:
+                        stamp_occ[stamp] = stamp_occ.get(stamp, 0) + 1
+                        if stamp_occ[stamp] <= stamp_before[stamp]:
+                            continue  # ja entregue (contador compactado do carimbo)
+                    else:
+                        fp = self._row_fingerprint(stamp, row)
+                        occ[fp] = occ.get(fp, 0) + 1
+                        if occ[fp] <= before.get(fp, 0):
+                            continue  # ja entregue numa chamada anterior (linha dentro da janela de seguranca)
                 rows.append(row)
             if meta.get("removedKeys"):
                 removed = (removed or []) + list(meta["removedKeys"])
@@ -236,7 +257,31 @@ class CatworldClient:
                 break  # sem cursor e sem progresso possivel: nao entra em laco
 
         # guarda so as impressoes digitais que ainda podem voltar (carimbo >= nextSince)
-        keep = [fp for fp in fingerprints if next_since is None or fp.split("|", 1)[0] >= next_since]
+        def alive(st: str) -> bool:
+            return next_since is None or st >= next_since
+
+        counts: dict[str, int] = {}
+        for fp in set(before) | set(occ):
+            if alive(fp.split("|", 1)[0]):
+                counts[fp] = max(before.get(fp, 0), occ.get(fp, 0))
+        stamp_counts = {st: max(stamp_before[st], stamp_occ.get(st, 0)) for st in stamp_before if alive(st)}
+        total = sum(counts.values()) + len(stamp_counts)
+        if total > seen_limit:
+            # compacta os carimbos com mais linhas primeiro, ate caber
+            per_stamp: dict[str, int] = {}
+            for fp, c in counts.items():
+                st = fp.split("|", 1)[0]
+                per_stamp[st] = per_stamp.get(st, 0) + c
+            for st in sorted(per_stamp, key=lambda k: per_stamp[k], reverse=True):
+                if total <= seen_limit:
+                    break
+                dropped = [fp for fp in counts if fp.split("|", 1)[0] == st]
+                total -= sum(counts[fp] for fp in dropped)
+                for fp in dropped:
+                    del counts[fp]
+                stamp_counts[st] = stamp_counts.get(st, 0) + per_stamp[st]
+                total += 1
+        keep = [fp for fp, c in counts.items() for _ in range(c)] + [f"{st}|#{c}" for st, c in stamp_counts.items()]
         return {
             "rows": rows,
             "removedKeys": removed,
@@ -490,16 +535,30 @@ class CatworldClient:
             logger.info("Executando query em modo streaming em lotes [%s]", context)
             columns: list[str] = []
             batch: list[dict[str, Any]] = []
+            pending: QueryResult | None = None  # ultimo lote cheio: retido ate saber se e o ultimo (recebe os metadados do __done__)
+            done: dict[str, Any] = {}
             for kind, value in self._stream_events(payload):
                 if kind == "columns":
                     columns = value
                 elif kind == "row":
                     batch.append(value)
                     if len(batch) >= _PAGE_SIZE:
-                        yield QueryResult({"rows": batch, "columns": columns, "rowCount": len(batch)})
+                        if pending is not None:
+                            yield pending
+                        pending = QueryResult({"rows": batch, "columns": columns, "rowCount": len(batch)})
                         batch = []
-            if batch or not columns:
-                yield QueryResult({"rows": batch, "columns": columns, "rowCount": len(batch)})
+                elif kind == "done" and isinstance(value, dict):
+                    done = value
+            if batch or pending is None:
+                if pending is not None:
+                    yield pending
+                last = QueryResult({"rows": batch, "columns": columns, "rowCount": len(batch)})
+            else:
+                last = pending
+            for key in ("executionTimeMs", "truncated"):
+                if key in done:
+                    last[key] = done[key]
+            yield last  # sempre pelo menos uma pagina (vazia se nao houve linhas)
             return
 
         offset = 0
