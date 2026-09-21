@@ -81,7 +81,8 @@ d("import SQL Server: atomicidade, integridade e fidelidade (real)", () => {
       await prisma.upload.create({ data: {
         id, datasetId, originalFilename: `${table}.csv`, blobName: `rel/${id}.csv`, sizeBytes: 1n, mode, keyColumn: keyColumn ?? null,
         fullSnapshot: opts.fullSnapshot ?? false, status: "IMPORTING", rowCount: BigInt(opts.rowCount ?? prev.rowCount),
-        previewJson: JSON.stringify(prev), mappingJson: JSON.stringify(prev.columns),
+        // preview "do servidor" (source): e a contagem que o gate aceita como esperada; opts.rowCount simula uma origem com mais linhas
+        previewJson: JSON.stringify({ ...prev, source: "server", rowCount: opts.rowCount ?? prev.rowCount }), mappingJson: JSON.stringify(prev.columns),
       } });
     }
     return importUpload(id, path);

@@ -12,6 +12,7 @@ import { ApiError, handleApiError, ok } from "@/server/http";
 import { uploadVisibilityWhere } from "@/server/uploads/access";
 import { assertTableInDataset } from "@/server/uploads/actions";
 import { uploadTarget } from "@/server/storage";
+import { stripServerMark } from "@/server/uploads/expected-rows";
 import { normalizeTypeOverride } from "@/server/uploads/type-override";
 import { checkRateLimit } from "@/server/query/protection";
 
@@ -98,7 +99,8 @@ export async function POST(r: NextRequest) {
         mode: input.mode,
         keyColumn: input.keyColumn ?? null,
         fullSnapshot: input.fullSnapshot ?? false,
-        previewJson: input.previewJson ?? null,
+        // O preview enviado pelo cliente nunca vale como "feito pelo servidor" (source): o gate de integridade so confia na contagem do servidor.
+        previewJson: input.previewJson ? stripServerMark(input.previewJson) : null,
         mappingJson: input.mappingJson ?? null,
         typeOverridesJson: input.typeOverrides ? JSON.stringify(input.typeOverrides) : null,
         rowCount: input.rowCount != null ? BigInt(input.rowCount) : null,

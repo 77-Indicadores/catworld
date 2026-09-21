@@ -27,6 +27,7 @@ import { auditIntegrity, evaluationDetail, recordLedger } from "@/server/integri
 import { PG_MARKER_INSERT, PG_MARKER_SELECT, ensurePgMarker } from "./applied-marker";
 import { incompatibleColumns, incompatibleError } from "./type-compat";
 import { loadPrevMapping, resolveAgainstExisting } from "./existing-types";
+import { resolveExpectedRows, type ExpectedRows } from "./expected-rows";
 
 // ─── Type conversion ──────────────────────────────────────────────────────────
 
@@ -306,16 +307,22 @@ async function importUploadPgLocked(
   // FAILED = não troca nada: a tabela anterior continua no ar, completa.
   let evaluation: Evaluation = { verdict: "OK", reasons: [] };
   let prevRowsForLedger = 0;
+  let expected: ExpectedRows | null = null;
   if (!alreadyApplied) {
     // Linhas da versão anterior: pelo metadado da tabela DESTINO (o upload novo nem sempre traz `tableId`); sem metadado, conta a tabela física.
     const meta = upload.table ?? await prisma.datasetTable.findUnique({ where: { datasetId_sqlName: { datasetId: upload.dataset.id, sqlName: tableName } }, select: { rowCount: true } });
     const prevRows = targetExists ? Number(meta?.rowCount ?? (await conn.countRows(schema, tableName))) : 0;
     prevRowsForLedger = prevRows;
     const cfg = await getIntegritySettings();
+    // So a contagem do SERVIDOR e prova (o rowCount/preview do navegador nao calibra o gate).
+    expected = await resolveExpectedRows(upload, source);
+    if (expected.clientDisagrees) console.warn("[importUploadPg:integrity] contagem do cliente (%s) difere da do servidor (%d): vale a do servidor upload=%s", expected.clientRowCount, expected.expected, uploadId);
     evaluation = evaluateLoad({
       kind: "upload",
       fullState: upload.mode === "replace" || !targetExists || (upload.mode === "upsert" && upload.fullSnapshot),
-      expectedRows: knownRowCount,
+      expectedRows: expected.expected,
+      expectedUnverified: expected.source === "unavailable",
+      clientCountDisagrees: expected.clientDisagrees,
       parsedRows: total,
       stagedRows: total,
       prevRows: prevRows,
@@ -323,7 +330,7 @@ async function importUploadPgLocked(
     }, cfg);
     if (evaluation.verdict === "FAILED") {
       await conn.execute(`DROP TABLE IF EXISTS ${qStaging}`).catch(() => undefined);
-      throw new IntegrityError(evaluation, { expectedRows: knownRowCount, parsedRows: total, prevRows });
+      throw new IntegrityError(evaluation, { expectedRows: expected.expected, parsedRows: total, prevRows });
     }
     if (evaluation.verdict === "SUSPECT") console.warn("[importUploadPg:integrity] SUSPECT upload=%s %s", uploadId, JSON.stringify(evaluation.reasons));
   }
@@ -486,8 +493,8 @@ async function importUploadPgLocked(
   // Livro de integridade FORA da transacao dos metadados: uma falha aqui (recordLedger nunca lanca) nao pode desfazer uma carga ja publicada.
   await recordLedger({
     kind: "upload", outcome: "COMPLETED", verdict: evaluation.verdict, datasetId: upload.dataset!.id, tableId: table.id, uploadId: upload.id,
-    tableName, mode: upload.mode, expectedRows: knownRowCount, parsedRows: total, physicalRows: Number(actual), prevRows: prevRowsForLedger,
-    detail: evaluationDetail(evaluation, { importMethod: alreadyApplied ? "already-applied" : "pg-unnest-batch", storage: "postgres" }),
+    tableName, mode: upload.mode, expectedRows: expected?.expected ?? null, parsedRows: total, physicalRows: Number(actual), prevRows: prevRowsForLedger,
+    detail: evaluationDetail(evaluation, { importMethod: alreadyApplied ? "already-applied" : "pg-unnest-batch", storage: "postgres", ...(expected ? { expectedSource: expected.source, clientRowCount: expected.clientRowCount } : {}) }),
   });
 
   return { tableId: table.id, inserted, updated, rowCount: actual };

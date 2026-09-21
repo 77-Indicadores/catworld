@@ -63,7 +63,7 @@ d("import Postgres: atomicidade e integridade (real)", () => {
 
   async function run(
     path: string, table: string, mode: "replace" | "append" | "upsert" = "replace", keyColumn?: string,
-    opts: { rowCount?: number; id?: string; fullSnapshot?: boolean } = {},
+    opts: { rowCount?: number; id?: string; fullSnapshot?: boolean; clientPreview?: boolean } = {},
   ) {
     const prev = await previewFile(path);
     const id = opts.id ?? randomUUID();
@@ -73,7 +73,9 @@ d("import Postgres: atomicidade e integridade (real)", () => {
         data: {
           id, datasetId, originalFilename: `${table}.csv`, blobName: `rel/${id}.csv`, sizeBytes: 1n, mode, keyColumn: keyColumn ?? null,
           fullSnapshot: opts.fullSnapshot ?? false,
-          status: "IMPORTING", rowCount: BigInt(opts.rowCount ?? prev.rowCount), previewJson: JSON.stringify(prev), mappingJson: JSON.stringify(prev.columns),
+          status: "IMPORTING", rowCount: BigInt(opts.rowCount ?? prev.rowCount),
+          // preview "do servidor" (source): e a contagem que o gate aceita como esperada; opts.rowCount simula uma origem com mais linhas
+          previewJson: JSON.stringify({ ...prev, source: opts.clientPreview ? undefined : "server", rowCount: opts.rowCount ?? prev.rowCount }), mappingJson: JSON.stringify(prev.columns),
         },
       });
     }
@@ -282,6 +284,23 @@ d("import Postgres: atomicidade e integridade (real)", () => {
     expect(await fingerprint("t_pipe")).toBe(before);
     const stages = (await pool.query(`SELECT count(*)::int n FROM information_schema.tables WHERE table_schema=$1 AND table_name = $2`, [SCHEMA, `cw_stage_${id.replaceAll("-", "").slice(0, 20)}`])).rows[0].n;
     expect(stages).toBe(0);                                        // sem staging órfã
+  });
+
+  it("#2 INTEGRIDADE: o rowCount/preview do CLIENTE nao calibra o gate; vale a contagem do servidor (e a divergencia marca SUSPECT)", async () => {
+    // cliente diz 5000 linhas, o arquivo tem 800: antes o import era BARRADO pelo numero do cliente (ou, com cliente menor, deixava passar)
+    const id = randomUUID();
+    const r = await run(file("cl1.csv", 800, "v1"), "t_client_count", "replace", undefined, { rowCount: 5000, clientPreview: true, id });
+    expect(r.rowCount).toBe(800n);
+    const led = await prisma.$queryRawUnsafe<{ verdict: string; expected_rows: bigint; detail_json: string }[]>(`SELECT verdict, expected_rows, detail_json FROM cw_load_ledger WHERE upload_id = $1::uuid`, id);
+    expect(led[0]!.verdict).toBe("SUSPECT");
+    expect(Number(led[0]!.expected_rows)).toBe(800);
+    expect(JSON.parse(led[0]!.detail_json)).toMatchObject({ expectedSource: "server-count", clientRowCount: 5000 });
+    expect(JSON.parse(led[0]!.detail_json).reasons.map((x: { code: string }) => x.code)).toEqual(["CLIENT_COUNT_MISMATCH"]);
+    // cliente MENOR que o arquivo nao esconde uma carga truncada: o servidor conta o arquivo (aqui completo => OK, sem motivo)
+    const id2 = randomUUID();
+    await run(file("cl2.csv", 500, "v1"), "t_client_count2", "replace", undefined, { rowCount: 10, clientPreview: true, id: id2 });
+    const led2 = await prisma.$queryRawUnsafe<{ expected_rows: bigint }[]>(`SELECT expected_rows FROM cw_load_ledger WHERE upload_id = $1::uuid`, id2);
+    expect(Number(led2[0]!.expected_rows)).toBe(500);
   });
 
   it("#5 LEDGER com falha NAO desfaz uma carga publicada (o livro e gravado depois da transacao)", async () => {

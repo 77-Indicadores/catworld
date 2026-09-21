@@ -15,7 +15,8 @@ import { rowTexts, isBlankRow } from "./xlsx-values";
 
 /** decimalSep/dateOrder: convenção da COLUNA decidida pelo arquivo inteiro (mapeamentos antigos não têm; ver decimal-format.ts e date-normalize.ts). *Ambiguous: ficou TEXT porque a convenção não pôde ser decidida. */
 export type ParsedColumn={originalName:string;sqlName:string;sqlType:string;nullable:boolean;decimalSep?:DecSep;decimalAmbiguous?:boolean;dateOrder?:DateOrder;dateAmbiguous?:boolean;decimalDigits?:number};
-export type FilePreview={columns:ParsedColumn[];rows:Record<string,unknown>[];rowCount:number;encoding:string;separator:string|null;sheetNames:string[]};
+/** `source:"server"`: o preview foi calculado pelo worker (a contagem vale como esperada no gate de integridade). Ausente = veio do cliente (navegador/SDK): nao e prova. */
+export type FilePreview={columns:ParsedColumn[];rows:Record<string,unknown>[];rowCount:number;encoding:string;separator:string|null;sheetNames:string[];source?:"server"};
 export type RowsFromFileOpts={encoding?:string;separator?:string;ext?:string};
 export type ParseStats={parseMethod?:"duckdb"|"csv-parse"|"xlsx"|"stream";parseMs?:number;fileEncoding?:string;fileSeparator?:string;fallbackReason?:string};
 
@@ -40,6 +41,22 @@ async function previewCsv(path:string){
  }
  const columns=columnsFromStats(headers,stats),objects=sampleRows.map(row=>Object.fromEntries(columns.map((c,i)=>[c.sqlName,row[i]??null])));
  return{columns,rows:objects,rowCount:count,encoding,separator,sheetNames:[]};
+}
+
+/**
+ * Contagem de linhas de dados do arquivo, independente do import (mesma regra do preview: cabecalho fora, linhas vazias fora), SEM inferir tipos.
+ * E a contagem "esperada" quando o preview nao foi feito pelo servidor (o preview do navegador nao e prova). null = formato sem contagem barata.
+ */
+export async function countDataRows(path:string):Promise<number|null>{
+ const ext=extname(path).toLowerCase();
+ if(ext===".csv"){
+  const{encoding,separator}=await detectFileHints(path);
+  let n=0,first=true;
+  for await(const _ of csvPipeStream(createReadStream(path),encoding,separator)){if(first){first=false;continue}n++}
+  return n;
+ }
+ if(ext===".xlsx")return (await previewXlsx(path)).rowCount;
+ return null;
 }
 
 // P6: ExcelJS.stream.xlsx.WorkbookReader (streaming) foi tentado aqui pra evitar

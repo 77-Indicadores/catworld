@@ -6,6 +6,7 @@ import { MSSQL_MARKER_INSERT, MSSQL_MARKER_SELECT, ensureMssqlMarker } from "./a
 import { canonicalAccepts, incompatibleColumns, incompatibleError, mssqlPhysicalToCanonical } from "./type-compat";
 import { isInternalColumn } from "@/server/storage/connection";
 import { loadPrevMapping, resolveAgainstExisting } from "./existing-types";
+import { resolveExpectedRows, type ExpectedRows } from "./expected-rows";
 import { extname } from "node:path";
 import sql from "mssql";
 import { prisma } from "@/server/db";
@@ -339,6 +340,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
     let total = 0, inserted = 0, updated = 0;
     let evaluation: Evaluation = { verdict: "OK", reasons: [] };
     let prevRowsForLedger = 0;
+    let expected: ExpectedRows | null = null;
     let lastProgressMs = Date.now();
     let actual = 0n;
     const reclassifiedCols: string[] = [];
@@ -416,11 +418,16 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
           const meta = upload.table ?? await prisma.datasetTable.findUnique({ where: { datasetId_sqlName: { datasetId: upload.dataset!.id, sqlName: tableName } }, select: { rowCount: true } });
           const prevRows = targetExists ? Number(meta?.rowCount ?? (await storageConn.countRows(schema, tableName))) : 0;
           prevRowsForLedger = prevRows;
+          // So a contagem do SERVIDOR e prova (o rowCount/preview do navegador nao calibra o gate).
+          expected = await resolveExpectedRows(upload, source);
+          if (expected.clientDisagrees) console.warn("[importUpload:integrity] contagem do cliente (%s) difere da do servidor (%d): vale a do servidor upload=%s", expected.clientRowCount, expected.expected, uploadId);
           evaluation = evaluateLoad({
             kind: "upload",
             fullState: !phase2 && (upload.mode === "replace" || !targetExists || (upload.mode === "upsert" && upload.fullSnapshot)),
             deltaOnly: phase2,
-            expectedRows: knownRowCount,
+            expectedRows: expected.expected,
+            expectedUnverified: expected.source === "unavailable",
+            clientCountDisagrees: expected.clientDisagrees,
             parsedRows: total,
             stagedRows: total,
             prevRows,
@@ -428,7 +435,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
           }, await getIntegritySettings());
           if (evaluation.verdict === "FAILED") {
             await writePool.request().query(`IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL DROP TABLE ${staging}`).catch(() => undefined);
-            throw new IntegrityError(evaluation, { expectedRows: knownRowCount, parsedRows: total, prevRows });
+            throw new IntegrityError(evaluation, { expectedRows: expected.expected, parsedRows: total, prevRows });
           }
           if (evaluation.verdict === "SUSPECT") console.warn("[importUpload:integrity] SUSPECT upload=%s %s", uploadId, JSON.stringify(evaluation.reasons));
         }
@@ -658,8 +665,8 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
       // Livro de integridade FORA da transacao dos metadados: uma falha aqui (recordLedger nunca lanca) nao pode desfazer uma carga ja publicada.
       await recordLedger({
         kind: "upload", outcome: "COMPLETED", verdict: evaluation.verdict, datasetId: upload.dataset!.id, tableId: table.id, uploadId: upload.id,
-        tableName, mode: upload.mode, expectedRows: knownRowCount, parsedRows: total, physicalRows: Number(actual), prevRows: prevRowsForLedger,
-        detail: evaluationDetail(evaluation, { importMethod: phaseTimings.importMethod, parseMethod: parseStats.parseMethod, fallbackReason: parseStats.fallbackReason, storage: "sqlserver" }),
+        tableName, mode: upload.mode, expectedRows: expected?.expected ?? null, parsedRows: total, physicalRows: Number(actual), prevRows: prevRowsForLedger,
+        detail: evaluationDetail(evaluation, { ...(expected ? { expectedSource: expected.source, clientRowCount: expected.clientRowCount } : {}), importMethod: phaseTimings.importMethod, parseMethod: parseStats.parseMethod, fallbackReason: parseStats.fallbackReason, storage: "sqlserver" }),
       });
 
       return { tableId: table.id, inserted, updated, rowCount: actual };

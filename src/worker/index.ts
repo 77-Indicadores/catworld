@@ -370,7 +370,7 @@ async function work(job: Claimed) {
         if (ignored.length) console.warn("[worker] type overrides ignorados (coluna ou tipo inválido) upload=%s: %s", upload.id, ignored.join(", "));
         await prisma.upload.update({
           where: { id: upload.id },
-          data: { previewJson: JSON.stringify(preview), rowCount: BigInt(preview.rowCount) },
+          data: { previewJson: JSON.stringify({ ...preview, source: "server" }), rowCount: BigInt(preview.rowCount) },
         });
         // O upload esta em PREVIEWING aqui: o estado de origem padrao (PENDING_UPLOAD/FAILED) rejeitava com 409.
         await queueImportUploadAuto(upload.id, preview.columns, FROM_PREVIEW);
