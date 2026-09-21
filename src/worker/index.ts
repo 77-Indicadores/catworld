@@ -4,7 +4,7 @@ import { isSourceBusyError } from "./source-failure";
 import { getUploadFilesDays, purgeExpiredUploadFiles } from "@/server/uploads/file-retention";
 import { releaseAllImportLocks } from "@/server/db/import-lock";
 import { deleteInBatches } from "@/server/db/batched-delete";
-import { runWithCancelToken, watchJobStatus } from "@/server/db/job-cancel";
+import { JobCancelledError, runWithCancelToken, watchJobStatus } from "@/server/db/job-cancel";
 import { createWriteStream } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
@@ -25,7 +25,7 @@ import { pickInt } from "@/server/worker/config";
 import { auditJob } from "@/server/audit-request";
 import { startHeartbeat, currentRssMb, recordJobMetric, resolveJobTableId, writeWorkerLiveness, readWorkerLiveness, clearWorkerLiveness } from "./metrics";
 import { setDuckdbMemoryLimit } from "@/server/worker/runtime-limits";
-import { WorkerState, identityConflict, isPidAlive, listProfileNames, loadProfile, parseProfileArg, type WorkerProfileRow } from "./runtime";
+import { WorkerState, abortAndWait, identityConflict, isPidAlive, listProfileNames, loadProfile, parseProfileArg, type WorkerProfileRow } from "./runtime";
 
 // Camada 1 (auditoria): o processo do worker (tsx src/worker/index.ts) roda fora
 // do ciclo de vida do Next.js — instrumentation.ts (que inicializa o Sentry pro
@@ -51,13 +51,19 @@ const state = new WorkerState();
 // SIGTERM/SIGINT ("reiniciar agora", ou prazo do reinicio seguro estourado): para de pegar job e devolve ja os jobs em
 // andamento para a fila (releaseSelf); o processo sai em seguida, sem esperar o job (worker-architecture.md).
 let terminating = false;
+const activeCancelTokens = new Set<{ cancelled: boolean }>();
+const ABORT_GRACE_MS = 15_000;
 function onTerminate() {
   state.stopping = true;
   if (terminating) return;
   terminating = true;
   // Encerramento LIMPO (deploy/reinício): devolve o job com a tentativa reembolsada (não foi falha do job) e libera as travas de import
   // deste processo na hora, para o próximo dono não esperar o lease expirar (docs/estudo-confiabilidade-dados.md, MOT-10).
-  void Promise.allSettled([releaseSelf(true), releaseAllImportLocks()])
+  // ORDEM: aborta o import em andamento (token de cancelamento) e espera ele parar ANTES de devolver o job/travas; senao outro worker
+  // assume o job enquanto este ainda escreve.
+  void abortAndWait(activeCancelTokens, state, ABORT_GRACE_MS)
+    .then((stopped) => { if (!stopped) console.warn("[worker] import não parou em %dms após o aborto; liberando mesmo assim (o processo sai em seguida)", ABORT_GRACE_MS); })
+    .then(() => Promise.allSettled([releaseSelf(true), releaseAllImportLocks()]))
     .then((rs) => { for (const x of rs) if (x.status === "rejected") console.error("[worker] liberação no encerramento falhou: %s", x.reason instanceof Error ? x.reason.message : x.reason); })
     .finally(() => process.exit(0));
 }
@@ -348,7 +354,8 @@ async function work(job: Claimed) {
 
   const heartbeat = startHeartbeat(job.id);
   // Cancelamento cooperativo: se o job deixar de estar RUNNING (cancelado) durante o import, o importer aborta antes de publicar.
-  const cancelToken = { cancelled: false };
+  const cancelToken = { cancelled: terminating };
+  activeCancelTokens.add(cancelToken);
   const stopWatching = watchJobStatus(cancelToken, async () => (await prisma.job.findUnique({ where: { id: job.id }, select: { status: true } }))?.status ?? null);
 
   try {
@@ -393,6 +400,7 @@ async function work(job: Claimed) {
   } finally {
     clearInterval(heartbeat);
     stopWatching();
+    activeCancelTokens.delete(cancelToken);
   }
 }
 
@@ -653,7 +661,8 @@ async function loop(concurrencyId: number) {
         willRetry: job.attempts < job.max_attempts && !isNonRetryable(e), error: e instanceof Error ? e.message : String(e), ...jobResource(job),
       });
       try {
-        await fail(job, e);
+        // Abortado pelo proprio encerramento: o job segue RUNNING para o releaseSelf devolve-lo com a tentativa reembolsada.
+        if (!(terminating && e instanceof JobCancelledError)) await fail(job, e);
       } catch (fe) {
         // fail() pode lançar se o DB estiver fora. Loga mas não deixa o loop morrer.
         console.error("[worker] fail() lançou (DB indisponível?): %s", fe instanceof Error ? fe.message : fe);

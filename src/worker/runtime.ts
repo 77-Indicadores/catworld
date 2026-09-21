@@ -65,6 +65,18 @@ export class WorkerState {
   }
 }
 
+/**
+ * Encerramento (SIGTERM): PRIMEIRO aborta os imports em andamento (marca os tokens de cancelamento) e espera, ate `graceMs`,
+ * eles pararem; so depois o chamador libera o job/trava. Liberar antes deixava outro worker pegar o job enquanto este ainda escrevia.
+ * Retorna true se todos pararam dentro do prazo.
+ */
+export async function abortAndWait(tokens: Iterable<{ cancelled: boolean }>, state: Pick<WorkerState, "inflight">, graceMs: number, pollMs = 50): Promise<boolean> {
+  for (const t of tokens) t.cancelled = true;
+  const end = Date.now() + graceMs;
+  while (state.inflight > 0 && Date.now() < end) await new Promise((r) => setTimeout(r, pollMs));
+  return state.inflight === 0;
+}
+
 export type Liveness = { at: number; host: string | null; pid: number | null };
 
 /** `2026-09-19T04:22:18.313Z|host|pid` (formato antigo, só o horário, também é aceito). */
