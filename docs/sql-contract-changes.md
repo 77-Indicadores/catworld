@@ -59,3 +59,12 @@ nao parece numero), `1 + '5'`, `LEN(x) + '5'`. Tambem concatenam (texto comprova
   explicito preserva DATE). Circunlocucao: `CAST(DATEADD(...) AS DATE)`.
 * `TRY_CAST(x AS DECIMAL(p,s))` que estoura a precisao: erro do Postgres (SQL Server devolve NULL).
 * `LIKE '%' + coluna + '%'` (concatenacao no padrao) nao e aceito pelo parser T-SQL usado; use `CONCAT('%', coluna, '%')`.
+
+## Exportacao CSV: neutralizacao de formulas e linha de truncamento
+
+Texto que comeca com `=`, TAB, CR, `@FUNCAO(`, ou `+`/`-` seguido de letra/`(` ganha o prefixo `'`. NAO e alterado: numero,
+telefone (`+55 11 99999-9999`), moeda (`-$1.234,50`), `-`/`+` sozinhos, `@usuario` e `-1 days`. `formulaSafe: false` desliga.
+Um CSV truncado termina com uma linha-marcador `# RESULTADO TRUNCADO em N linhas: ...` (uma linha de dados a MAIS, de
+proposito). Quem le o arquivo por programa (pandas, Power Query, tipagem pela ultima linha) deve descartar essa linha
+ou tratar o `#` como comentario; ela nao e neutralizada por nao ser formula.
+

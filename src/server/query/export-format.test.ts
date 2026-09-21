@@ -75,4 +75,12 @@ describe("xlsx: BIGINT/DECIMAL numericos so quando exatos", () => {
     expect(exactNumber("abc")).toBeNull();
     expect(exactNumber("1e3")).toBeNull();
   });
+  it("neutralizacao: sem falso positivo em telefone/moeda/menção; mantem formula real", () => {
+    for (const ok of ["+55 11 99999-9999", "-$1,234.50", "-1.234,56", "-", "+", "@user", "-1 days", "(11) 99999-9999", "+5511999999999"]) {
+      expect(neutralizeFormula(ok, ok), ok).toBe(ok);
+    }
+    for (const bad of ["=1+1", "=cmd|' /C calc'!A0", "@SUM(A1:A2)", "+cmd|'/c calc'!A0", "-SUM(A1)", "-(1+1)", "+HYPERLINK(\"x\")", "\tx", "\rx", "-1+cmd|'x'!A1"]) {
+      expect(neutralizeFormula(bad, bad), bad).toBe(`'${bad}`);
+    }
+  });
 });
