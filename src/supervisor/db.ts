@@ -9,6 +9,11 @@ import type { ChildSummary, CoreCommand, CoreConfig, CoreDb, CoreProfile } from 
 const TERMINAL = ["DONE", "FORCED", "FAILED", "CANCELLED", "EXPIRED"];
 const ISO_NOW = `to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`;
 
+/** Padrao LIKE (escape padrao "\") para os jobs RUNNING de um perfil: escapa \, % e _ do nome. */
+export function runningJobsLikePattern(profileName: string): string {
+  return `${profileName.replace(/[\\%_]/g, (c) => `\\${c}`)}-%@%`;
+}
+
 export function createCoreDb(instanceId: string): CoreDb & { failOrphanedCommands(): Promise<number>; clearLiveness(): Promise<void> } {
   return {
     async loadProfiles(): Promise<CoreProfile[]> {
@@ -98,10 +103,9 @@ export function createCoreDb(instanceId: string): CoreDb & { failOrphanedCommand
     },
 
     async runningJobs(profileName: string) {
-      const escaped = profileName.replace(/[\%_]/g, (c) => `\${c}`);
       const rows = await prisma.$queryRawUnsafe<{ id: string; type: string; attempts: number }[]>(
         `SELECT id, type, attempts FROM cw_jobs WHERE status = 'RUNNING' AND locked_by LIKE $1 LIMIT 20`,
-        `${escaped}-%@%`,
+        runningJobsLikePattern(profileName),
       );
       return rows;
     },
