@@ -22,7 +22,8 @@ import { normalizeDateLike } from "./date-normalize";
 import type { PgStorageConnection } from "@/server/storage/pg-storage";
 import { pgQuote, canonicalToPg } from "@/server/storage/pg-storage";
 import { userColumnNames } from "@/server/storage/connection";
-import { IntegrityError, evaluateLoad, getIntegritySettings } from "@/server/integrity/policy";
+import { IntegrityError, evaluateLoad, getIntegritySettings, type Evaluation } from "@/server/integrity/policy";
+import { auditIntegrity, evaluationDetail, ledgerInsert, recordLedger } from "@/server/integrity/ledger";
 import { PG_MARKER_DDL, PG_MARKER_INSERT, PG_MARKER_SELECT } from "./applied-marker";
 import { incompatibleColumns, incompatibleMessage } from "./type-compat";
 
@@ -163,7 +164,21 @@ export async function importUploadPg(
   });
   if (!pre.dataset) throw new Error("Dataset não definido");
   const lockTable = pre.table?.sqlName ?? sqlIdentifier(pre.originalFilename.replace(/.[^.]+$/, ""));
-  return withImportLock(`${pre.dataset.id}:${pre.dataset.schemaName}.${lockTable}`, (lease) => importUploadPgLocked(uploadId, source, conn, lease));
+  try {
+    return await withImportLock(`${pre.dataset.id}:${pre.dataset.schemaName}.${lockTable}`, (lease) => importUploadPgLocked(uploadId, source, conn, lease));
+  } catch (e) {
+    // Cada tentativa que falha vira uma linha no livro (com o motivo estruturado quando é uma barra de integridade) e, se for a
+    // integridade, um evento de auditoria com success=false — a evidência que antes ficava só em console.
+    const entry = {
+      kind: "upload" as const, outcome: "FAILED" as const, verdict: (e instanceof IntegrityError ? e.evaluation.verdict : "FAILED") as "FAILED" | "SUSPECT" | "OK",
+      datasetId: pre.dataset.id, uploadId, tableName: lockTable,
+      ...(e instanceof IntegrityError ? e.facts : {}),
+      detail: e instanceof IntegrityError ? evaluationDetail(e.evaluation, { storage: "postgres" }) : { error: (e instanceof Error ? e.message : String(e)).slice(0, 500), storage: "postgres" },
+    };
+    await recordLedger(entry);
+    if (e instanceof IntegrityError) await auditIntegrity({ ...entry, resourceId: uploadId });
+    throw e;
+  }
 }
 
 async function importUploadPgLocked(
@@ -278,12 +293,15 @@ async function importUploadPgLocked(
   // ── Integridade ANTES de publicar: carregado x esperado x versão anterior ─────────────────────────────────
   // (docs/estudo-confiabilidade-dados.md, OBS-01/OBS-05). O esperado vem da contagem do arquivo (preview), independente da carga.
   // FAILED = não troca nada: a tabela anterior continua no ar, completa.
+  let evaluation: Evaluation = { verdict: "OK", reasons: [] };
+  let prevRowsForLedger = 0;
   if (!alreadyApplied) {
     // Linhas da versão anterior: pelo metadado da tabela DESTINO (o upload novo nem sempre traz `tableId`); sem metadado, conta a tabela física.
     const meta = upload.table ?? await prisma.datasetTable.findUnique({ where: { datasetId_sqlName: { datasetId: upload.dataset.id, sqlName: tableName } }, select: { rowCount: true } });
     const prevRows = targetExists ? Number(meta?.rowCount ?? (await conn.countRows(schema, tableName))) : 0;
+    prevRowsForLedger = prevRows;
     const cfg = await getIntegritySettings();
-    const evaluation = evaluateLoad({
+    evaluation = evaluateLoad({
       kind: "upload",
       fullState: upload.mode === "replace" || !targetExists || (upload.mode === "upsert" && upload.fullSnapshot),
       expectedRows: knownRowCount,
@@ -294,7 +312,7 @@ async function importUploadPgLocked(
     }, cfg);
     if (evaluation.verdict === "FAILED") {
       await conn.execute(`DROP TABLE IF EXISTS ${qStaging}`).catch(() => undefined);
-      throw new IntegrityError(evaluation);
+      throw new IntegrityError(evaluation, { expectedRows: knownRowCount, parsedRows: total, prevRows });
     }
     if (evaluation.verdict === "SUSPECT") console.warn("[importUploadPg:integrity] SUSPECT upload=%s %s", uploadId, JSON.stringify(evaluation.reasons));
   }
@@ -433,6 +451,11 @@ async function importUploadPgLocked(
         rowCount: actual,
         schemaJson: JSON.stringify(mapping),
       },
+    }),
+    ledgerInsert({
+      kind: "upload", outcome: "COMPLETED", verdict: evaluation.verdict, datasetId: upload.dataset!.id, tableId: table.id, uploadId: upload.id,
+      tableName, mode: upload.mode, expectedRows: knownRowCount, parsedRows: total, physicalRows: Number(actual), prevRows: prevRowsForLedger,
+      detail: evaluationDetail(evaluation, { importMethod: alreadyApplied ? "already-applied" : "pg-unnest-batch", storage: "postgres" }),
     }),
     prisma.upload.update({
       where: { id: upload.id },

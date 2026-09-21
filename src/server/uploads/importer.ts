@@ -1,6 +1,7 @@
 import * as Sentry from "@sentry/nextjs";
 import { physicalDecimal } from "@/lib/decimal-type";
-import { IntegrityError, evaluateLoad, getIntegritySettings } from "@/server/integrity/policy";
+import { IntegrityError, evaluateLoad, getIntegritySettings, type Evaluation } from "@/server/integrity/policy";
+import { auditIntegrity, evaluationDetail, ledgerInsert, recordLedger } from "@/server/integrity/ledger";
 import { MSSQL_MARKER_DDL, MSSQL_MARKER_INSERT, MSSQL_MARKER_SELECT } from "./applied-marker";
 import { canonicalAccepts, incompatibleColumns, incompatibleMessage, mssqlPhysicalToCanonical } from "./type-compat";
 import { isInternalColumn } from "@/server/storage/connection";
@@ -273,7 +274,20 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
   // Postgres. Visto em produção: vendas_completo/ADL falhando ~4x/dia com
   // "Transaction already closed" após 13-18min mesmo em arquivos pequenos
   // que normalmente levam <2min.
-  return withImportLock(`${upload.dataset.id}:${schema}.${tableName}`, importUploadForTable);
+  try {
+    return await withImportLock(`${upload.dataset.id}:${schema}.${tableName}`, importUploadForTable);
+  } catch (e) {
+    // Cada tentativa que falha vira uma linha no livro de integridade e, se for a barra de integridade, um evento de auditoria (success=false).
+    const entry = {
+      kind: "upload" as const, outcome: "FAILED" as const, verdict: (e instanceof IntegrityError ? e.evaluation.verdict : "FAILED") as "FAILED" | "SUSPECT" | "OK",
+      datasetId: upload.dataset.id, uploadId, tableName,
+      ...(e instanceof IntegrityError ? e.facts : {}),
+      detail: e instanceof IntegrityError ? evaluationDetail(e.evaluation, { storage: "sqlserver" }) : { error: (e instanceof Error ? e.message : String(e)).slice(0, 500), storage: "sqlserver" },
+    };
+    await recordLedger(entry);
+    if (e instanceof IntegrityError) await auditIntegrity({ ...entry, resourceId: uploadId });
+    throw e;
+  }
 
   async function importUploadForTable(lease: Lease) {
     const stage = `cw_stage_${upload.id.replaceAll("-", "").slice(0, 20)}`;
@@ -345,6 +359,8 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
     );
 
     let total = 0, inserted = 0, updated = 0;
+    let evaluation: Evaluation = { verdict: "OK", reasons: [] };
+    let prevRowsForLedger = 0;
     let lastProgressMs = Date.now();
     let actual = 0n;
     const reclassifiedCols: string[] = [];
@@ -416,7 +432,8 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
         if (!alreadyApplied) {
           const meta = upload.table ?? await prisma.datasetTable.findUnique({ where: { datasetId_sqlName: { datasetId: upload.dataset!.id, sqlName: tableName } }, select: { rowCount: true } });
           const prevRows = targetExists ? Number(meta?.rowCount ?? (await storageConn.countRows(schema, tableName))) : 0;
-          const evaluation = evaluateLoad({
+          prevRowsForLedger = prevRows;
+          evaluation = evaluateLoad({
             kind: "upload",
             fullState: !phase2 && (upload.mode === "replace" || !targetExists || (upload.mode === "upsert" && upload.fullSnapshot)),
             deltaOnly: phase2,
@@ -428,7 +445,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
           }, await getIntegritySettings());
           if (evaluation.verdict === "FAILED") {
             await writePool.request().query(`IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL DROP TABLE ${staging}`).catch(() => undefined);
-            throw new IntegrityError(evaluation);
+            throw new IntegrityError(evaluation, { expectedRows: knownRowCount, parsedRows: total, prevRows });
           }
           if (evaluation.verdict === "SUSPECT") console.warn("[importUpload:integrity] SUSPECT upload=%s %s", uploadId, JSON.stringify(evaluation.reasons));
         }
@@ -623,6 +640,11 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
             rowCount: actual,
             schemaJson: JSON.stringify(mapping),
           },
+        }),
+        ledgerInsert({
+          kind: "upload", outcome: "COMPLETED", verdict: evaluation.verdict, datasetId: upload.dataset!.id, tableId: table.id, uploadId: upload.id,
+          tableName, mode: upload.mode, expectedRows: knownRowCount, parsedRows: total, physicalRows: Number(actual), prevRows: prevRowsForLedger,
+          detail: evaluationDetail(evaluation, { importMethod: phaseTimings.importMethod, parseMethod: parseStats.parseMethod, fallbackReason: parseStats.fallbackReason, storage: "sqlserver" }),
         }),
         prisma.auditEvent.create({
           data: {

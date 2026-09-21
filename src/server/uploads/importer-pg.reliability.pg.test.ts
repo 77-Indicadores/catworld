@@ -192,6 +192,13 @@ d("import Postgres: atomicidade e integridade (real)", () => {
     expect(await fingerprint("t_integ")).toBe(before);
     const stage = (await pool.query(`SELECT count(*)::int n FROM information_schema.tables WHERE table_schema=$1 AND table_name LIKE 'cw_stage_%'`, [SCHEMA])).rows[0].n;
     expect(stage).toBe(0);                                          // sem staging órfã
+    // a evidência fica registrada: uma linha COMPLETED/OK da 1ª carga e uma FAILED com o motivo estruturado da 2ª
+    const led = (await pool.query(`SELECT outcome, verdict, expected_rows::int e, parsed_rows::int p, prev_rows::int pr, detail_json FROM cw_load_ledger WHERE table_name = 't_integ' AND dataset_id = $1 ORDER BY created_at`, [datasetId])).rows;
+    expect(led.map((r) => [r.outcome, r.verdict])).toEqual([["COMPLETED", "OK"], ["FAILED", "FAILED"]]);
+    expect(led[1]).toMatchObject({ e: 5000 });
+    expect(JSON.parse(led[1].detail_json).reasons.map((x: { code: string }) => x.code)).toContain("ROWS_BELOW_EXPECTED");
+    const ev = (await pool.query(`SELECT count(*)::int n FROM cw_audit_events WHERE event_type = 'DATA_INTEGRITY_SUSPECT' AND detail_json LIKE '%t_integ%' AND detail_json LIKE $1 AND success = false`, [`%${datasetId}%`])).rows[0].n;
+    expect(ev).toBe(1);
   });
 
   it("INTEGRIDADE: substituir tabela com dados por arquivo só com cabeçalho é barrado (a menos que allow_empty)", async () => {

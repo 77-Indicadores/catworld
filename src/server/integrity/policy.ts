@@ -87,7 +87,7 @@ export function integrityErrorMessage(e: Evaluation): string {
 }
 
 export class IntegrityError extends Error {
-  constructor(public evaluation: Evaluation) {
+  constructor(public evaluation: Evaluation, public facts: { expectedRows?: number; parsedRows?: number; prevRows?: number } = {}) {
     super(integrityErrorMessage(evaluation));
     this.name = "IntegrityError";
   }

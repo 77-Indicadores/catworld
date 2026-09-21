@@ -491,3 +491,30 @@ model CleanupRun {
 
   @@map("cw_cleanup_runs")
 }
+
+/// Livro de integridade das cargas: uma linha por tentativa (esperado x lido x gravado x anterior + veredito).
+/// Escrito por SQL direto (src/server/integrity/ledger.ts): nenhuma carga depende dele.
+model LoadLedger {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamp(3)
+  kind         String   @db.VarChar(16)
+  datasetId    String?  @map("dataset_id") @db.Uuid
+  tableId      String?  @map("table_id") @db.Uuid
+  uploadId     String?  @map("upload_id") @db.Uuid
+  sourceId     String?  @map("source_id") @db.Uuid
+  jobId        String?  @map("job_id") @db.Uuid
+  tableName    String?  @map("table_name") @db.VarChar(255)
+  mode         String?  @db.VarChar(20)
+  attempt      Int?
+  outcome      String   @db.VarChar(16)
+  verdict      String   @db.VarChar(16)
+  expectedRows BigInt?  @map("expected_rows")
+  parsedRows   BigInt?  @map("parsed_rows")
+  physicalRows BigInt?  @map("physical_rows")
+  prevRows     BigInt?  @map("prev_rows")
+  detailJson   String?  @map("detail_json") @db.Text
+
+  @@index([createdAt])
+  @@index([tableId, createdAt])
+  @@map("cw_load_ledger")
+}
