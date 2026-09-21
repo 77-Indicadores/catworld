@@ -290,7 +290,7 @@ async function work(job: Claimed) {
     } finally {
       clearInterval(hb);
     }
-    await prisma.job.update({ where: { id: job.id }, data: { status: "COMPLETED", lockedAt: null, lockedBy: null, heartbeatAt: null, lastError: null } });
+    await completeJob(job.id);
     return;
   }
 
@@ -303,7 +303,7 @@ async function work(job: Claimed) {
     } finally {
       clearInterval(hb);
     }
-    await prisma.job.update({ where: { id: job.id }, data: { status: "COMPLETED", lockedAt: null, lockedBy: null, heartbeatAt: null, lastError: null } });
+    await completeJob(job.id);
     return;
   }
 
@@ -316,7 +316,7 @@ async function work(job: Claimed) {
     } finally {
       clearInterval(hb);
     }
-    await prisma.job.update({ where: { id: job.id }, data: { status: "COMPLETED", lockedAt: null, lockedBy: null, heartbeatAt: null, lastError: null } });
+    await completeJob(job.id);
     return;
   }
 
@@ -327,7 +327,7 @@ async function work(job: Claimed) {
   // Guard: skip if already COMPLETED or FAILED (cancelled/re-queued after success)
   if (upload.status === "COMPLETED" || upload.status === "FAILED") {
     console.log(`[worker] upload ${upload.id} já está ${upload.status}, pulando job`);
-    await prisma.job.update({ where: { id: job.id }, data: { status: "COMPLETED", lockedAt: null, lockedBy: null, heartbeatAt: null, lastError: null } });
+    await completeJob(job.id);
     return;
   }
 
@@ -340,7 +340,7 @@ async function work(job: Claimed) {
     });
     if (otherRunning) {
       console.warn(`[worker] upload ${upload.id} já está sendo processado por outro job ${otherRunning.id}, pulando`);
-      await prisma.job.update({ where: { id: job.id }, data: { status: "COMPLETED", lockedAt: null, lockedBy: null, heartbeatAt: null, lastError: null } });
+      await completeJob(job.id);
       return;
     }
   }
@@ -380,7 +380,7 @@ async function work(job: Claimed) {
       throw new Error(`Tipo de job desconhecido: ${job.type}`);
     }
 
-    await prisma.job.update({ where: { id: job.id }, data: { status: "COMPLETED", lockedAt: null, lockedBy: null, heartbeatAt: null, lastError: null } });
+    await completeJob(job.id);
     // Only delete the upload file after the import is fully done — not after preview
     // (com retenção de arquivos ligada — padrão — ele fica para o histórico de versões e o METADATA_CLEANUP o apaga depois)
     if (job.type === "IMPORT_UPLOAD" && (await getUploadFilesDays().catch(() => 0)) === 0) {
@@ -389,6 +389,15 @@ async function work(job: Claimed) {
   } finally {
     clearInterval(heartbeat);
   }
+}
+
+/** Conclui o job só se ele ainda é deste executor (RUNNING): cancelamento/recuperação concorrente não é sobrescrito. */
+async function completeJob(jobId: string) {
+  const r = await prisma.job.updateMany({
+    where: { id: jobId, status: "RUNNING" },
+    data: { status: "COMPLETED", lockedAt: null, lockedBy: null, heartbeatAt: null, lastError: null },
+  });
+  if (r.count === 0) console.warn("[worker] job %s já não estava RUNNING ao concluir (cancelado ou recolocado na fila): estado do job preservado", jobId);
 }
 
 async function fail(job: Claimed, error: unknown) {
@@ -412,9 +421,12 @@ async function fail(job: Claimed, error: unknown) {
   const sourceFailureUpdate = isSourceBusyError(error) ? null : sourceRefreshFailureUpdate(job, message, retry, nextRefreshAt);
   const derivedFailureUpdate = derivedRefreshFailureUpdate(job, message, retry, nextRefreshAt);
 
+  // Estado guardado (docs/estudo-confiabilidade-dados.md, MOT-08): só mexe no job se ele AINDA está RUNNING (um job cancelado, recolocado
+  // na fila por outro executor ou concluído não pode ser ressuscitado/sobrescrito por esta falha) e nunca rebaixa um upload já
+  // COMPLETED ou cancelado (FAILED) para RETRYING.
   await prisma.$transaction([
-    prisma.job.update({
-      where: { id: job.id },
+    prisma.job.updateMany({
+      where: { id: job.id, status: "RUNNING" },
       data: {
         status: retry ? "QUEUED" : "FAILED",
         lastError: message,
@@ -425,8 +437,8 @@ async function fail(job: Claimed, error: unknown) {
       },
     }),
     ...(job.upload_id ? [
-      prisma.upload.update({
-        where: { id: job.upload_id },
+      prisma.upload.updateMany({
+        where: { id: job.upload_id, status: { in: ["PENDING_UPLOAD", "QUEUED_PREVIEW", "PREVIEWING", "AWAITING_CONFIRMATION", "QUEUED_IMPORT", "IMPORTING", "RETRYING"] } },
         data: {
           status: retry ? "RETRYING" : "FAILED",
           errorMessage: message,
