@@ -3,6 +3,7 @@
  * Thin wrapper em volta do pool existente de pool.ts.
  */
 
+import { physicalDecimal } from "@/lib/decimal-type";
 import sql from "mssql";
 import { CW_SYNCED_AT, CW_DELETED_AT, type ColDef, type ColInfo, type StorageConnection } from "./connection";
 import { absentFromStaging, carryPlan, missingKeysWhere } from "./delete-detection";
@@ -40,7 +41,7 @@ function parseMssqlUrl(url: string): sql.config {
 
 export function canonicalToMssql(sqlType: string): string {
   if (sqlType === "BIGINT") return "BIGINT";
-  if (sqlType.startsWith("DECIMAL")) return "DECIMAL(18,4)";
+  if (sqlType.startsWith("DECIMAL")) return physicalDecimal(sqlType, "mssql");
   if (sqlType === "DATE") return "DATE";
   if (sqlType === "DATETIME2") return "DATETIME2";
   if (sqlType === "TIME") return "TIME";

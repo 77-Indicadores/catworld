@@ -3,6 +3,7 @@
  * Usa pg.Pool com conexões persistentes.
  */
 
+import { physicalDecimal } from "@/lib/decimal-type";
 import { Pool, type PoolClient, type PoolConfig } from "pg";
 import { CW_SYNCED_AT, CW_DELETED_AT, type ColDef, type ColInfo, type StorageConnection } from "./connection";
 import { absentFromStaging, carryPlan, keysJoinSql } from "./delete-detection";
@@ -42,7 +43,7 @@ function parsePgUrl(url: string): PoolConfig {
 /** Canonical → Postgres type */
 export function canonicalToPg(sqlType: string): string {
   if (sqlType === "BIGINT") return "BIGINT";
-  if (sqlType.startsWith("DECIMAL")) return "NUMERIC(18,4)";
+  if (sqlType.startsWith("DECIMAL")) return physicalDecimal(sqlType, "postgres");
   if (sqlType === "DATE") return "DATE";
   if (sqlType === "DATETIME2") return "TIMESTAMP";
   if (sqlType === "TIME") return "TIME";

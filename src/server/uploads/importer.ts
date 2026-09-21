@@ -1,4 +1,5 @@
 import * as Sentry from "@sentry/nextjs";
+import { physicalDecimal } from "@/lib/decimal-type";
 import { extname } from "node:path";
 import sql from "mssql";
 import { prisma } from "@/server/db";
@@ -16,7 +17,7 @@ import { normalizeDateLike } from "./date-normalize";
 
 function sqlTypeDef(type: string): string {
   if (type === "BIGINT") return "BIGINT";
-  if (type.startsWith("DECIMAL")) return "DECIMAL(18,4)";
+  if (type.startsWith("DECIMAL")) return physicalDecimal(type, "mssql");
   if (type === "DATE") return "DATE";
   if (type === "DATETIME2") return "DATETIME2";
   if (type === "TIME") return "TIME";
@@ -52,7 +53,7 @@ function typedSelectExpr(column: ParsedColumn, alias: string): string {
 /** SQL type for the staging table column — mirrors typedCsvField in importer-bulk-blob.ts */
 function stagingColType(sqlType: string): string {
   if (sqlType === "BIGINT") return "BIGINT";
-  if (sqlType.startsWith("DECIMAL")) return "DECIMAL(18,4)";
+  if (sqlType.startsWith("DECIMAL")) return physicalDecimal(sqlType, "mssql");
   if (sqlType === "DATE") return "DATE";
   if (sqlType === "DATETIME2") return "DATETIME2";
   if (sqlType === "TIME") return "TIME";
