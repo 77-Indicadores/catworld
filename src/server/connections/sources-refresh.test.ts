@@ -14,10 +14,10 @@ vi.mock("@/server/db/advisory-lock", () => ({ withAdvisoryLock: (_k: string, fn:
 vi.mock("@/server/azure/sql", () => ({ sqlPool: vi.fn(), ensureSchema: vi.fn() }));
 vi.mock("@/server/storage/connection", () => ({ getStorageConnection: vi.fn(async () => storage) }));
 vi.mock("./postgres", () => ({
-  queryColumns: vi.fn(), quotedPgTable: vi.fn(), streamPostgresRows: vi.fn(),
+  queryColumns: vi.fn(), quotedPgTable: vi.fn(), streamPostgresRows: vi.fn(), sourceClockPg: vi.fn(async () => new Date("2026-01-02T00:00:00Z")),
   tableColumns: vi.fn(async () => [{ originalName: "id", sqlName: "id", sqlType: "BIGINT", nullable: false }]),
 }));
-vi.mock("./mssql", () => ({ queryColumnsMssql: vi.fn(), quotedMssqlTable: vi.fn(), streamMssqlRows: vi.fn(), tableColumnsMssql: vi.fn() }));
+vi.mock("./mssql", () => ({ sourceClockMssql: vi.fn(), queryColumnsMssql: vi.fn(), quotedMssqlTable: vi.fn(), streamMssqlRows: vi.fn(), tableColumnsMssql: vi.fn() }));
 
 import { refreshDatasetSource } from "./sources";
 
