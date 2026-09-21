@@ -104,4 +104,12 @@ d("fidelidade de valores no import Postgres (real)", () => {
     await expect(run("n,v\n1,5\n2,abc\n", "t_ovr", { v: "BIGINT" })).rejects.toThrow(/abc/);
     expect(await rows("t_ovr", "v")).toEqual([{ v: "a" }]);
   });
+
+  it("override DECIMAL(10,2) é honrado FISICAMENTE (NUMERIC(10,2)) e valor com 3 casas FALHA em vez de arredondar", async () => {
+    await run("n,v\n1,1.5\n2,2.25\n", "t_dov", { v: "decimal(10, 2)" });
+    const t = (await pool.query(`SELECT numeric_precision p, numeric_scale s FROM information_schema.columns WHERE table_schema=$1 AND table_name='t_dov' AND column_name='v'`, [SCHEMA])).rows[0];
+    expect([t.p, t.s]).toEqual([10, 2]);
+    await expect(run("n,v\n1,1.234\n", "t_dov2", { v: "DECIMAL(10,2)" })).rejects.toThrow(/1\.234/);
+    await expect(pool.query(`SELECT 1 FROM ${SCHEMA}.t_dov2`)).rejects.toThrow();   // nada foi publicado
+  });
 });

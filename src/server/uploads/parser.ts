@@ -10,6 +10,7 @@ import { sqlIdentifier } from "@/server/security/naming";
 import { hasDateTimePart, dateCandidates, isOrderAmbiguous, type DateOrder } from "./date-normalize";
 import { accumulateDecimal, decideDecimal, newDecimalAcc, type DecimalAcc, type DecSep } from "./decimal-format";
 import { formatDecimalType } from "@/lib/decimal-type";
+import { normalizeTypeOverride } from "./type-override";
 
 /** decimalSep/dateOrder: convenção da COLUNA decidida pelo arquivo inteiro (mapeamentos antigos não têm; ver decimal-format.ts e date-normalize.ts). *Ambiguous: ficou TEXT porque a convenção não pôde ser decidida. */
 export type ParsedColumn={originalName:string;sqlName:string;sqlType:string;nullable:boolean;decimalSep?:DecSep;decimalAmbiguous?:boolean;dateOrder?:DateOrder;dateAmbiguous?:boolean};
@@ -115,34 +116,38 @@ function textSqlType(){
 //     Even columns that appear NOT NULL in sample rows can have empty/invalid values later in the file.
 function headerLooksIdentifier(header:string){return /(^|[_\s-])(cpf|cnpj|cep|telefone|phone|celular|whats|codigo|cod|sku|id|documento|doc)([_\s-]|$)/i.test(header)}
 function columnsFromStats(headers:string[],stats:ColumnStats[]):ParsedColumn[]{const used=new Map<string,number>();return headers.map((header,index)=>{let name=sqlIdentifier(header||`col_${index+1}`);const n=(used.get(name)??0)+1;used.set(name,n);if(n>1)name=`${name}_${n}`;const s=stats[index]??newStats();return{originalName:header,sqlName:name,...inferType(header,s),nullable:true}})}
-/** Tipo da coluna a partir do arquivo INTEIRO. Nunca adivinha: ambíguo ou que não cabe exato vira texto. */
+/** Tipo da coluna a partir do arquivo INTEIRO. Nunca adivinha: ambíguo ou que não cabe exato vira texto. A convenção (decimalSep/dateOrder) é
+ *  guardada mesmo quando o tipo final é texto (ex.: coluna "id"), para que um override de tipo explícito converta com a mesma regra. */
 function inferType(header:string,s:ColumnStats):{sqlType:string}&Partial<Pick<ParsedColumn,"decimalSep"|"decimalAmbiguous"|"dateOrder"|"dateAmbiguous">>{
- const text={sqlType:textSqlType()};
- if(s.sampleCount===0||s.looksIdentifier||headerLooksIdentifier(header))return text;
- if(s.allInt)return{sqlType:"BIGINT"};
+ const text=textSqlType();
+ if(s.sampleCount===0)return{sqlType:text};
  const dv=decideDecimal(s.dec);
- if(dv.kind==="decimal")return{sqlType:formatDecimalType(dv.spec),decimalSep:dv.sep};
- if(dv.kind==="ambiguous")return{...text,decimalAmbiguous:true};
- if(dv.kind==="too-wide")return text;
- if(s.okDmy||s.okMdy){
-  if(s.okDmy&&s.okMdy&&s.dateAmbiguous)return{...text,dateAmbiguous:true};
-  return{sqlType:s.hasTimePart?"DATETIME2":"DATE",dateOrder:s.okDmy?"dmy":"mdy"};
+ const conv:Partial<Pick<ParsedColumn,"decimalSep"|"decimalAmbiguous"|"dateOrder"|"dateAmbiguous">>={};
+ if(dv.kind==="decimal")conv.decimalSep=dv.sep;
+ if(dv.kind==="ambiguous")conv.decimalAmbiguous=true;
+ const dateOk=s.okDmy||s.okMdy;
+ if(dateOk){if(s.okDmy&&s.okMdy&&s.dateAmbiguous)conv.dateAmbiguous=true;else conv.dateOrder=s.okDmy?"dmy":"mdy"}
+ if(s.looksIdentifier||headerLooksIdentifier(header))return{sqlType:text,...conv};
+ if(s.allInt)return{sqlType:"BIGINT"};
+ if(dv.kind==="decimal")return{sqlType:formatDecimalType(dv.spec),...conv};
+ if(dv.kind==="ambiguous"||dv.kind==="too-wide")return{sqlType:text,...conv};
+ if(dateOk){
+  if(conv.dateAmbiguous)return{sqlType:text,...conv};
+  return{sqlType:s.hasTimePart?"DATETIME2":"DATE",...conv};
  }
  if(s.allTime)return{sqlType:"TIME"};
- return text;
+ return{sqlType:text};
 }
 
-// Tipos canônicos aceitos como override — os mesmos que columnsFromStats pode produzir.
-// DECIMAL aceita qualquer precisão/escala (ex: "DECIMAL(10,2)"), o resto é exato.
-const OVERRIDABLE_TYPES = new Set(["BIGINT", "DATE", "DATETIME2", "TIME", "NVARCHAR(MAX)"]);
-function isValidTypeOverride(type: string): boolean {
-  return OVERRIDABLE_TYPES.has(type) || /^DECIMAL\(\d{1,2},\d{1,2}\)$/.test(type);
-}
+// Tipos canônicos aceitos como override: ver type-override.ts (também usado pela validação da API).
+export { normalizeTypeOverride };
+export class TypeOverrideError extends Error { constructor(message: string) { super(message); this.name = "TypeOverrideError"; } }
 
 /**
- * Aplica overrides de tipo (chave = sqlName ou originalName da coluna, case-insensitive)
- * por cima da inferência automática. Overrides com nome desconhecido ou tipo inválido
- * são ignorados (não derrubam o import) — devolve a lista de nomes de fato aplicados.
+ * Aplica overrides de tipo (chave = sqlName ou originalName da coluna, case-insensitive) por cima da inferência automática.
+ * Override com nome de coluna desconhecido, tipo inválido, ou convenção ambígua (decimal 1,234 / data 04/05) LANÇA TypeOverrideError:
+ * ignorar em silêncio deixaria o import seguir com um tipo que o usuário não pediu (TIP-06). `ignored` fica sempre vazio (mantido por compatibilidade).
+ * A conversão do valor é validada na carga: valor não vazio que não cabe no tipo falha o import (nunca vira NULL).
  */
 export function applyTypeOverrides(columns: ParsedColumn[], overrides: Record<string, string> | null | undefined): { columns: ParsedColumn[]; applied: string[]; ignored: string[] } {
   if (!overrides || !Object.keys(overrides).length) return { columns, applied: [], ignored: [] };
@@ -151,16 +156,21 @@ export function applyTypeOverrides(columns: ParsedColumn[], overrides: Record<st
     byKey.set(c.sqlName.toLowerCase(), c);
     byKey.set(c.originalName.toLowerCase(), c);
   }
-  const applied: string[] = [];
-  const ignored: string[] = [];
+  const problems: string[] = [];
+  const todo: [ParsedColumn, string][] = [];
   for (const [rawName, rawType] of Object.entries(overrides)) {
-    const type = rawType.toUpperCase().trim();
     const col = byKey.get(rawName.toLowerCase());
-    if (!col || !isValidTypeOverride(type)) { ignored.push(rawName); continue; }
-    col.sqlType = type;
-    applied.push(col.sqlName);
+    const type = typeof rawType === "string" ? normalizeTypeOverride(rawType) : null;
+    if (!col) { problems.push(`coluna "${rawName}" não existe no arquivo (colunas: ${columns.map((c) => c.sqlName).join(", ")})`); continue; }
+    if (!type) { problems.push(`tipo "${String(rawType)}" inválido para a coluna "${rawName}" (use BIGINT, DECIMAL(p,s), DATE, DATETIME2, TIME ou NVARCHAR(MAX))`); continue; }
+    if (type.startsWith("DECIMAL") && col.decimalAmbiguous) { problems.push(`coluna "${rawName}": os números são ambíguos (ex.: 1.234 pode ser 1234 ou 1,234); padronize o separador no arquivo`); continue; }
+    if ((type === "DATE" || type === "DATETIME2") && col.dateAmbiguous) { problems.push(`coluna "${rawName}": as datas são ambíguas (dd/mm ou mm/dd); use datas ISO (AAAA-MM-DD) ou inclua um dia maior que 12`); continue; }
+    todo.push([col, type]);
   }
-  return { columns, applied, ignored };
+  if (problems.length) throw new TypeOverrideError(`Override de tipo recusado: ${problems.join("; ")}`);
+  const applied: string[] = [];
+  for (const [col, type] of todo) { col.sqlType = type; applied.push(col.sqlName); }
+  return { columns, applied, ignored: [] };
 }
 
 function xlsxColumnIndices(headers:string[],columns:ParsedColumn[]){
