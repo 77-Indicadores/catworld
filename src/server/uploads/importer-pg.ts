@@ -18,7 +18,7 @@ import { withAdvisoryLock } from "@/server/db/advisory-lock";
 import { withImportLock } from "@/server/db/import-lock";
 import { sqlIdentifier } from "@/server/security/naming";
 import { previewFile, rowsFromFile, type FilePreview, type ParsedColumn, type RowsFromFileOpts } from "./parser";
-import { normalizeDateLike } from "./date-normalize";
+import { convertForPg } from "./convert-values";
 import type { PgStorageConnection } from "@/server/storage/pg-storage";
 import { pgQuote, canonicalToPg } from "@/server/storage/pg-storage";
 import { userColumnNames } from "@/server/storage/connection";
@@ -30,35 +30,6 @@ const PG_BIGINT_MIN = -9223372036854775808n, PG_BIGINT_MAX = 9223372036854775807
 function bigIntOverflows(s: string): boolean {
   if (!s || !/^-?\d+$/.test(s)) return false;
   try { const b = BigInt(s); return b < PG_BIGINT_MIN || b > PG_BIGINT_MAX; } catch { return false; }
-}
-
-/** Converte valor raw para string que o Postgres aceita via unnest cast */
-function convertForPg(v: unknown, sqlType: string): string | null {
-  const s = v == null ? "" : String(v).trim();
-  if (!s) return null;
-
-  if (sqlType === "BIGINT") {
-    if (!/^-?\d+$/.test(s)) return null;
-    return s; // range já verificado antes do INSERT via reclassifyOverflowCols
-  }
-  if (sqlType.startsWith("DECIMAL")) {
-    const lastDot = s.lastIndexOf(".");
-    const lastComma = s.lastIndexOf(",");
-    const cleaned = lastComma > lastDot
-      ? s.replaceAll(".", "").replace(",", ".")   // BR: "1.234,56"
-      : s.replaceAll(",", "");                    // US: "1,234.56"
-    const n = Number.parseFloat(cleaned);
-    if (!Number.isFinite(n) || Math.abs(n) >= 1e14) return null;
-    return String(n);
-  }
-  if (sqlType === "DATE" || sqlType === "DATETIME2") {
-    const d = normalizeDateLike(s);
-    if (!d) return null;
-    return d;
-  }
-  if (sqlType === "TIME") return s;
-  // TEXT
-  return s.replace(/\x00/g, "") || null;
 }
 
 // ─── Batch flush ─────────────────────────────────────────────────────────────
@@ -115,7 +86,7 @@ async function flushBatch(
   for (const row of batch) {
     for (let j = 0; j < mapping.length; j++) {
       const c = mapping[j]!;
-      params[j]!.push(convertForPg(row[c.sqlName], c.sqlType));
+      params[j]!.push(convertForPg(row[c.sqlName], c));
     }
     if (withRh) {
       const rh = createHash("md5")

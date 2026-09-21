@@ -8,9 +8,12 @@ import { parse } from "csv-parse";
 import iconv from "iconv-lite";
 import ExcelJS from "exceljs";
 import { sqlIdentifier } from "@/server/security/naming";
-import { hasDateTimePart, isDateLike } from "./date-normalize";
+import { hasDateTimePart, dateCandidates, isOrderAmbiguous, type DateOrder } from "./date-normalize";
+import { accumulateDecimal, decideDecimal, newDecimalAcc, type DecimalAcc, type DecSep } from "./decimal-format";
+import { formatDecimalType } from "@/lib/decimal-type";
 
-export type ParsedColumn={originalName:string;sqlName:string;sqlType:string;nullable:boolean};
+/** decimalSep/dateOrder: convenção da COLUNA decidida pelo arquivo inteiro (mapeamentos antigos não têm; ver decimal-format.ts e date-normalize.ts). *Ambiguous: ficou TEXT porque a convenção não pôde ser decidida. */
+export type ParsedColumn={originalName:string;sqlName:string;sqlType:string;nullable:boolean;decimalSep?:DecSep;decimalAmbiguous?:boolean;dateOrder?:DateOrder;dateAmbiguous?:boolean};
 export type FilePreview={columns:ParsedColumn[];rows:Record<string,unknown>[];rowCount:number;encoding:string;separator:string|null;sheetNames:string[]};
 export type RowsFromFileOpts={encoding?:string;separator?:string;ext?:string};
 export type ParseStats={parseMethod?:"duckdb"|"csv-parse"|"xlsx"|"stream";parseMs?:number;fileEncoding?:string;fileSeparator?:string;fallbackReason?:string};
@@ -96,12 +99,13 @@ function normalizeCellForColumn(value:string,column:ParsedColumn){
  if((column.sqlType==="DATE"||column.sqlType==="DATETIME2")&&/^\d+(\.\d+)?$/.test(value.trim()))return excelSerialToIso(value.trim(),column.sqlType);
  return value;
 }
-type ColumnStats={maxLen:number;hasNull:boolean;allInt:boolean;allDecimal:boolean;allDateLike:boolean;hasTimePart:boolean;allTime:boolean;sampleCount:number;looksIdentifier:boolean};
-function newStats():ColumnStats{return{maxLen:0,hasNull:false,allInt:true,allDecimal:true,allDateLike:true,hasTimePart:false,allTime:true,sampleCount:0,looksIdentifier:false}}
+type ColumnStats={maxLen:number;hasNull:boolean;allInt:boolean;dec:DecimalAcc;okDmy:boolean;okMdy:boolean;dateAmbiguous:boolean;hasTimePart:boolean;allTime:boolean;sampleCount:number;looksIdentifier:boolean};
+function newStats():ColumnStats{return{maxLen:0,hasNull:false,allInt:true,dec:newDecimalAcc(),okDmy:true,okMdy:true,dateAmbiguous:false,hasTimePart:false,allTime:true,sampleCount:0,looksIdentifier:false}}
 const RE_INT=/^-?\d+$/;
-const RE_INT_LEADING_ZERO=/^0\d+/;
-const RE_DECIMAL=/^-?\d{1,3}(?:[.,]\d{3})*[,]\d+$|^-?\d+[.,]\d+$/;
-const RE_TIME=/^\d{1,2}:\d{2}(:\d{2})?$/;
+// zero à esquerda, com ou sem sinal (-007 é código, não o número -7)
+const RE_INT_LEADING_ZERO=/^-?0\d+/;
+// hora com faixa: 25:00, 12:60 e 12:00:61 NÃO são TIME (TIP-15)
+const RE_TIME=/^([01]?\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/;
 const BIGINT_MIN=-9223372036854775808n,BIGINT_MAX=9223372036854775807n;
 function isInt(t:string){
   if(!RE_INT.test(t)||RE_INT_LEADING_ZERO.test(t))return false;
@@ -114,11 +118,13 @@ function updateStats(s:ColumnStats,raw:unknown){
   if(v.length>s.maxLen)s.maxLen=v.length;
   if(RE_INT.test(trimmed)&&RE_INT_LEADING_ZERO.test(trimmed))s.looksIdentifier=true;
   if(s.allInt&&!isInt(trimmed))s.allInt=false;
-  // inteiros são decimais válidos — só invalida se não for nem decimal nem inteiro
-  if(s.allDecimal&&!RE_DECIMAL.test(trimmed)&&!isInt(trimmed))s.allDecimal=false;
-  const dateLike=isDateLike(trimmed),dateTime=hasDateTimePart(trimmed);
-  if(s.allDateLike&&!dateLike)s.allDateLike=false;
-  if(dateTime)s.hasTimePart=true;
+  // decimal: a convenção (ponto/vírgula) é decidida pela coluna inteira em columnsFromStats (decimal-format.ts)
+  accumulateDecimal(s.dec,trimmed);
+  const dc=dateCandidates(trimmed);
+  if(dc.dmy===null)s.okDmy=false;
+  if(dc.mdy===null)s.okMdy=false;
+  if(isOrderAmbiguous(dc))s.dateAmbiguous=true;
+  if(hasDateTimePart(trimmed))s.hasTimePart=true;
   if(s.allTime&&!RE_TIME.test(trimmed))s.allTime=false;
 }
 function textSqlType(){
@@ -127,7 +133,23 @@ function textSqlType(){
 // P5: All columns are always nullable — BULK INSERT treats empty CSV fields as NULL.
 //     Even columns that appear NOT NULL in sample rows can have empty/invalid values later in the file.
 function headerLooksIdentifier(header:string){return /(^|[_\s-])(cpf|cnpj|cep|telefone|phone|celular|whats|codigo|cod|sku|id|documento|doc)([_\s-]|$)/i.test(header)}
-function columnsFromStats(headers:string[],stats:ColumnStats[]):ParsedColumn[]{const used=new Map<string,number>();return headers.map((header,index)=>{let name=sqlIdentifier(header||`col_${index+1}`);const n=(used.get(name)??0)+1;used.set(name,n);if(n>1)name=`${name}_${n}`;const s=stats[index]??newStats();const forceText=s.looksIdentifier||headerLooksIdentifier(header);const sqlType=s.sampleCount===0?"NVARCHAR(MAX)":forceText?textSqlType():s.allInt?"BIGINT":s.allDecimal?"DECIMAL(18,4)":s.allDateLike&&s.hasTimePart?"DATETIME2":s.allDateLike?"DATE":s.allTime?"TIME":textSqlType();return{originalName:header,sqlName:name,sqlType,nullable:true}})}
+function columnsFromStats(headers:string[],stats:ColumnStats[]):ParsedColumn[]{const used=new Map<string,number>();return headers.map((header,index)=>{let name=sqlIdentifier(header||`col_${index+1}`);const n=(used.get(name)??0)+1;used.set(name,n);if(n>1)name=`${name}_${n}`;const s=stats[index]??newStats();return{originalName:header,sqlName:name,...inferType(header,s),nullable:true}})}
+/** Tipo da coluna a partir do arquivo INTEIRO. Nunca adivinha: ambíguo ou que não cabe exato vira texto. */
+function inferType(header:string,s:ColumnStats):{sqlType:string}&Partial<Pick<ParsedColumn,"decimalSep"|"decimalAmbiguous"|"dateOrder"|"dateAmbiguous">>{
+ const text={sqlType:textSqlType()};
+ if(s.sampleCount===0||s.looksIdentifier||headerLooksIdentifier(header))return text;
+ if(s.allInt)return{sqlType:"BIGINT"};
+ const dv=decideDecimal(s.dec);
+ if(dv.kind==="decimal")return{sqlType:formatDecimalType(dv.spec),decimalSep:dv.sep};
+ if(dv.kind==="ambiguous")return{...text,decimalAmbiguous:true};
+ if(dv.kind==="too-wide")return text;
+ if(s.okDmy||s.okMdy){
+  if(s.okDmy&&s.okMdy&&s.dateAmbiguous)return{...text,dateAmbiguous:true};
+  return{sqlType:s.hasTimePart?"DATETIME2":"DATE",dateOrder:s.okDmy?"dmy":"mdy"};
+ }
+ if(s.allTime)return{sqlType:"TIME"};
+ return text;
+}
 
 // Tipos canônicos aceitos como override — os mesmos que columnsFromStats pode produzir.
 // DECIMAL aceita qualquer precisão/escala (ex: "DECIMAL(10,2)"), o resto é exato.
