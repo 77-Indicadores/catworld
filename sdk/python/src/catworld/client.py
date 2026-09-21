@@ -144,53 +144,105 @@ class CatworldClient:
     def rows(self, table_id: str, limit: int = 100):
         return self._request("GET", f"/api/v1/tables/{table_id}/rows", params={"limit": limit})
 
-    def changes(self, table_id: str, since: str | _datetime.datetime | None = None, limit: int = 1000, follow: bool = True) -> dict:
+    @staticmethod
+    def _since_param(since: str | _datetime.datetime) -> str:
+        """`since` como ISO-8601 em UTC. datetime sem fuso e tratado como UTC (nunca como hora local do cliente)."""
+        if isinstance(since, _datetime.datetime):
+            if since.tzinfo is not None:
+                since = since.astimezone(_datetime.timezone.utc).replace(tzinfo=None)
+            return since.isoformat(timespec="microseconds") + "Z"
+        return since
+
+    @staticmethod
+    def _row_fingerprint(stamp: str, row: Any) -> str:
+        digest = _hashlib.sha1(_json.dumps(row, sort_keys=True, default=str, ensure_ascii=False).encode("utf-8")).hexdigest()
+        return f"{stamp}|{digest}"
+
+    def changes(
+        self,
+        table_id: str,
+        since: str | _datetime.datetime | None = None,
+        limit: int = 1000,
+        follow: bool = True,
+        seen: list[str] | None = None,
+    ) -> dict:
         """Puxa so o que mudou numa tabela extract desde `since` (ISO string ou datetime).
 
-        Retorna {"rows": [...], "removedKeys": [...] | None, "nextSince": str}.
+        Retorna {"rows": [...], "removedKeys": [...] | None, "nextSince": str, "seen": [...]}.
         `removedKeys` e None se a fonte nunca teve upsert habilitado (sem keyColumn,
-        sem como saber o que foi excluido). Guarde `nextSince` e passe como `since` na
-        proxima chamada para continuar de onde parou — se nada mudou, `nextSince` volta
+        sem como saber o que foi excluido). Guarde `nextSince` e `seen` e passe-os na
+        proxima chamada (`since=nextSince, seen=seen`) — se nada mudou, `nextSince` volta
         igual ao `since` recebido, entao e seguro chamar em loop (polling).
 
-        `since=None` na primeira chamada busca a tabela inteira como baseline (ainda
-        sujeita a `limit`); use o `nextSince` retornado para as chamadas seguintes.
+        `since=None` na primeira chamada busca a tabela inteira como baseline, PAGINADA: com
+        `follow=True` (padrao) o SDK segue `hasMore`/`nextCursor` ate esgotar. Sem `follow`,
+        confira `hasMore` no retorno antes de usar `nextSince`.
 
-        `follow=True` (padrao): se o servidor indicar que ha mais paginas (`hasMore`), segue
-        o cursor ate esgotar e devolve TODAS as mudancas (o resultado pode passar de `limit`).
-        Sem isso, lotes de sync maiores que `limit` perdiam linhas em silencio.
+        Janela de seguranca: o servidor recua o `nextSince` alguns minutos (uma transacao lenta
+        pode commitar depois de outra mais nova). Linhas dentro da janela voltam na chamada
+        seguinte; o SDK as remove por impressao digital (carimbo + conteudo da linha) usando `seen`.
+        `removedKeys` e idempotente: aplicar a mesma exclusao duas vezes e inofensivo.
+
+        `since` sem fuso (ou datetime ingenuo) e UTC; os valores de `nextSince` sao sempre UTC (`...Z`)
+        com microssegundos — guarde-os como texto, sem converter para datetime com milissegundos.
         """
-        params: dict[str, Any] = {"limit": limit}
+        base: dict[str, Any] = {"limit": limit, "stamps": 1}
+        params = dict(base)
         if since is not None:
-            params["since"] = since.isoformat() if isinstance(since, _datetime.datetime) else since
-        body = self._request_full("GET", f"/api/v1/tables/{table_id}/rows", params=params)
-        meta = body.get("meta") or {}
-        rows: list[Any] = list(body.get("data") or [])
-        removed = meta.get("removedKeys")
-        next_since = meta.get("nextSince")
+            params["since"] = self._since_param(since)
+        original_since = params.get("since")
+
+        rows: list[Any] = []
+        removed: list[Any] | None = None
+        next_since: str | None = None
+        fingerprints: dict[str, None] = {fp: None for fp in (seen or [])}
+        delivered: dict[str, None] = {}
+        has_more = False
 
         pages = 0
-        while follow and meta.get("hasMore") and "since" in params and pages < 100_000:
-            pages += 1
-            page_params: dict[str, Any] = {"limit": limit}
-            if meta.get("nextCursor"):
-                page_params["since"] = params["since"]
-                page_params["cursor"] = meta["nextCursor"]
-            elif meta.get("nextSince") and meta["nextSince"] != page_params.get("since", params["since"]):
-                page_params["since"] = meta["nextSince"]
-            else:
-                break  # sem cursor e sem progresso possivel: nao entra em laco
-            body = self._request_full("GET", f"/api/v1/tables/{table_id}/rows", params=page_params)
+        while True:
+            body = self._request_full("GET", f"/api/v1/tables/{table_id}/rows", params=params)
             meta = body.get("meta") or {}
-            rows.extend(body.get("data") or [])
+            data = body.get("data") or []
+            stamps = meta.get("rowStamps")
+            for i, row in enumerate(data):
+                if isinstance(stamps, list) and i < len(stamps):
+                    fp = self._row_fingerprint(str(stamps[i]), row)
+                    if fp in fingerprints:
+                        continue  # ja entregue numa chamada anterior (linha dentro da janela de seguranca)
+                    fingerprints[fp] = None
+                    delivered[fp] = None
+                rows.append(row)
             if meta.get("removedKeys"):
                 removed = (removed or []) + list(meta["removedKeys"])
+            elif removed is None and meta.get("removedKeys") is not None:
+                removed = []
             next_since = meta.get("nextSince") or next_since
-            params["since"] = page_params["since"] if "cursor" not in page_params else params["since"]
+            has_more = bool(meta.get("hasMore"))
+
+            pages += 1
+            if not (follow and has_more) or pages >= 100_000:
+                break
+            if meta.get("nextCursor"):
+                params = dict(base)
+                if original_since is not None:
+                    params["since"] = original_since
+                params["cursor"] = meta["nextCursor"]
+            elif meta.get("nextSince") and meta["nextSince"] != params.get("since"):
+                params = dict(base)
+                params["since"] = meta["nextSince"]
+                original_since = params["since"]
+            else:
+                break  # sem cursor e sem progresso possivel: nao entra em laco
+
+        # guarda so as impressoes digitais que ainda podem voltar (carimbo >= nextSince)
+        keep = [fp for fp in fingerprints if next_since is None or fp.split("|", 1)[0] >= next_since]
         return {
             "rows": rows,
             "removedKeys": removed,
             "nextSince": next_since,
+            "hasMore": has_more,
+            "seen": keep,
         }
 
     def source_info(self, source_id: str):
@@ -329,10 +381,28 @@ class CatworldClient:
         columns: list[str] = []
         rows: list[dict[str, Any]] = []
         execution_time_ms: int = 0
+        for kind, value in self._stream_events(payload):
+            if kind == "columns":
+                columns = value
+            elif kind == "row":
+                rows.append(value)
+            else:
+                execution_time_ms = value.get("executionTimeMs", 0)
+                logger.info("Stream concluído: %s linha(s) em %sms", value.get("rowCount", "?"), execution_time_ms)
+        return QueryResult({"rows": rows, "columns": columns, "rowCount": len(rows), "executionTimeMs": execution_time_ms})
 
+    def _stream_events(self, payload: dict[str, Any]) -> Iterator[tuple[str, Any]]:
+        """Le o NDJSON de ``/api/v1/queries`` (stream) validando o protocolo.
+
+        Emite ``("columns", [...])``, ``("row", {...})`` e, por fim, ``("done", {...})``.
+        Um stream que termina sem ``__done__`` (queda de conexao, corte do proxy), uma linha que nao
+        e JSON valido, ou um ``rowCount`` diferente do numero de linhas recebidas levantam
+        ``ConnectionError`` — nunca devolvem um resultado parcial como se fosse completo.
+        """
+        count = 0
+        got_done = False
         with self._client.stream("POST", "/api/v1/queries", json=payload, timeout=None) as response:
             if not response.is_success:
-                # Lê o corpo de erro normalmente
                 body = response.read()
                 try:
                     error = _json.loads(body).get("error", {})
@@ -341,31 +411,38 @@ class CatworldClient:
                 except Exception:
                     code = None
                     message = body.decode(errors="replace") or f"HTTP {response.status_code}"
-                from .exceptions import from_api_error
                 raise from_api_error(code, message)
 
-            for raw_line in response.iter_lines():
+            for line_no, raw_line in enumerate(response.iter_lines(), start=1):
                 line = raw_line.strip()
                 if not line:
                     continue
                 try:
                     obj = _json.loads(line)
-                except _json.JSONDecodeError:
-                    continue
+                except _json.JSONDecodeError as exc:
+                    raise ConnectionError(f"Stream corrompido: linha {line_no} nao e JSON valido ({exc.msg}).") from exc
+                if not isinstance(obj, dict):
+                    raise ConnectionError(f"Stream corrompido: linha {line_no} nao e um objeto JSON.")
 
                 if "__columns__" in obj:
-                    columns = obj["__columns__"]
+                    yield "columns", obj["__columns__"]
                 elif "__done__" in obj:
-                    execution_time_ms = obj.get("executionTimeMs", 0)
-                    logger.info("Stream concluído: %s linha(s) em %sms", obj.get("rowCount", "?"), execution_time_ms)
+                    expected = obj.get("rowCount")
+                    if expected is not None and expected != count:
+                        raise ConnectionError(f"Stream incompleto: servidor informou {expected} linha(s), recebi {count}.")
+                    if obj.get("truncated"):
+                        warnings.warn("O servidor truncou o resultado do stream (limite de resultado atingido); os dados estao incompletos.", RuntimeWarning, stacklevel=3)
+                    got_done = True
+                    yield "done", obj
                     break
                 elif "__error__" in obj:
-                    from .exceptions import from_api_error
                     raise from_api_error(obj.get("code"), obj.get("message", "Erro desconhecido no stream"))
                 else:
-                    rows.append(obj)
+                    count += 1
+                    yield "row", obj
+        if not got_done:
+            raise ConnectionError(f"Stream interrompido antes de __done__ apos {count} linha(s): o resultado esta incompleto.")
 
-        return QueryResult({"rows": rows, "columns": columns, "rowCount": len(rows), "executionTimeMs": execution_time_ms})
 
     def iter_query(
         self,
@@ -374,12 +451,18 @@ class CatworldClient:
         dataset_id: str | None = None,
         project_id: str | None = None,
         normalize: bool = False,
+        stream: bool = True,
     ) -> Iterator[QueryResult]:
-        """Itera sobre os resultados de uma query página a página (10.000 linhas por página).
+        """Itera sobre os resultados de uma query em lotes de ate 10.000 linhas.
 
-        Útil para processar grandes volumes sem carregar tudo na memória.
+        Util para processar grandes volumes sem carregar tudo na memoria.
+
+        Por padrao (``stream=True``) le UMA consulta em streaming (um unico snapshot: nao ha
+        linhas repetidas ou perdidas entre lotes) e a valida ate o ``__done__``. Com
+        ``stream=False`` pagina com OFFSET: o servidor desempata a ordem, mas prefira o
+        stream — paginacao por OFFSET so e consistente se os dados nao mudarem entre as paginas.
         """
-        yield from self._iter_query(sql, timeout=timeout, dataset_id=dataset_id, project_id=project_id, normalize=normalize)
+        yield from self._iter_query(sql, timeout=timeout, dataset_id=dataset_id, project_id=project_id, normalize=normalize, stream=stream)
 
     def _iter_query(
         self,
@@ -388,6 +471,7 @@ class CatworldClient:
         dataset_id: str | None = None,
         project_id: str | None = None,
         normalize: bool = False,
+        stream: bool = True,
     ) -> Iterator[QueryResult]:
         live_source_id = self._resolve_live_source_for_query(sql, dataset_id, project_id)
         if live_source_id:
@@ -395,15 +479,41 @@ class CatworldClient:
             return
 
         context = f"dataset={dataset_id}" if dataset_id else f"project={project_id}" if project_id else "sem contexto"
+        if stream:
+            payload: dict[str, Any] = {"sql": sql, "stream": True}
+            if normalize:
+                payload["normalize"] = True
+            if dataset_id:
+                payload["datasetId"] = dataset_id
+            if project_id:
+                payload["projectId"] = project_id
+            logger.info("Executando query em modo streaming em lotes [%s]", context)
+            columns: list[str] = []
+            batch: list[dict[str, Any]] = []
+            for kind, value in self._stream_events(payload):
+                if kind == "columns":
+                    columns = value
+                elif kind == "row":
+                    batch.append(value)
+                    if len(batch) >= _PAGE_SIZE:
+                        yield QueryResult({"rows": batch, "columns": columns, "rowCount": len(batch)})
+                        batch = []
+            if batch or not columns:
+                yield QueryResult({"rows": batch, "columns": columns, "rowCount": len(batch)})
+            return
+
         offset = 0
         while True:
             logger.info("Executando query [%s, timeout=%ss, offset=%s]", context, timeout, offset)
             page = self._query_page(sql, timeout=timeout, limit=_PAGE_SIZE, offset=offset, dataset_id=dataset_id, project_id=project_id, normalize=normalize)
             logger.info("Página: %s linha(s) em %sms", page.get("rowCount", "?"), page.get("executionTimeMs", "?"))
             yield page
-            if len(page.rows) < _PAGE_SIZE:
+            got = len(page.rows)
+            # `truncated` e a fonte da verdade: o servidor pode devolver paginas menores que _PAGE_SIZE (teto proprio)
+            more = page.get("truncated") if "truncated" in page else got >= _PAGE_SIZE
+            if not more or got == 0:
                 break
-            offset += _PAGE_SIZE
+            offset += got
 
     def _query_page(
         self,

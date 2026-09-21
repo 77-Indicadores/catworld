@@ -2,8 +2,12 @@
  * `$filter` e `$orderby` do OData v4 (subconjunto) -> SQL Postgres.
  *
  * Antes o servidor IGNORAVA essas opcoes em silencio: `$filter=Id eq 1` devolvia a tabela inteira e o Power BI
- * (que "dobra" filtros para o servidor) mostrava dado errado. Agora o subconjunto suportado e APLICADO; o que
- * nao for entendido continua sendo ignorado (comportamento anterior, nada quebra) mas com aviso no cabecalho.
+ * (que "dobra" filtros para o servidor) mostrava dado errado. O subconjunto suportado e APLICADO; o que nao for
+ * entendido (ou o backend nao suportar) e um ERRO claro — 400 (expressao invalida) ou 501 (opcao nao implementada) —
+ * porque devolver a tabela inteira quando o cliente pediu um filtro entrega dado errado como se estivesse certo (ENT-07).
+ *
+ * Nulos (OData v4 5.1.1): `eq`/`gt`/... com um operando nulo e falso; `ne` com nulo e verdadeiro; `not` inverte o
+ * booleano (nao propaga NULL do SQL). Ou seja `valor ne 20` e `not (valor eq 20)` INCLUEM as linhas com valor nulo.
  *
  * Suportado: eq ne gt ge lt le, and or not, parenteses, null, true/false, strings 'x', numeros, datas
  * (2024-01-31) e datetimes (2024-01-31T10:00:00Z), contains/startswith/endswith(col,'x'), year/month/day(col).
@@ -97,7 +101,8 @@ export function translateFilter(src: string, columns: ODataColumn[], ref: (c: OD
     return l;
   }
   function parseNot(): string {
-    if (kw("not")) { next(); return `(NOT ${parseNot()})`; }
+    // COALESCE: em SQL, NOT(NULL) e NULL (linha some); em OData, comparacao com nulo e FALSE e `not` dela e TRUE
+    if (kw("not")) { next(); return `(NOT COALESCE(${parseNot()}, FALSE))`; }
     return parseCmp();
   }
   function parseCmp(): string {
@@ -132,6 +137,13 @@ export function translateFilter(src: string, columns: ODataColumn[], ref: (c: OD
     if (lc === "bool" && op !== "=" && op !== "<>") throw new UnsupportedODataOption("booleano so com eq/ne");
     // datetime x date: compara como timestamp
     const wrap = (e: Expr, s: string) => (e.k === "lit" && e.cat === "date" && (lc === "datetime" || rc === "datetime")) ? `CAST(${s} AS TIMESTAMP)` : s;
+    if (op === "<>") {
+      // `ne`: nulo ne valor e VERDADEIRO. Coluna x literal nao nulo: `<> OR IS NULL`; demais casos: IS DISTINCT FROM.
+      const nullable = (e: Expr) => e.k === "col" || e.k === "fn";
+      if (nullable(l) && r.k === "lit") return `((${wrap(l, left)} <> ${wrap(r, right)}) OR (${left} IS NULL))`;
+      if (nullable(r) && l.k === "lit") return `((${wrap(l, left)} <> ${wrap(r, right)}) OR (${right} IS NULL))`;
+      return `(${wrap(l, left)} IS DISTINCT FROM ${wrap(r, right)})`;
+    }
     return `(${wrap(l, left)} ${op} ${wrap(r, right)})`;
   }
 
@@ -205,11 +217,17 @@ export function translateOrderBy(src: string, columns: ODataColumn[], ref: (c: O
 
 export type ODataQueryPlan = { where: string | null; orderBy: string | null; warnings: string[] };
 
+/** Erro de consulta OData para o cliente: 400 = expressao invalida; 501 = opcao/backend nao suportado. */
+export class ODataOptionError extends Error {
+  constructor(readonly status: 400 | 501, readonly code: string, message: string) { super(message); }
+}
+
+/** Opcoes que mudariam o RESULTADO se ignoradas: erro 501 em vez de devolver dado errado. */
 const UNSUPPORTED_OPTIONS = ["$search", "$expand", "$apply", "$compute", "$levels", "$skiptoken", "$inlinecount", "$deltatoken"];
 
 /**
- * Interpreta as opcoes de consulta. NUNCA lanca: o que nao for suportado vira aviso e a opcao e ignorada
- * (como sempre foi), para nao quebrar cliente que funciona hoje.
+ * Interpreta as opcoes de consulta. Lanca `ODataOptionError` (400/501) para `$filter`/`$orderby` invalidos ou em
+ * backend sem suporte e para opcoes nao implementadas ($apply, $search, $expand, ...): nunca as ignora.
  */
 export function planODataQuery(
   params: URLSearchParams,
@@ -221,22 +239,20 @@ export function planODataQuery(
   let where: string | null = null;
   let orderBy: string | null = null;
 
+  for (const o of UNSUPPORTED_OPTIONS) {
+    if (params.get(o) !== null) throw new ODataOptionError(501, "ODATA_OPTION_NOT_SUPPORTED", `${o} nao e suportado por este servico OData. Remova a opcao (o Catworld nao a ignora: devolveria dado diferente do pedido).`);
+  }
   const filter = params.get("$filter");
   if (filter?.trim()) {
-    if (!supported) warnings.push("$filter ignorado: nao suportado neste backend");
-    else {
-      try { where = translateFilter(filter, columns, ref); }
-      catch (e) { warnings.push(`$filter ignorado: ${e instanceof UnsupportedODataOption ? e.message : "expressao invalida"}`); }
-    }
+    if (!supported) throw new ODataOptionError(501, "ODATA_OPTION_NOT_SUPPORTED", "$filter nao e suportado nesta fonte (SQL Server). Remova o filtro ou consulte via SQL (POST /api/v1/queries).");
+    try { where = translateFilter(filter, columns, ref); }
+    catch (e) { throw new ODataOptionError(400, "ODATA_INVALID_QUERY", `$filter invalido: ${e instanceof UnsupportedODataOption ? e.message : "expressao invalida"}`); }
   }
   const ob = params.get("$orderby");
   if (ob?.trim()) {
-    if (!supported) warnings.push("$orderby ignorado: nao suportado neste backend");
-    else {
-      try { orderBy = translateOrderBy(ob, columns, ref); }
-      catch (e) { warnings.push(`$orderby ignorado: ${e instanceof UnsupportedODataOption ? e.message : "expressao invalida"}`); }
-    }
+    if (!supported) throw new ODataOptionError(501, "ODATA_OPTION_NOT_SUPPORTED", "$orderby nao e suportado nesta fonte (SQL Server). Remova a ordenacao ou consulte via SQL (POST /api/v1/queries).");
+    try { orderBy = translateOrderBy(ob, columns, ref); }
+    catch (e) { throw new ODataOptionError(400, "ODATA_INVALID_QUERY", `$orderby invalido: ${e instanceof UnsupportedODataOption ? e.message : "expressao invalida"}`); }
   }
-  for (const o of UNSUPPORTED_OPTIONS) if (params.get(o) !== null) warnings.push(`${o} ignorado: nao suportado`);
   return { where, orderBy, warnings };
 }

@@ -1,7 +1,7 @@
 /** SQL do `since` executado em Postgres real. So roda com CW_TEST_PG_URL (descartavel — NUNCA producao). */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Pool } from "pg";
-import { decodeCursor, pgRemovedSql, pgRowsPageSql, shapeRowsPage, settleFirstPage, type PageRow } from "./since";
+import { decodeCursor, finalizeNextSince, parseSince, PG_NOW_TXT_SQL, pgRemovedSql, pgRowsPageSql, shapeRowsPage, settleFirstPage, type PageRow } from "./since";
 
 const url = process.env.CW_TEST_PG_URL;
 const d = url ? describe : describe.skip;
@@ -75,6 +75,23 @@ d("since (executando)", () => {
     const s = await settleFirstPage(raw, 500, new Date(0), () => q(pgRowsPageSql({ ...t, limit: 50_000 })));
     expect(s.page).toHaveLength(1800);
     expect(s.hasMore).toBe(false);
+  });
+
+  it("ENT-05: microssegundos — depois de seguir nextSince a linha NAO volta (antes repetia para sempre)", async () => {
+    const lit = parseSince("2026-09-19T09:30:00Z")!.sqlLiteral;
+    const raw = await q(pgRowsPageSql({ ...base, sinceLit: lit, limit: 5000 }));
+    const s = await settleFirstPage(raw, 5000, "2026-09-19T09:30:00Z", async () => []);
+    // janela 0 + relogio do storage bem adiante: nextSince = maior carimbo (com 6 casas), sem passar por Date
+    const nowTxt = (await pool.query(PG_NOW_TXT_SQL)).rows[0].n as string;
+    const next = finalizeNextSince({ settled: s, since: "2026-09-19T09:30:00Z", nowTxt, windowMs: 0 });
+    expect(next).toBe("2026-09-19T11:00:00.000000Z");
+    const again = await q(pgRowsPageSql({ ...base, sinceLit: parseSince(next)!.sqlLiteral, limit: 5000 }));
+    expect(again).toHaveLength(0);
+    // o grupo das 10h tem .123456: seguir o since do grupo devolve so as 700 das 11h (e nao repete o das 10h)
+    const g10 = await q(pgRowsPageSql({ ...base, sinceLit: parseSince("2026-09-19T10:00:00.123456Z")!.sqlLiteral, limit: 5000 }));
+    expect(g10).toHaveLength(700);
+    const ms = await q(pgRowsPageSql({ ...base, sinceLit: "'2026-09-19 10:00:00.123'", limit: 5000 }));
+    expect(ms.length).toBeGreaterThan(3000); // truncar para ms (o bug) trazia o grupo de novo
   });
 
   it("exclusoes: todas, sem o teto do limit, ordenadas", async () => {

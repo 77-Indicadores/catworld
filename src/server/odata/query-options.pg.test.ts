@@ -44,6 +44,15 @@ d("odata query-options (executando)", () => {
     expect(await ids("nome eq null")).toEqual([5]);
     expect(await ids("valor ne null")).toEqual([1, 2, 4, 5]);
   });
+  it("ENT-07 nulos: ne e not INCLUEM as linhas com valor nulo (OData v4), eq/gt nao", async () => {
+    expect(await ids("valor ne 20")).toEqual([1, 3, 4, 5]);          // 3 tem valor NULL
+    expect(await ids("not (valor eq 20)")).toEqual([1, 3, 4, 5]);
+    expect(await ids("nome ne 'ana'")).toEqual([2, 3, 4, 5]);        // 5 tem nome NULL
+    expect(await ids("not (valor gt 5)")).toEqual([3, 5]);           // NULL gt 5 e falso, logo not = verdadeiro (ids 3 e 5)
+    expect(await ids("valor gt 5")).toEqual([1, 2, 4]);
+    expect(await ids("not (nome eq 'ana' or valor eq 20)")).toEqual([3, 4, 5]);
+    expect(await ids("year(dia) ne 2026")).toEqual([4, 5]);         // dia NULL (id 4) entra
+  });
   it("texto: eq, contains/startswith/endswith e curingas literais (%) sem vazar", async () => {
     expect(await ids("nome eq 'ana'")).toEqual([1]);
     expect(await ids("contains(nome,'a')")).toEqual([1, 2, 3]);   // ana, Bia, cai

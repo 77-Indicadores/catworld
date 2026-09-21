@@ -99,4 +99,4 @@ def test_changes_baseline_and_servers_without_has_more_are_unchanged():
     with client_with_handler(handler) as client:
         out = client.changes("tbl")  # baseline: sem since
     assert len(calls) == 1 and "since" not in calls[0]
-    assert out == {"rows": [{"id": 1}], "removedKeys": None, "nextSince": "2026-09-19T10:00:00.000Z"}
+    assert {k: out[k] for k in ("rows", "removedKeys", "nextSince")} == {"rows": [{"id": 1}], "removedKeys": None, "nextSince": "2026-09-19T10:00:00.000Z"}  # `hasMore` e `seen` sao aditivos

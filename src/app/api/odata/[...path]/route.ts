@@ -5,7 +5,10 @@ import { executeReadOnly } from "@/server/azure/sql";
 import { withPg, quotedPgTable } from "@/server/connections/postgres";
 import { executeLiveReadOnly, isMssqlConnection, liveCount, liveQuoteIdent, liveQuotedTable, type LiveConnection } from "@/server/connections/live";
 import { assertDatasetAccess } from "@/server/auth/permissions";
-import { planODataQuery, type ODataQueryPlan } from "@/server/odata/query-options";
+import { ODataOptionError, planODataQuery, type ODataQueryPlan } from "@/server/odata/query-options";
+import { edmFacets, MAX_PAGE, nextPageParams as nextParams, parseNonNegativeInt } from "@/server/odata/paging-facets";
+import { PG_STRING_TYPES } from "@/server/storage/pg-types";
+import { pgDateText, pgTimestampToIso } from "@/server/sql-contract/result";
 import { stableOrderBy, UNSTABLE_ORDER_WARNING } from "@/server/odata/stable-order";
 import { getStorageConnection } from "@/server/storage/connection";
 import { activeRowsPredicate, joinWhere } from "@/server/storage/active-rows";
@@ -197,9 +200,10 @@ function normalizeRow(row: Record<string, unknown>, typeMap: Map<string, string>
     if (v === null || v === undefined) { out[k] = null; continue; }
     const t = typeMap.get(k) ?? "NVARCHAR";
     if (["DATETIME2", "DATETIME", "SMALLDATETIME", "DATETIMEOFFSET"].includes(t)) {
-      out[k] = v instanceof Date ? v.toISOString() : v;
+      // pg entrega TEXTO (PG_STRING_TYPES): independente do fuso do Node, com microssegundos e 'infinity'; sem fuso = UTC
+      out[k] = v instanceof Date ? (Number.isNaN(v.getTime()) ? null : v.toISOString()) : typeof v === "string" ? pgTimestampToIso(v) : v;
     } else if (t === "DATE") {
-      out[k] = v instanceof Date ? v.toISOString().slice(0, 10) : String(v).slice(0, 10);
+      out[k] = v instanceof Date ? v.toISOString().slice(0, 10) : pgDateText(String(v));
     } else if (t === "TIME") {
       out[k] = String(v);
     } else if (["FLOAT", "REAL"].includes(t)) {
@@ -219,12 +223,16 @@ function normalizeRow(row: Record<string, unknown>, typeMap: Map<string, string>
 
 // ── Cache de COUNT ────────────────────────────────────────────────────────────
 
+// Fonte live nao tem "versao dos dados" (dataVersion = "live"): um COUNT em cache por 5 min serviria contagem velha
+// junto de paginas novas. So storage (com a versao dos dados na chave) usa o cache.
+const cacheable = (key: string) => !key.includes("/live/");
+
 function getCachedCount(key: string): number | null {
-  return countCache.get(key);
+  return cacheable(key) ? countCache.get(key) : null;
 }
 
 function setCachedCount(key: string, count: number) {
-  countCache.set(key, count);
+  if (cacheable(key)) countCache.set(key, count);
 }
 
 // ── Query live ────────────────────────────────────────────────────────────────
@@ -263,9 +271,10 @@ async function queryLiveTable(
     const cachedCount = getCachedCount(countCacheKey);
     if (cachedCount !== null) {
       return withPg(live.connection, async (client) => {
-        const dataResult = await client.query<Record<string, unknown>>(
-          `SELECT ${colList} FROM ${baseExpr}${whereSql}${orderSql} LIMIT ${top} OFFSET ${skip}`,
-        );
+        const dataResult = await client.query<Record<string, unknown>>({
+          text: `SELECT ${colList} FROM ${baseExpr}${whereSql}${orderSql} LIMIT ${top} OFFSET ${skip}`,
+          types: PG_STRING_TYPES,
+        } as never);
         return { rows: dataResult.rows.map((row) => normalizeRow(row, typeMap)), totalCount: cachedCount };
       });
     }
@@ -275,7 +284,7 @@ async function queryLiveTable(
         client.query<{ cnt: string }>(`SELECT COUNT(*) AS cnt FROM ${baseExpr}${whereSql}`),
       ),
       withPg(live.connection, (client) =>
-        client.query<Record<string, unknown>>(`SELECT ${colList} FROM ${baseExpr}${whereSql}${orderSql} LIMIT ${top} OFFSET ${skip}`),
+        client.query<Record<string, unknown>>({ text: `SELECT ${colList} FROM ${baseExpr}${whereSql}${orderSql} LIMIT ${top} OFFSET ${skip}`, types: PG_STRING_TYPES } as never),
       ),
     ]);
     const totalCount = Number(countResult.rows[0]?.cnt ?? 0);
@@ -287,9 +296,10 @@ async function queryLiveTable(
   }
 
   return withPg(live.connection, async (client) => {
-    const dataResult = await client.query<Record<string, unknown>>(
-      `SELECT ${colList} FROM ${baseExpr}${whereSql}${orderSql} LIMIT ${top} OFFSET ${skip}`,
-    );
+    const dataResult = await client.query<Record<string, unknown>>({
+      text: `SELECT ${colList} FROM ${baseExpr}${whereSql}${orderSql} LIMIT ${top} OFFSET ${skip}`,
+      types: PG_STRING_TYPES,
+    } as never);
     return { rows: dataResult.rows.map((row) => normalizeRow(row, typeMap)), totalCount: null };
   });
 }
@@ -341,7 +351,7 @@ function buildMetadata(dataset: Dataset): string {
   const entityTypes = dataset.tables
     .map((t) => {
       const props = t.columns
-        .map((c) => `      <Property Name="${escXml(c.sqlName)}" Type="${sqlToEdmType(c.sqlType)}" Nullable="${c.nullable}"/>`)
+        .map((c) => `      <Property Name="${escXml(c.sqlName)}" Type="${sqlToEdmType(c.sqlType)}" Nullable="${c.nullable}"${edmFacets(c.sqlType)}/>`)
         .join("\n");
       return `    <EntityType Name="${escXml(t.sqlName)}">
       <Key><PropertyRef Name="_row_number"/></Key>
@@ -405,21 +415,27 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     if (!table) throw new ApiError(404, "NOT_FOUND", "Tabela não encontrada");
 
     const url = request.nextUrl;
-    const rawTop  = parseInt(url.searchParams.get("$top")  ?? String(DEFAULT_TOP), 10);
-    const rawSkip = parseInt(url.searchParams.get("$skip") ?? "0", 10);
+    // $top/$skip: inteiro >= 0 (OData v4). Antes "abc" virava 1000 e negativo virava 0/1 sem aviso.
+    const intParam = (name: string, dflt: number): number => {
+      try { return parseNonNegativeInt(url.searchParams.get(name), name, dflt); }
+      catch (e) { throw new ApiError(400, "ODATA_INVALID_QUERY", e instanceof Error ? e.message : `${name} invalido`); }
+    };
+    const topRequested = url.searchParams.has("$top");
+    const wantedTop = intParam("$top", DEFAULT_TOP);
     const selectParam = url.searchParams.get("$select");
     const countParam  = url.searchParams.get("$count");
-
     const topWarnings: string[] = [];
-    const wantedTop = isNaN(rawTop) ? 1000 : rawTop;
-    // $top=0 e valido (so contagem/metadados): antes virava 1 linha. Ajustes de limite agora sao avisados.
-    const top  = Math.min(Math.max(0, wantedTop), 10_000);
-    if (top !== wantedTop) topWarnings.push(`$top=${wantedTop} ajustado para ${top} (maximo 10000 por pagina; siga @odata.nextLink)`);
-    const skip = Math.max(0, isNaN(rawSkip) ? 0 : rawSkip);
+    // $top=0 e valido (so contagem/metadados). O teto por pagina e 10000: acima disso o servidor pagina (nextLink) e
+    // o total pedido em $top e respeitado nas paginas seguintes (o nextLink carrega o $top RESTANTE).
+    const top  = Math.min(wantedTop, MAX_PAGE);
+    if (top !== wantedTop) topWarnings.push(`$top=${wantedTop} excede 10000 por pagina: siga @odata.nextLink (o total pedido sera respeitado)`);
+    const skip = intParam("$skip", 0);
+    const nextPageParams = (returned: number) => nextParams({ top, wantedTop, topRequested, skip, returned });
 
-    const cols = selectParam
-      ? table.columns.filter((c) => selectParam.split(",").map((s) => s.trim()).includes(c.sqlName))
-      : table.columns;
+    const wantedCols = selectParam ? selectParam.split(",").map((s) => s.trim()).filter(Boolean) : null;
+    const unknownCols = wantedCols ? wantedCols.filter((n) => !table.columns.some((c) => c.sqlName === n)) : [];
+    if (unknownCols.length) throw new ApiError(400, "ODATA_INVALID_QUERY", `$select referencia coluna(s) inexistente(s): ${unknownCols.join(", ")}`);
+    const cols = wantedCols ? table.columns.filter((c) => wantedCols.includes(c.sqlName)) : table.columns;
     if (cols.length === 0) throw new ApiError(400, "BAD_REQUEST", "Nenhuma coluna válida selecionada");
 
     const needCount = countParam === "true";
@@ -431,7 +447,13 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       : (await getStorageConnection(dataset.storageServerId)).provider;
     const liveOrig = new Map(table.columns.map((c) => [c.sqlName, c.originalName]));
     const refCol = (c: { sqlName: string }) => `"${(table.live ? (liveOrig.get(c.sqlName) ?? c.sqlName) : c.sqlName).replaceAll('"', '""')}"`;
-    const plan = planODataQuery(url.searchParams, table.columns, refCol, provider === "postgres");
+    let plan: ODataQueryPlan;
+    try {
+      plan = planODataQuery(url.searchParams, table.columns, refCol, provider === "postgres");
+    } catch (e) {
+      if (e instanceof ODataOptionError) throw new ApiError(e.status, e.code, e.message);
+      throw e;
+    }
     plan.warnings.push(...topWarnings);
     // Versao dos dados (storage): upload/sync gravam last_data_at; entra nas chaves de cache para contagem/pagina nao servirem dado velho.
     let dataVersion = "live";
@@ -452,10 +474,11 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       );
       response["value"] = rows.map((r, i) => ({ ...r, _row_number: String(skip + i + 1) }));
       if (needCount) response["@odata.count"] = String(totalCount ?? 0);
-      if (top > 0 && rows.length === top) {
+      const np = nextPageParams(rows.length);
+      if (np) {
         const next = new URL(`${baseUrl}/${table.sqlName}`);
-        next.searchParams.set("$top", String(top));
-        next.searchParams.set("$skip", String(skip + top));
+        next.searchParams.set("$top", np.top);
+        next.searchParams.set("$skip", np.skip);
         if (selectParam) next.searchParams.set("$select", selectParam);
         if (needCount) next.searchParams.set("$count", "true");
         if (filterParam) next.searchParams.set("$filter", filterParam);
@@ -474,10 +497,11 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         const typeMap = new Map(cols.map((c) => [c.sqlName, c.sqlType.toUpperCase().replace(/\(.*\)/, "").trim()]));
         let dataRowsLength = 0;
         const setNextLink = () => {
-          if (top > 0 && dataRowsLength === top) {
+          const np = nextPageParams(dataRowsLength);
+          if (np) {
             const next = new URL(`${baseUrl}/${table.sqlName}`);
-            next.searchParams.set("$top", String(top));
-            next.searchParams.set("$skip", String(skip + top));
+            next.searchParams.set("$top", np.top);
+            next.searchParams.set("$skip", np.skip);
             if (selectParam) next.searchParams.set("$select", selectParam);
             if (needCount) next.searchParams.set("$count", "true");
         if (filterParam) next.searchParams.set("$filter", filterParam);
@@ -510,7 +534,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 
           const cachedCount = getCachedCount(countCacheKey);
           const [dataRows, countResult] = await withODataSemaphore(() => Promise.all([
-            pgConn.query<Record<string, unknown>>(dataSql),
+            pgConn._pool.query<Record<string, unknown>>({ text: dataSql, types: PG_STRING_TYPES } as never).then((r) => r.rows),
             needCount && cachedCount === null
               ? pgConn.query<{ cnt: string }>(countSql)
               : Promise.resolve([]),
@@ -557,7 +581,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       }
     }
 
-    // Opcao de consulta nao suportada continua ignorada (nada quebra), mas agora o cliente e avisado.
+    // Opcoes nao suportadas viram erro 400/501 (planODataQuery); aqui so avisos informativos (ex.: $top acima do teto).
     const headers: Record<string, string> = { ...ODATA_HEADERS };
     if (plan.warnings.length) headers["Warning"] = plan.warnings.map((w) => `299 catworld "${w.replace(/"/g, "'")}"`).join(", ");
     return Response.json(response, { headers });

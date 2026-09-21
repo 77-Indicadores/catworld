@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { planODataQuery, translateFilter, translateOrderBy, UnsupportedODataOption, type ODataColumn } from "./query-options";
+import { ODataOptionError, planODataQuery, translateFilter, translateOrderBy, UnsupportedODataOption, type ODataColumn } from "./query-options";
 
 const cols: ODataColumn[] = [
   { sqlName: "id", sqlType: "BIGINT" },
@@ -15,13 +15,13 @@ const f = (s: string) => translateFilter(s, cols, ref);
 describe("translateFilter", () => {
   it("comparacoes basicas", () => {
     expect(f("id eq 1")).toBe('("id" = 1)');
-    expect(f("id ne 1")).toBe('("id" <> 1)');
+    expect(f("id ne 1")).toBe('(("id" <> 1) OR ("id" IS NULL))'); // ne inclui nulos (OData v4)
     expect(f("valor ge 10.5 and valor lt 20")).toBe('(("valor" >= 10.5) AND ("valor" < 20))');
     expect(f("nome eq 'ana'")).toBe(`("nome" = 'ana')`);
   });
   it("and/or/not/parenteses com precedencia correta", () => {
     expect(f("id eq 1 or id eq 2 and nome eq 'x'")).toBe(`(("id" = 1) OR (("id" = 2) AND ("nome" = 'x')))`);
-    expect(f("not (id eq 1)")).toBe('(NOT ("id" = 1))');
+    expect(f("not (id eq 1)")).toBe('(NOT COALESCE(("id" = 1), FALSE))');
     expect(f("(id eq 1 or id eq 2) and ativo eq true")).toBe('((("id" = 1) OR ("id" = 2)) AND ("ativo" = TRUE))');
   });
   it("null vira IS NULL / IS NOT NULL", () => {
@@ -73,8 +73,9 @@ describe("translateOrderBy", () => {
   });
 });
 
-describe("planODataQuery — nunca lanca; o que nao entende vira aviso e e ignorado (como sempre foi)", () => {
+describe("planODataQuery — o que nao entende e ERRO (400/501), nunca a tabela inteira", () => {
   const plan = (qs: string, supported = true) => planODataQuery(new URLSearchParams(qs), cols, ref, supported);
+  const err = (fn: () => unknown): ODataOptionError => { try { fn(); } catch (e) { return e as ODataOptionError; } throw new Error("nao lancou"); };
 
   it("aplica o suportado", () => {
     const p = plan("$filter=id eq 1&$orderby=nome desc");
@@ -82,21 +83,21 @@ describe("planODataQuery — nunca lanca; o que nao entende vira aviso e e ignor
     expect(p.orderBy).toBe('"nome" DESC NULLS LAST');
     expect(p.warnings).toEqual([]);
   });
-  it("$filter invalido: ignora e avisa (nao 400)", () => {
-    const p = plan("$filter=tolower(nome) eq 'a'");
-    expect(p.where).toBeNull();
-    expect(p.warnings[0]).toContain("$filter ignorado");
+  it("$filter/$orderby invalidos: 400 ODATA_INVALID_QUERY", () => {
+    const e = err(() => plan("$filter=tolower(nome) eq 'a'"));
+    expect(e).toBeInstanceOf(ODataOptionError);
+    expect(e).toMatchObject({ status: 400, code: "ODATA_INVALID_QUERY" });
+    expect(err(() => plan("$orderby=nada")).status).toBe(400);
   });
-  it("backend sem suporte (SQL Server): ignora e avisa", () => {
-    const p = plan("$filter=id eq 1&$orderby=id", false);
-    expect(p.where).toBeNull();
-    expect(p.orderBy).toBeNull();
-    expect(p.warnings).toHaveLength(2);
+  it("backend sem suporte (SQL Server): 501, nao ignora", () => {
+    expect(err(() => plan("$filter=id eq 1", false))).toMatchObject({ status: 501, code: "ODATA_OPTION_NOT_SUPPORTED" });
+    expect(err(() => plan("$orderby=id", false)).status).toBe(501);
   });
-  it("opcoes nao implementadas avisam", () => {
-    expect(plan("$expand=x&$search=abc").warnings.join("|")).toMatch(/\$expand.*\$search|\$search.*\$expand/);
+  it.each(["$apply=groupby((nome))", "$search=abc", "$expand=x", "$compute=id add 1 as y", "$skiptoken=abc"])("%s: 501", (qs) => {
+    expect(err(() => plan(qs)).status).toBe(501);
   });
-  it("sem opcoes: plano vazio (comportamento anterior intacto)", () => {
+  it("sem opcoes de filtro: plano vazio (comportamento anterior intacto)", () => {
     expect(plan("$top=10&$skip=5&$select=id&$count=true")).toEqual({ where: null, orderBy: null, warnings: [] });
+    expect(plan("$filter=&$orderby=  ")).toEqual({ where: null, orderBy: null, warnings: [] });
   });
 });
