@@ -1,4 +1,6 @@
-# Correções prontas que dependem de arquivos com alterações não commitadas do dono
+# Correções que dependiam de arquivos com alterações não commitadas do dono
+
+> **APLICADAS na árvore de trabalho em 2026-09-21 (a pedido do dono), ainda NÃO commitadas** (o commit inclui o trabalho em andamento do dono nos mesmos arquivos): ENT-01 (`hide-deleted-run.ts` + `hide-deleted-text.ts` + teste), ENT-04 (`apply.ts` + `fallback-gate.ts` + teste + repasse de `warnings` em `queries/route.ts`), FON-09 (`derived.ts`: guarda de integridade, troca numa transação, `failed` visível, `derived.pg.test.ts`) e ENT-05 (`tables/[id]/rows/route.ts` + `route.pg.test.ts`). Testes: `sql-contract` 184 verdes, `derived.pg` 2/2 e `rows/route.pg` 3/3 contra Postgres real. Mudança de contrato visível: `hide-deleted.pg.test.ts` deixou de afirmar "SQL ilegível passa intacto" (agora é reescrito pelos tokens ou recusado). Os textos abaixo ficam como registro do design.
 
 Estes itens do plano (`docs/estudo-confiabilidade-dados.md`) exigem editar arquivos que estavam com trabalho em andamento
 (`src/server/sql-contract/hide-deleted*.ts`, `apply.ts`, `run.ts`, `src/server/connections/derived.ts`,
