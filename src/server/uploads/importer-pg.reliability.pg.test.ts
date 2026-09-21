@@ -98,6 +98,9 @@ d("import Postgres: atomicidade e integridade (real)", () => {
     await run(file("a.csv", 5000), "t_replace");
     expect(await count("t_replace")).toBe(5000);
     expect(await fingerprint("t_replace")).toBe(await expectedFingerprint(5000, "v1"));
+    // o consumo incremental (rows?since=) filtra por cw_synced_at: precisa de índice (190-340 ms → 1-4 ms medidos em 500k linhas)
+    const idx = (await pool.query(`SELECT count(*)::int n FROM pg_indexes WHERE schemaname = $1 AND tablename = 't_replace' AND indexdef LIKE '%cw_synced_at%'`, [SCHEMA])).rows[0].n;
+    expect(idx).toBe(1);
   });
 
   it("replace sobre tabela existente (troca atômica): vira exatamente a carga nova", async () => {

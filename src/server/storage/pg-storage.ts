@@ -50,6 +50,11 @@ export function canonicalToPg(sqlType: string): string {
   return "TEXT"; // NVARCHAR(MAX) e qualquer outro
 }
 
+/** Nome base (≤ 50 chars) para índices derivados do nome da tabela temporária: o limite de identificador do Postgres é 63. */
+function stagingIdxName(tableName: string): string {
+  return `ix_${tableName}`.slice(0, 50);
+}
+
 /** Postgres type → canonical */
 function pgToCanonical(r: {
   data_type: string;
@@ -297,6 +302,9 @@ export class PgStorageConnection implements StorageConnection {
       await this._pool.query(
         `ALTER TABLE ${qStg} ADD COLUMN IF NOT EXISTS ${qSyncedAt} TIMESTAMP NOT NULL DEFAULT now(), ADD COLUMN IF NOT EXISTS ${qDeletedAt} TIMESTAMP NULL`,
       );
+      // Índice em cw_synced_at ANTES do swap (a staging ainda é invisível, então não trava ninguém): o consumo incremental `rows?since=`
+      // filtra por essa coluna e sem índice cada consulta varria a tabela toda (190-340 ms contra 1-4 ms medidos em 500k linhas; PER-07).
+      await this._pool.query(`CREATE INDEX IF NOT EXISTS ${pgQuote(`${stagingIdxName(staging)}_synced`)} ON ${qStg} (${qSyncedAt})`);
       // ── fullSwap: DROP target + RENAME staging → target (transação breve) ──────
       // MVCC: readers que começaram antes do BEGIN continuam vendo a versão antiga.
       try {
@@ -378,6 +386,8 @@ export class PgStorageConnection implements StorageConnection {
         `INSERT INTO ${qMgd} (${colListWithMeta}) SELECT ${colList}, now(), NULL FROM ${qStg}`,
       );
 
+      // Mesmo índice de cw_synced_at, construído na tabela mesclada (ainda invisível) antes do swap.
+      await this._pool.query(`CREATE INDEX IF NOT EXISTS ${pgQuote(`${stagingIdxName(mergedName)}_synced`)} ON ${qMgd} (${qSyncedAt})`);
       // Transação breve: DROP target + RENAME merged → target (AccessExclusiveLock ~ms)
       await this.swapTx(async (client) => {
         if (targetExists) await client.query(`DROP TABLE ${qTgt}`);
