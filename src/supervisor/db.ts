@@ -97,6 +97,15 @@ export function createCoreDb(instanceId: string): CoreDb & { failOrphanedCommand
       await prisma.$executeRawUnsafe(`DELETE FROM cw_supervisor_state WHERE instance_id = $1`, instanceId);
     },
 
+    async runningJobs(profileName: string) {
+      const escaped = profileName.replace(/[\%_]/g, (c) => `\${c}`);
+      const rows = await prisma.$queryRawUnsafe<{ id: string; type: string; attempts: number }[]>(
+        `SELECT id, type, attempts FROM cw_jobs WHERE status = 'RUNNING' AND locked_by LIKE $1 LIMIT 20`,
+        `${escaped}-%@%`,
+      );
+      return rows;
+    },
+
     async audit(eventType: string, resourceId: string, detail: Record<string, unknown>, success: boolean): Promise<void> {
       await prisma.auditEvent.create({
         data: { eventType, resourceType: "worker", resourceId: resourceId.slice(0, 255), detailJson: JSON.stringify({ ...detail, actor: "system:supervisor" }), success },

@@ -42,6 +42,8 @@ export interface CoreDb {
   expireStale(): Promise<void>;
   heartbeat(children: ChildSummary[]): Promise<void>;
   audit(eventType: string, resourceId: string, detail: Record<string, unknown>, success: boolean): Promise<void>;
+  /** Jobs ainda RUNNING deste perfil (para dizer quem foi afetado quando o worker cai). Opcional. */
+  runningJobs?(profileName: string): Promise<{ id: string; type: string; attempts: number }[]>;
 }
 
 export type CoreDeps = {
@@ -228,7 +230,13 @@ export class Supervisor {
     slot.backoffUntil = now + delay;
     slot.state = slot.crashes >= CRASH_LOOP_AFTER ? "CRASH_LOOP" : "BACKOFF";
     this.log(`worker ${slot.profile.name} caiu (code ${code}, signal ${signal}); nova tentativa em ${Math.round(delay / 1000)}s`);
-    void this.deps.db.audit("WORKER_CRASHED", slot.profile.name, { code, signal, uptimeMs: uptime, crashes: slot.crashes, retryInMs: delay }, false).catch(() => undefined);
+    // Registra QUEM foi afetado: os jobs que estavam RUNNING neste perfil (serão recolocados na fila). Sem isso a queda era só um número.
+    const crashed = slot.profile.name;
+    const base = { code, signal, uptimeMs: uptime, crashes: slot.crashes, retryInMs: delay };
+    void (async () => {
+      const jobs = await this.deps.db.runningJobs?.(crashed).catch(() => undefined);
+      await this.deps.db.audit("WORKER_CRASHED", crashed, jobs && jobs.length ? { ...base, affectedJobs: jobs } : base, false);
+    })().catch(() => undefined);
   }
 
   private beginDrain(slot: Slot, mode: CommandMode, timeoutMs: number, now: number) {
