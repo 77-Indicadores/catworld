@@ -26,6 +26,7 @@ import { IntegrityError, evaluateLoad, getIntegritySettings, type Evaluation } f
 import { auditIntegrity, evaluationDetail, ledgerInsert, recordLedger } from "@/server/integrity/ledger";
 import { PG_MARKER_DDL, PG_MARKER_INSERT, PG_MARKER_SELECT } from "./applied-marker";
 import { incompatibleColumns, incompatibleError } from "./type-compat";
+import { loadPrevMapping, resolveAgainstExisting } from "./existing-types";
 
 // ─── Type conversion ──────────────────────────────────────────────────────────
 
@@ -218,6 +219,12 @@ async function importUploadPgLocked(
 
   // Valida compatibilidade antes de criar staging (append/upsert em target existente)
   const targetExists = await conn.tableExists(schema, tableName);
+  // Tabela existente e tipada: a coluna fisica manda (data/decimal ambiguo herda o tipo e a convencao da carga anterior; sem convencao, falha alto).
+  if (targetExists && (upload.mode === "append" || upload.mode === "upsert" || (upload.mode === "replace" && upload.deltaJson != null))) {
+    const tblId = upload.table?.id ?? (await prisma.datasetTable.findUnique({ where: { datasetId_sqlName: { datasetId: upload.dataset.id, sqlName: tableName } }, select: { id: true } }))?.id;
+    const existingCols0 = (await conn.listColumns(schema, tableName)).filter((c) => userColumnNames([c]).length > 0);
+    mapping = resolveAgainstExisting(mapping, existingCols0, await loadPrevMapping(prisma, tblId));
+  }
   if ((upload.mode === "append" || upload.mode === "upsert") && targetExists) {
     const existingCols = await conn.listColumns(schema, tableName);
     // colunas internas (_cw_rh, cw_synced_at, cw_deleted_at) não fazem parte do schema do usuário — ver CW_SYNCED_AT em storage/connection.ts.

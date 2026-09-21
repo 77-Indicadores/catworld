@@ -284,6 +284,33 @@ d("import Postgres: atomicidade e integridade (real)", () => {
     expect(stages).toBe(0);                                        // sem staging órfã
   });
 
+  it("#1 TIPOS: data/decimal AMBIGUOS no arquivo herdam DATE/DECIMAL da tabela existente (append e upsert), nao viram texto", async () => {
+    // carga 1 (nao ambigua: dia 25 > 12 e 1.234,50 so pode ser decimal com virgula) cria DATE e DECIMAL(?,2)
+    const f1 = join(dir, "amb1.csv"); writeFileSync(f1, "id,dia,valor\n1,25/01/2026,\"1.234,50\"\n2,26/01/2026,\"9,25\"\n");
+    await run(f1, "t_amb");
+    expect((await pool.query(`SELECT data_type FROM information_schema.columns WHERE table_schema=$1 AND table_name='t_amb' AND column_name='dia'`, [SCHEMA])).rows[0].data_type).toBe("date");
+    // carga 2: todos os dias <= 12 e "1.234" ambiguo: sozinha vira texto; contra a tabela deve usar dd/mm e virgula decimal
+    const f2 = join(dir, "amb2.csv"); writeFileSync(f2, "id,dia,valor\n3,01/02/2026,1.234\n4,03/04/2026,2.500\n");
+    expect((await previewFile(f2)).columns.find((c) => c.sqlName === "dia")!.sqlType).toBe("NVARCHAR(MAX)"); // premissa do bug
+    await run(f2, "t_amb", "append");
+    const got = (await pool.query(`SELECT id::int i, dia::text d, valor::text v FROM ${SCHEMA}.t_amb ORDER BY id::int`)).rows;
+    expect(got.map((r) => r.d)).toEqual(["2026-01-25", "2026-01-26", "2026-02-01", "2026-04-03"]);
+    expect([Number(got[2].v), Number(got[3].v)]).toEqual([1234, 2500]);   // convenção da tabela (virgula decimal): "1.234" = ponto de milhar
+    // upsert tambem
+    const f3 = join(dir, "amb3.csv"); writeFileSync(f3, "id,dia,valor\n4,05/06/2026,7,5\n".replace("7,5", "\"7,5\""));
+    await run(f3, "t_amb", "upsert", "id");
+    expect((await pool.query(`SELECT dia::text d FROM ${SCHEMA}.t_amb WHERE id::int = 4`)).rows[0].d).toBe("2026-06-05");
+  });
+
+  it("#1 TIPOS: ambiguo SEM convencao conhecida na tabela falha alto, nao repetivel, e nada e gravado", async () => {
+    await run(join(dir, "amb1.csv"), "t_amb_noconv");
+    const tbl = await prisma.datasetTable.findUniqueOrThrow({ where: { datasetId_sqlName: { datasetId, sqlName: "t_amb_noconv" } } });
+    await prisma.datasetVersion.deleteMany({ where: { tableId: tbl.id } });
+    const f2 = join(dir, "amb4.csv"); writeFileSync(f2, "id,dia,valor\n3,01/02/2026,9\n");
+    await expect(run(f2, "t_amb_noconv", "append")).rejects.toThrow(/ambíguas/);
+    expect(await count("t_amb_noconv")).toBe(2);
+  });
+
   it("ARQUIVO SEM COLUNAS: upload FAILED com motivo, tabela intacta (antes: COMPLETED com 0 linhas)", async () => {
     await run(file("r1.csv", 50, "v1"), "t_nocols");
     const nocols = join(dir, "r2.csv"); writeFileSync(nocols, "");

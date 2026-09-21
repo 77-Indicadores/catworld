@@ -200,6 +200,22 @@ d("import SQL Server: atomicidade, integridade e fidelidade (real)", () => {
     expectRows(await rows("t_retry"), 4000, "v2");           // antes: publicava as 50 linhas parciais
   }, 180_000);
 
+  it("#1 TIPOS: data/decimal AMBIGUOS herdam DATE/DECIMAL da tabela existente (append), nao viram texto", async () => {
+    const f1 = join(dir, "amb1.csv"); writeFileSync(f1, "id,dia,valor\n1,25/01/2026,\"1.234,50\"\n2,26/01/2026,\"9,25\"\n");
+    await run(f1, "t_amb");
+    const f2 = join(dir, "amb2.csv"); writeFileSync(f2, "id,dia,valor\n3,01/02/2026,1.234\n4,03/04/2026,2.500\n");
+    expect((await previewFile(f2)).columns.find((c) => c.sqlName === "dia")!.sqlType).toBe("NVARCHAR(MAX)");
+    await run(f2, "t_amb", "append");
+    const got = (await pool.request().query(`SELECT CONVERT(varchar(10), dia, 23) d, CAST(valor AS varchar(40)) v FROM ${q("t_amb")} ORDER BY id`)).recordset;
+    expect(got.map((r: { d: string }) => r.d)).toEqual(["2026-01-25", "2026-01-26", "2026-02-01", "2026-04-03"]);
+    expect([Number(got[2].v), Number(got[3].v)]).toEqual([1234, 2500]);
+    const f3 = join(dir, "amb4.csv"); writeFileSync(f3, "id,dia,valor\n5,01/02/2026,9\n");
+    const tbl = await prisma.datasetTable.findUniqueOrThrow({ where: { datasetId_sqlName: { datasetId, sqlName: "t_amb" } } });
+    await prisma.datasetVersion.deleteMany({ where: { tableId: tbl.id } });
+    await expect(run(f3, "t_amb", "append")).rejects.toThrow(/ambíguas/);
+    expect(await count("t_amb")).toBe(4);
+  }, 120_000);
+
   it("TIPOS (#13): append numa coluna FLOAT/BIT (outra familia) e recusado, nao tratado como texto", async () => {
     await pool.request().query(`CREATE TABLE ${q("t_float")} (id BIGINT NULL, nome NVARCHAR(MAX) NULL, valor FLOAT NULL)`);
     await pool.request().query(`INSERT INTO ${q("t_float")} VALUES (1,'a',1.5)`);

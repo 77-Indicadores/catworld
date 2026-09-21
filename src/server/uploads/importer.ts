@@ -5,6 +5,7 @@ import { auditIntegrity, evaluationDetail, ledgerInsert, recordLedger } from "@/
 import { MSSQL_MARKER_DDL, MSSQL_MARKER_INSERT, MSSQL_MARKER_SELECT } from "./applied-marker";
 import { canonicalAccepts, incompatibleColumns, incompatibleError, mssqlPhysicalToCanonical } from "./type-compat";
 import { isInternalColumn } from "@/server/storage/connection";
+import { loadPrevMapping, resolveAgainstExisting } from "./existing-types";
 import { extname } from "node:path";
 import sql from "mssql";
 import { prisma } from "@/server/db";
@@ -264,8 +265,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
     // Typed staging: Node.js pre-converts values (typedCsvField) so BULK INSERT writes native types
     // and the delta INSERT SELECT becomes a direct column copy — no TRY_CONVERT on Azure SQL (saves DTU).
     // colDefsMax is kept as fallback when a NVARCHAR value exceeds 4000 chars (rare truncation error).
-    const colDefs    = mapping.map(c => `${quoteIdentifier(c.sqlName)} ${stagingColType(c)} NULL`).join(",") + ",[_cw_rh] CHAR(32) NULL";
-    const colDefsMax = mapping.map(c => `${quoteIdentifier(c.sqlName)} NVARCHAR(MAX)  NULL`).join(",") + ",[_cw_rh] CHAR(32) NULL";
+    // (colDefs e calculado depois de resolver o mapeamento contra a tabela existente, mais abaixo)
     // Set to false if truncation forces NVARCHAR(MAX) fallback — INSERT SELECT must use TRY_CONVERT then
     const stagingIsTyped = true;
 
@@ -273,6 +273,19 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
       (await pool.request().query(`SELECT CASE WHEN OBJECT_ID(N'${schema}.${tableName}',N'U') IS NULL THEN 0 ELSE 1 END AS ok`))
         .recordset[0].ok,
     ) === 1;
+
+    // Tabela existente e tipada: a coluna fisica manda (data/decimal ambiguo herda o tipo e a convencao da carga anterior; sem convencao, falha alto).
+    if (targetExists && (upload.mode === "append" || upload.mode === "upsert" || (upload.mode === "replace" && upload.deltaJson != null))) {
+      const tblId = upload.table?.id ?? (await prisma.datasetTable.findUnique({ where: { datasetId_sqlName: { datasetId: upload.dataset!.id, sqlName: tableName } }, select: { id: true } }))?.id;
+      const phys = (await pool.request()
+        .input("schema", sql.NVarChar, schema).input("table", sql.NVarChar, tableName)
+        .query("SELECT c.name, t.name type_name, c.precision, c.scale FROM sys.columns c JOIN sys.types t ON c.user_type_id=t.user_type_id WHERE c.object_id=OBJECT_ID(QUOTENAME(@schema)+'.'+QUOTENAME(@table)) ORDER BY c.column_id"))
+        .recordset as { name: string; type_name: string; precision: number; scale: number }[];
+      const existing = phys.filter((r) => !isInternalColumn(r.name)).map((r) => ({ name: r.name, sqlType: mssqlPhysicalToCanonical(r) }));
+      mapping = resolveAgainstExisting(mapping, existing, await loadPrevMapping(prisma, tblId));
+    }
+
+    const colDefs = mapping.map(c => `${quoteIdentifier(c.sqlName)} ${stagingColType(c)} NULL`).join(",") + ",[_cw_rh] CHAR(32) NULL";
 
     // Validate schema compatibility BEFORE creating staging — fail fast on bad append/upsert
     if ((upload.mode === "append" || upload.mode === "upsert") && targetExists) {
