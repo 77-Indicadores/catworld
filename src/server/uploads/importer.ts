@@ -1,7 +1,7 @@
 import * as Sentry from "@sentry/nextjs";
 import { physicalDecimal, parseDecimalType, DECIMAL_LEGACY } from "@/lib/decimal-type";
 import { IntegrityError, evaluateLoad, getIntegritySettings, type Evaluation } from "@/server/integrity/policy";
-import { auditIntegrity, evaluationDetail, ledgerInsert, recordLedger } from "@/server/integrity/ledger";
+import { auditIntegrity, evaluationDetail, recordLedger } from "@/server/integrity/ledger";
 import { MSSQL_MARKER_INSERT, MSSQL_MARKER_SELECT, ensureMssqlMarker } from "./applied-marker";
 import { canonicalAccepts, incompatibleColumns, incompatibleError, mssqlPhysicalToCanonical } from "./type-compat";
 import { isInternalColumn } from "@/server/storage/connection";
@@ -632,11 +632,6 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
             schemaJson: JSON.stringify(mapping),
           },
         }),
-        ledgerInsert({
-          kind: "upload", outcome: "COMPLETED", verdict: evaluation.verdict, datasetId: upload.dataset!.id, tableId: table.id, uploadId: upload.id,
-          tableName, mode: upload.mode, expectedRows: knownRowCount, parsedRows: total, physicalRows: Number(actual), prevRows: prevRowsForLedger,
-          detail: evaluationDetail(evaluation, { importMethod: phaseTimings.importMethod, parseMethod: parseStats.parseMethod, fallbackReason: parseStats.fallbackReason, storage: "sqlserver" }),
-        }),
         prisma.auditEvent.create({
           data: {
             eventType: "UPLOAD_IMPORT_PERF",
@@ -659,6 +654,13 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
           },
         }),
       ]));
+
+      // Livro de integridade FORA da transacao dos metadados: uma falha aqui (recordLedger nunca lanca) nao pode desfazer uma carga ja publicada.
+      await recordLedger({
+        kind: "upload", outcome: "COMPLETED", verdict: evaluation.verdict, datasetId: upload.dataset!.id, tableId: table.id, uploadId: upload.id,
+        tableName, mode: upload.mode, expectedRows: knownRowCount, parsedRows: total, physicalRows: Number(actual), prevRows: prevRowsForLedger,
+        detail: evaluationDetail(evaluation, { importMethod: phaseTimings.importMethod, parseMethod: parseStats.parseMethod, fallbackReason: parseStats.fallbackReason, storage: "sqlserver" }),
+      });
 
       return { tableId: table.id, inserted, updated, rowCount: actual };
     } catch (e) {

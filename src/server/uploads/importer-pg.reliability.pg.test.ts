@@ -284,6 +284,24 @@ d("import Postgres: atomicidade e integridade (real)", () => {
     expect(stages).toBe(0);                                        // sem staging órfã
   });
 
+  it("#5 LEDGER com falha NAO desfaz uma carga publicada (o livro e gravado depois da transacao)", async () => {
+    const p = prisma as unknown as { $executeRaw: (...x: unknown[]) => unknown };
+    const orig = p.$executeRaw;
+    let ledgerCalls = 0;
+    p.$executeRaw = function (this: unknown, s: TemplateStringsArray, ...a: unknown[]) {
+      if (Array.isArray(s) && s.join("").includes("cw_load_ledger")) { ledgerCalls++; return Promise.reject(new Error("livro indisponivel")); }
+      return orig.call(this, s, ...a);
+    } as never;
+    try {
+      const id = randomUUID();
+      const r = await run(file("led1.csv", 120, "v1"), "t_ledger_fail", "replace", undefined, { id });
+      expect(r.rowCount).toBe(120n);
+      expect((await prisma.upload.findUnique({ where: { id } }))?.status).toBe("COMPLETED");
+      expect(await count("t_ledger_fail")).toBe(120);
+      expect(ledgerCalls).toBeGreaterThan(0);
+    } finally { p.$executeRaw = orig; }
+  });
+
   it("#3 EXACTLY-ONCE: o append que CRIA a tabela grava a marca na mesma transacao (retentativa nao duplica)", async () => {
     const id = randomUUID(); const f = file("ce1.csv", 300, "v1");
     await run(f, "t_create_once", "append", undefined, { id });

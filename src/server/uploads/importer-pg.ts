@@ -23,7 +23,7 @@ import type { PgStorageConnection } from "@/server/storage/pg-storage";
 import { pgQuote, canonicalToPg } from "@/server/storage/pg-storage";
 import { userColumnNames } from "@/server/storage/connection";
 import { IntegrityError, evaluateLoad, getIntegritySettings, type Evaluation } from "@/server/integrity/policy";
-import { auditIntegrity, evaluationDetail, ledgerInsert, recordLedger } from "@/server/integrity/ledger";
+import { auditIntegrity, evaluationDetail, recordLedger } from "@/server/integrity/ledger";
 import { PG_MARKER_INSERT, PG_MARKER_SELECT, ensurePgMarker } from "./applied-marker";
 import { incompatibleColumns, incompatibleError } from "./type-compat";
 import { loadPrevMapping, resolveAgainstExisting } from "./existing-types";
@@ -469,11 +469,6 @@ async function importUploadPgLocked(
         schemaJson: JSON.stringify(mapping),
       },
     }),
-    ledgerInsert({
-      kind: "upload", outcome: "COMPLETED", verdict: evaluation.verdict, datasetId: upload.dataset!.id, tableId: table.id, uploadId: upload.id,
-      tableName, mode: upload.mode, expectedRows: knownRowCount, parsedRows: total, physicalRows: Number(actual), prevRows: prevRowsForLedger,
-      detail: evaluationDetail(evaluation, { importMethod: alreadyApplied ? "already-applied" : "pg-unnest-batch", storage: "postgres" }),
-    }),
     prisma.upload.update({
       where: { id: upload.id },
       data: {
@@ -487,6 +482,13 @@ async function importUploadPgLocked(
       },
     }),
   ]));
+
+  // Livro de integridade FORA da transacao dos metadados: uma falha aqui (recordLedger nunca lanca) nao pode desfazer uma carga ja publicada.
+  await recordLedger({
+    kind: "upload", outcome: "COMPLETED", verdict: evaluation.verdict, datasetId: upload.dataset!.id, tableId: table.id, uploadId: upload.id,
+    tableName, mode: upload.mode, expectedRows: knownRowCount, parsedRows: total, physicalRows: Number(actual), prevRows: prevRowsForLedger,
+    detail: evaluationDetail(evaluation, { importMethod: alreadyApplied ? "already-applied" : "pg-unnest-batch", storage: "postgres" }),
+  });
 
   return { tableId: table.id, inserted, updated, rowCount: actual };
 }
