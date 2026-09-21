@@ -8,6 +8,7 @@ import { sqlIdentifier } from "@/server/security/naming";
 import { ApiError } from "@/server/http";
 import { KEYS_CHECK_MAX_RATIO, keysCheckExceeds } from "@/server/storage/delete-detection";
 import { evaluateLoad, getIntegritySettings, IntegrityError, type Evaluation } from "@/server/integrity/policy";
+import { auditIntegrity, evaluationDetail, recordLedger } from "@/server/integrity/ledger";
 import { queryColumns, quotedPgTable, sourceClockPg, streamPostgresRows, tableColumns, type SourceColumn } from "./postgres";
 import { queryColumnsMssql, quotedMssqlTable, sourceClockMssql, streamMssqlRows, tableColumnsMssql } from "./mssql";
 import { compareWithCatalog, convertSourceValue, type ResolvedColumn } from "./source-values";
@@ -663,12 +664,30 @@ export async function refreshDatasetSource(datasetSourceId: string, opts?: { rec
     if (escalated && escalateAfter > 0 && keysSkips % escalateAfter === 0 && (source.sourceKind === "table" || !!source.sourceSqlReconciliation?.trim())) {
       await queueSourceRefresh(source.id, { reconciliation: true }).catch((e) => console.warn(`[source-refresh] nao foi possivel enfileirar a reconciliacao automatica source=${source.id}: ${e instanceof Error ? e.message : e}`));
     }
+    // Livro de integridade: uma linha por rodada (esperado x lido x gravado x anterior). Nunca derruba a carga.
+    await recordLedger({
+      kind: "source", outcome: "COMPLETED",
+      verdict: escalated || notes.some((n) => n.startsWith("INTEGRITY_SUSPECT")) ? "SUSPECT" : "OK",
+      datasetId: source.datasetId, tableId: source.targetTable.id, sourceId: source.id, tableName: table,
+      mode: reconciliation ? "reconciliation" : (fullState ? "full" : "incremental"),
+      parsedRows: Number(rowCount), physicalRows: Number(finalRowCount), prevRows: Number(source.lastRowCount ?? 0n),
+      detail: { notes, keysSkips },
+    });
     return { rowCount: finalRowCount };
   } catch (e) {
     await storageConn.dropTableIfExists(schema, stage).catch(() => undefined);
     // Trava perdida: outra rodada e a dona do estado da fonte; nao sobrescreve o status dela.
     if (leaseLost) throw e;
     const message = e instanceof Error ? e.message : String(e);
+    // A tentativa que falha também vai para o livro (com o motivo estruturado se for a barra de integridade) e, nesse caso, para a auditoria.
+    const failedEntry = {
+      kind: "source" as const, outcome: "FAILED" as const, verdict: (e instanceof IntegrityError ? e.evaluation.verdict : "FAILED") as "FAILED" | "SUSPECT" | "OK",
+      datasetId: source.datasetId, tableId: source.targetTable?.id ?? null, sourceId: source.id, tableName: source.targetTable?.sqlName ?? null,
+      mode: reconciliation ? "reconciliation" : "incremental", prevRows: Number(source.lastRowCount ?? 0n),
+      detail: e instanceof IntegrityError ? evaluationDetail(e.evaluation) : { error: message.slice(0, 500) },
+    };
+    await recordLedger(failedEntry);
+    if (e instanceof IntegrityError) await auditIntegrity({ ...failedEntry, resourceId: source.id });
     await prisma.datasetSource.update({
       where: { id: source.id },
       data: {
