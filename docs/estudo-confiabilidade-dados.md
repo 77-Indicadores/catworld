@@ -276,7 +276,7 @@ Verificação da branch: `tsc` limpo e suíte completa verde contra Postgres 16 
 ### O que continua em aberto
 
 - Testes em SQL Server real agora existem para `kill -9` no meio do import com retentativa (replace, append exactly-once e delta-replace) e para `refreshDatasetSource` de fonte Postgres para storage SQL Server (valores exatos, incremental, reconciliação, bloqueio de fonte vazia). Nenhum revelou defeito.
-- Os patches de `docs/deferred-patches/` (ENT-01, ENT-04, ENT-05, FON-09) foram **aplicados na árvore de trabalho** por cima do trabalho em andamento do dono, com testes em Postgres real, e aguardam o commit do dono (não foram commitados para não misturar com o trabalho dele).
+- Os patches de `docs/deferred-patches/` (ENT-01, ENT-04, ENT-05, FON-09) estão **commitados na branch** (`d793cff`, `9efa201`, `d2d186a`), junto com o trabalho em andamento do dono nos mesmos arquivos (`hide-deleted*`, `run.ts`, `queries/route.ts`, rota `rows`, docs de contrato), a pedido dele. Verificados num checkout limpo do índice: `tsc` limpo e 201 testes verdes (`sql-contract`, `api/v1`, derivada) contra Postgres real.
 - Confirmar no log do supervisor de produção a causa das quedas de conexão do lock e o horário.
 - Não houve otimização do import específico do SQL Server (20 a 48 min): falta medir por fase.
 - Correções de comportamento como `TIP-10` (não aparar texto, `""` ≠ NULL) e o hash `_cw_rh` **não foram alteradas** de propósito (mudariam chaves e deltas já gravados).
