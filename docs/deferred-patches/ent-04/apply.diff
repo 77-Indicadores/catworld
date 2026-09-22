@@ -1,0 +1,69 @@
+﻿diff --git "a/src\\server\\sql-contract\\apply.ts" "b/src\\proto-ent04\\apply.ts"
+index 54122f3..985fc04 100644
+--- "a/src\\server\\sql-contract\\apply.ts"
++++ "b/src\\proto-ent04\\apply.ts"
+@@ -11,8 +11,9 @@
+ import { createHash } from "crypto";
+ import { prisma } from "@/server/db";
+ import { TtlCache } from "@/server/cache/ttl-cache";
+-import { translateMssqlToPg } from "./legacy-translate";
+-import { translateTsql, mapOutsideLiterals, SqlContractError, type ContractTranslation } from "./translate";
++import { translateMssqlToPg } from "@/server/sql-contract/legacy-translate";
++import { legacyGate, legacyWarning, attachWarnings } from "./fallback-gate";
++import { translateTsql, mapOutsideLiterals, SqlContractError, type ContractTranslation } from "@/server/sql-contract/translate";
+ 
+ export type ContractMode = "off" | "shadow" | "fallback" | "strict";
+ export type LegacyBehavior = "regex" | "passthrough";
+@@ -64,7 +65,7 @@ export async function contractTranslate(
+     } catch (e) {
+       if (!(e instanceof SqlContractError)) throw e;
+       log("fallback-reject", path, input, e.message);
+-      return old;
++      return legacyOrThrow(input, e, old, path);
+     }
+   }
+ 
+@@ -79,6 +80,19 @@ export async function contractTranslate(
+   return old;
+ }
+ 
++/**
++ * ENT-04: o legado so e usado quando NAO muda o resultado de forma conhecida (legacyGate). Caso contrario o erro do motor novo
++ * (UNSUPPORTED_CONSTRUCT) sobe com o motivo. Quando o legado e usado, a traducao leva um aviso LEGACY_TRANSLATION.
++ */
++function legacyOrThrow(input: string, e: SqlContractError, old: ContractTranslation, path: string): ContractTranslation {
++  const gate = legacyGate(input);
++  if (gate.block) {
++    log("fallback-blocked", path, input, gate.block);
++    throw new SqlContractError(`${e.message} O tradutor antigo nao foi usado como alternativa porque mudaria o resultado: ${gate.block}.`, (e as { details?: unknown }).details);
++  }
++  return { ...old, warnings: [legacyWarning(e.message, gate)] };
++}
++
+ function legacyTranslation(input: string, legacy: LegacyBehavior): ContractTranslation {
+   return legacy === "regex" ? translateMssqlToPg(input) : { sql: input.trim(), topLimit: null };
+ }
+@@ -118,14 +132,21 @@ export async function runWithContract<T>(
+   } catch (e) {
+     if (!(e instanceof SqlContractError)) throw e;
+     log("fallback-reject", path, input, e.message);
+-    return exec(old);
++    const legacyT = legacyOrThrow(input, e, old, path);
++    return attachWarnings(await exec(legacyT), legacyT.warnings);
+   }
+   try {
+     return await exec(next);
+   } catch (e) {
+     if (!isDbQueryError(e) || (canon(next.sql) === canon(old.sql) && next.topLimit === old.topLimit)) throw e;
++    const gate = legacyGate(input);
++    if (gate.block) {
++      log("fallback-blocked", path, input, gate.block);
++      throw e; // o erro do banco do SQL novo (traducao fiel) sobe; o legado mudaria o resultado
++    }
+     log("fallback-exec", path, input, e instanceof Error ? e.message : String(e));
+-    return exec(old); // se o antigo tambem falhar, sobe o erro do antigo
++    // se o antigo tambem falhar, sobe o erro do antigo
++    return attachWarnings(await exec(old), [legacyWarning(`erro do banco: ${e instanceof Error ? e.message : String(e)}`, gate)]);
+   }
+ }
+ 

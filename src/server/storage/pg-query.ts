@@ -13,8 +13,10 @@ import { dedupeColumnNames, rowsFromArrays } from "@/server/sql-contract/columns
 import { legacyFormatColumns } from "@/server/sql-contract/result";
 import { MAX_RESULT_BYTES, approxRowBytes } from "@/server/query/protection";
 import { contractTranslate, getContractMode, runWithContract } from "@/server/sql-contract/apply";
+import { addTieBreaker, type TieBreakResult } from "./paging";
 import { pgQuote, type PgStorageConnection } from "./pg-storage";
-import { mssqlKind, normalizeRows, pgKind, type ColumnKind } from "@/server/sql-contract/result";
+import { legacyPgRows, normalizeRows, pgKind, type ColumnKind } from "@/server/sql-contract/result";
+import { PG_STRING_TYPES } from "./pg-types";
 
 const DEFAULT_LIMIT = 10_000;
 
@@ -56,6 +58,10 @@ export async function executeReadOnlyPg(
   truncated: boolean;
   executionTimeMs: number;
   legacyFormatColumns?: string[];
+  /** Tipo logico de cada coluna (exportacao XLSX: BIGINT/DECIMAL como numero quando exato). */
+  columnKinds?: Record<string, ColumnKind>;
+  /** Avisos de entrega (ex.: paginacao sem ordem estavel). */
+  warnings?: string[];
 }> {
   const validated = validateReadOnlySql(sql);
   if (!validated.safe) throw new ApiError(400, "UNSAFE_SQL", validated.reason);
@@ -72,9 +78,9 @@ export async function executeReadOnlyPg(
   // subconsulta). O teto de 10000 por pagina vale sempre. Antes o TOP virava o LIMIT de fora e o offset valia ANTES dele.
   const effectiveLimit = limit;
   const inner = topLimit !== null ? `${statement} LIMIT ${topLimit}` : statement;
-  const paged = offset > 0
-    ? `SELECT * FROM (${inner}) AS _cw_q LIMIT ${effectiveLimit + 1} OFFSET ${offset}`
-    : `SELECT * FROM (${inner}) AS _cw_q LIMIT ${effectiveLimit + 1}`;
+  const pageOf = (s: string) => `SELECT * FROM (${s}) AS _cw_q LIMIT ${effectiveLimit + 1}${offset > 0 ? ` OFFSET ${offset}` : ""}`;
+  const withTop = (s: string) => (topLimit !== null ? `${s} LIMIT ${topLimit}` : s);
+  const warnings: string[] = [];
 
   const timeoutMs = Math.min(Math.max(timeout, 1), 120) * 1000;
 
@@ -94,9 +100,6 @@ export async function executeReadOnlyPg(
     // — não impede 100% do tráfego já em trânsito, mas evita continuar
     // acumulando linhas em memória e nunca chega a serializar/cachear a
     // resposta inteira.
-    const rows: unknown[][] = [];
-    let approxBytes = 0;
-    let tooLarge = false;
     // processID existe em runtime (PoolClient é sempre um Client de fato),
     // mas não está no tipo PoolClient dos typings do pg.
     const pid = (client as unknown as { processID?: number }).processID;
@@ -107,11 +110,14 @@ export async function executeReadOnlyPg(
       `Resultado excede ${Math.round(MAX_RESULT_BYTES / (1024 * 1024))}MB (colunas muito largas). Selecione menos colunas, filtre mais linhas, ou use "stream": true.`,
     );
 
-    let kinds: Record<string, ColumnKind> = {};
-    const columns = await new Promise<string[]>((resolve, reject) => {
+    interface Exec { rows: unknown[][]; columns: string[]; kinds: Record<string, ColumnKind>; oids: number[] }
+    const execQuery = (text: string): Promise<Exec> => new Promise<Exec>((resolve, reject) => {
+      const rows: unknown[][] = [];
+      let approxBytes = 0;
+      let tooLarge = false;
       // rowMode "array": objeto por linha perderia colunas de mesmo nome (ver columns.ts)
       // (os typings do pg nao declaram rowMode em Query, mas o driver aceita)
-      const query = new Query({ text: paged, rowMode: "array" } as never);
+      const query = new Query({ text, rowMode: "array", types: PG_STRING_TYPES } as never);
       client!.query(query);
 
       query.on("row", (row: unknown[]) => {
@@ -132,13 +138,46 @@ export async function executeReadOnlyPg(
       query.on("end", (result) => {
         if (tooLarge) return reject(tooLargeError());
         const names = dedupeColumnNames(result.fields.map((f) => f.name));
-        kinds = Object.fromEntries(result.fields.map((f, i) => [names[i]!, pgKind(f.dataTypeID)]));
-        resolve(names);
+        const kinds = Object.fromEntries(result.fields.map((f, i) => [names[i]!, pgKind(f.dataTypeID)]));
+        resolve({ rows, columns: names, kinds, oids: result.fields.map((f) => f.dataTypeID) });
       });
     });
 
+    // ENT-03: paginacao deterministica. Com offset > 0 (ou 1a pagina truncada, que levara a proxima pagina), o
+    // ORDER BY de topo ganha o desempate por todas as colunas; sem isso o OFFSET duplica/perde linhas empatadas.
+    let exec: Exec;
+    let tie: TieBreakResult | null = null;
+    if (offset > 0) {
+      const d = await execQuery(`SELECT * FROM (${inner}) AS _cw_q LIMIT 0`);
+      tie = addTieBreaker(statement, d.oids);
+    } else {
+      exec = await execQuery(pageOf(inner));
+      if (exec.rows.length > effectiveLimit) tie = addTieBreaker(statement, exec.oids);
+    }
+    if (tie?.applied) {
+      try {
+        exec = await execQuery(pageOf(withTop(tie.sql)));
+        if (tie.skippedColumns > 0) warnings.push("PAGINACAO_PARCIAL: colunas json/xml nao entram no desempate da paginacao; linhas iguais em todas as outras colunas podem trocar de ordem entre paginas.");
+      } catch (err) {
+        if (isQueryTimeout(err) || err instanceof ApiError || !/^42/.test(String((err as { code?: string }).code ?? ""))) throw err;
+        // desempate nao aplicavel a esta consulta (ex.: SELECT DISTINCT com ordenacao incompativel): transacao abortada, refaz sem ele
+        await client.query("ROLLBACK");
+        await beginReadOnly(client, { timeoutMs, role, schemas });
+        exec = await execQuery(pageOf(inner));
+        warnings.push("PAGINACAO_NAO_DETERMINISTICA: nao foi possivel garantir ordem estavel; paginas com OFFSET podem repetir ou perder linhas empatadas. Use o modo stream.");
+      }
+    } else if (offset > 0) {
+      exec = await execQuery(pageOf(inner));
+      warnings.push("PAGINACAO_NAO_DETERMINISTICA: nao foi possivel garantir ordem estavel; paginas com OFFSET podem repetir ou perder linhas empatadas. Use o modo stream.");
+    }
+    exec = exec!;
+    if (tie?.applied && !tie.hadOrderBy && exec.rows.length > 0) {
+      warnings.push("SEM_ORDER_BY: a consulta paginada nao tem ORDER BY; o Catworld ordenou por todas as colunas para que as paginas sejam consistentes. Defina um ORDER BY unico para controlar a ordem.");
+    }
+    const { rows, columns, kinds } = exec;
+
     const asObjects = rowsFromArrays(rows.slice(0, effectiveLimit), columns);
-    const limitedRows = normalize ? normalizeRows(asObjects, kinds, "pg") : asObjects;
+    const limitedRows = normalize ? normalizeRows(asObjects, kinds, "pg") : legacyPgRows(asObjects, kinds);
     const legacyCols = legacyFormatColumns(kinds, "pg");
 
     return {
@@ -147,6 +186,8 @@ export async function executeReadOnlyPg(
       rowCount: limitedRows.length,
       truncated: rows.length > effectiveLimit,
       ...(normalize || legacyCols.length === 0 ? {} : { legacyFormatColumns: legacyCols }),
+      columnKinds: kinds,
+      ...(warnings.length > 0 ? { warnings } : {}),
       executionTimeMs: Date.now() - started,
     };
   } finally {
@@ -220,16 +261,16 @@ export async function executeReadOnlyPgStream(
         let columns: string[] | null = null;
         let streamKinds: Record<string, ColumnKind> = {};
         while (!closed) {
-          const batch = await client.query({ text: "FETCH FORWARD 1000 FROM cw_stream_cur", rowMode: "array" });
+          const batch = await client.query({ text: "FETCH FORWARD 1000 FROM cw_stream_cur", rowMode: "array", types: PG_STRING_TYPES } as never) as unknown as { fields: { name: string; dataTypeID: number }[]; rows: unknown[][] };
           if (columns === null) {
             columns = dedupeColumnNames(batch.fields.map((f) => f.name));
-            if (normalize) streamKinds = Object.fromEntries(batch.fields.map((f, i) => [columns![i]!, pgKind(f.dataTypeID)]));
+            streamKinds = Object.fromEntries(batch.fields.map((f, i) => [columns![i]!, pgKind(f.dataTypeID)]));
             safeEnqueue(encoder.encode(JSON.stringify({ __columns__: columns }) + "\n"));
           }
           if (batch.rows.length === 0) break;
           for (const arr of batch.rows as unknown[][]) {
             const row = rowsFromArrays([arr], columns)[0]!;
-            if (normalize) normalizeRows([row], streamKinds, "pg");
+            if (normalize) normalizeRows([row], streamKinds, "pg"); else legacyPgRows([row], streamKinds);
             safeEnqueue(encoder.encode(JSON.stringify(row) + "\n"));
             rowCount++;
           }
@@ -280,7 +321,6 @@ async function qualifyTablesForPg(
     tableMap.get(key)!.push(row.table_schema);
   }
 
-  let result = sql;
   for (const table of unqualified) {
     const found = tableMap.get(table.toLowerCase()) ?? [];
     if (found.length > 1) {
@@ -290,15 +330,30 @@ async function qualifyTablesForPg(
         `Tabela '${table}' existe em múltiplos datasets do contexto: ${found.join(", ")}. Use schema.tabela para qualificar.`,
       );
     }
-    if (found.length === 1) {
-      result = qualifyTable(result, table, found[0]!);
-    }
   }
 
-  return result;
+  // ENT-02: o SQL segue INTACTO. Antes, uma reescrita por regex trocava CTE/coluna/alias homonimos pela tabela
+  // real. O search_path da transacao (beginReadOnly) ja resolve os nomes sem schema.
+  return sql;
 }
 
-function extractUnqualifiedTableRefs(sql: string): string[] {
+/** Troca literais de string e comentarios por espacos (mesmo comprimento): a busca de FROM/JOIN nao le dentro deles. */
+function blankLiteralsAndComments(sql: string): string {
+  return sql.replace(/N?'(?:[^']|'')*'|--[^\n]*|\/\*[\s\S]*?\*\//g, (m) => " ".repeat(m.length));
+}
+
+/** Nomes de CTE declarados (WITH x AS (...), y AS (...)): nao sao tabelas, nao entram na checagem de ambiguidade. */
+function cteNames(sql: string): Set<string> {
+  const names = new Set<string>();
+  const re = /(?:\bWITH\s+(?:RECURSIVE\s+)?|,\s*)"?([a-zA-Z_][a-zA-Z0-9_]*)"?\s*(?:\([^)]*\))?\s+AS\s*(?:NOT\s+MATERIALIZED\s*|MATERIALIZED\s*)?\(/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(sql)) !== null) names.add(m[1]!.toLowerCase());
+  return names;
+}
+
+function extractUnqualifiedTableRefs(rawSql: string): string[] {
+  const sql = blankLiteralsAndComments(rawSql);
+  const ctes = cteNames(sql);
   const re = /\b(?:FROM|JOIN|INNER\s+JOIN|LEFT\s+(?:OUTER\s+)?JOIN|RIGHT\s+(?:OUTER\s+)?JOIN|FULL\s+(?:OUTER\s+)?JOIN|CROSS\s+JOIN)\s+("?[a-zA-Z_][a-zA-Z0-9_]*"?)\b/gi;
   const results: string[] = [];
   let match: RegExpExecArray | null;
@@ -306,27 +361,8 @@ function extractUnqualifiedTableRefs(sql: string): string[] {
     const ref = match[1]!.replace(/"/g, "");
     const idx = match.index + match[0].lastIndexOf(match[1]!);
     if (sql[idx - 1] === "." || sql[idx + match[1]!.length] === ".") continue;
+    if (ctes.has(ref.toLowerCase())) continue;
     results.push(ref);
   }
   return [...new Set(results)];
-}
-
-function qualifyTable(sql: string, table: string, schema: string): string {
-  const qualified = `"${schema.replace(/"/g, '""')}"."${table.replace(/"/g, '""')}"`;
-  const escaped = table.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const pattern = new RegExp(`(?<!\\.)"?\\b${escaped}\\b"?`, "gi");
-  // Processa fora de literais de string
-  const parts = sql.split(/(N?'[^']*(?:''[^']*)*')/gi);
-  return parts
-    .map((part, i) => {
-      if (i % 2 === 1) return part;
-      return part.replace(pattern, (match, offset) => {
-        const before = part.slice(0, offset).trimEnd();
-        if (/\bAS$/i.test(before)) return match;
-        const after = part.slice(offset + match.length).trimStart();
-        if (/^AS\s*\(/i.test(after)) return match;
-        return qualified;
-      });
-    })
-    .join("");
 }

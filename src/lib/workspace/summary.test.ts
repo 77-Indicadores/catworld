@@ -28,6 +28,13 @@ describe("summarizeFreshness / freshnessHeadline", () => {
     expect(freshnessHeadline(summarizeFreshness([item("c", { lastStatus: "running" })]))).toEqual({ tone: "warning", label: "Atualizando" });
     expect(freshnessHeadline(summarizeFreshness([item("d", {}), upload("u")]))).toEqual({ tone: "healthy", label: "Em dia" });
   });
+  it("'possivelmente incompleta' é o pior estado: vai para o topo da atenção e do selo, acima do erro", () => {
+    const suspect: FreshnessItem = { key: "s", name: "s", group: "DS", freshness: presentTableFreshness({ lastDataAt: "2026-09-19T17:00:00Z", sources: [], integrity: { verdict: "FAILED", reason: "faltam linhas" } }, NOW) };
+    const s = summarizeFreshness([item("ok", {}), item("erro", { lastStatus: "failed" }), suspect]);
+    expect(s.suspect.map((i) => i.name)).toEqual(["s"]);
+    expect(s.failing).toHaveLength(1);
+    expect(freshnessHeadline(s)).toEqual({ tone: "error", label: "1 possivelmente incompleta" });
+  });
   it("só upload (sem agenda) não é 'Em dia': é 'Sem agenda'; sem tabelas é 'Sem tabelas'", () => {
     expect(freshnessHeadline(summarizeFreshness([upload("u")]))).toEqual({ tone: "inactive", label: "Sem agenda" });
     expect(freshnessHeadline(summarizeFreshness([]))).toEqual({ tone: "inactive", label: "Sem tabelas" });

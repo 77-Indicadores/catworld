@@ -3,6 +3,7 @@
  * Thin wrapper em volta do pool existente de pool.ts.
  */
 
+import { DECIMAL_LEGACY, parseDecimalType, physicalDecimal } from "@/lib/decimal-type";
 import sql from "mssql";
 import { CW_SYNCED_AT, CW_DELETED_AT, type ColDef, type ColInfo, type StorageConnection } from "./connection";
 import { absentFromStaging, carryPlan, missingKeysWhere } from "./delete-detection";
@@ -36,11 +37,13 @@ function parseMssqlUrl(url: string): sql.config {
   };
 }
 
+const RH = "_cw_rh"; // coluna interna de hash da linha (MD5 hex), quando a tabela a tem
+
 // ─── Type mapping ─────────────────────────────────────────────────────────────
 
 export function canonicalToMssql(sqlType: string): string {
   if (sqlType === "BIGINT") return "BIGINT";
-  if (sqlType.startsWith("DECIMAL")) return "DECIMAL(18,4)";
+  if (sqlType.startsWith("DECIMAL")) return physicalDecimal(sqlType, "mssql");
   if (sqlType === "DATE") return "DATE";
   if (sqlType === "DATETIME2") return "DATETIME2";
   if (sqlType === "TIME") return "TIME";
@@ -65,6 +68,20 @@ function mssqlToCanonical(r: {
   return "NVARCHAR(MAX)";
 }
 
+/** Colunas carregadas como texto exato: BIGINT, DECIMAL com mais de 15 digitos (limite de exatidao de Number) e datas/horas. */
+const TEXT_LOADED_RE: Record<string, RegExp> = {
+  BIGINT: /^-?\d{1,19}$/,
+  DECIMAL: /^-?\d+(?:\.\d+)?$/,
+  DATE: /^\d{4}-\d{2}-\d{2}$/,
+  DATETIME2: /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?$/,
+  TIME: /^\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?$/,
+};
+function textLoaded(sqlType: string): boolean {
+  if (sqlType === "BIGINT" || sqlType === "DATE" || sqlType === "DATETIME2" || sqlType === "TIME") return true;
+  const d = parseDecimalType(sqlType);
+  return !!d && d.precision > 15;
+}
+
 // ─── Quoting ──────────────────────────────────────────────────────────────────
 
 function mssqlQuote(name: string): string {
@@ -76,6 +93,11 @@ const setRequestTimeout = (req: sql.Request, ms: number) => {
 };
 
 const esc = (s: string) => s.replaceAll("'", "''");
+
+/** Indice em cw_synced_at (base de `rows?since=`). Nome constante e valido: o indice pertence a tabela e acompanha o sp_rename dela. */
+const syncedAtIndexSql = (schema: string, table: string) =>
+  `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id=OBJECT_ID(N'${esc(schema)}.${esc(table)}') AND name=N'IX_cw_synced_at')
+     CREATE NONCLUSTERED INDEX [IX_cw_synced_at] ON ${mssqlQuote(schema)}.${mssqlQuote(table)} (${mssqlQuote(CW_SYNCED_AT)})`;
 
 // ─── Pool cache ───────────────────────────────────────────────────────────────
 
@@ -227,25 +249,32 @@ export class MssqlStorageConnection implements StorageConnection {
     const bulk = new sql.Table(`${schema}.${table}`);
     bulk.create = false;
 
-    for (const c of cols) {
+    // Tudo que precisa de exatidao entra como TEXTO e o proprio SQL Server converte para o tipo da coluna (o driver tedious passaria por
+    // Number/Date: DECIMAL > 15 digitos e BIGINT > 2^53 perderiam precisao, e "YYYY-MM-DD HH:MM:SS.ffffff" seria lido no fuso local e
+    // truncado a milissegundos). Valor que nao cabe no tipo faz o bulk FALHAR (nunca arredonda). Ver B1/M6.
+    const asText = cols.map((c) => textLoaded(c.sqlType));
+    cols.forEach((c, j) => {
       const t = c.sqlType;
       let sqlType: sql.ISqlType | (() => sql.ISqlType);
-      if (t === "BIGINT") sqlType = sql.BigInt;
-      else if (t.startsWith("DECIMAL")) sqlType = sql.Decimal(18, 4);
-      else if (t === "DATE") sqlType = sql.Date;
-      else if (t === "DATETIME2") sqlType = sql.DateTime2(7);
-      else if (t === "TIME") sqlType = sql.Time(7);
+      if (asText[j]) sqlType = sql.NVarChar(64);
+      else if (t.startsWith("DECIMAL")) { const s = parseDecimalType(t) ?? DECIMAL_LEGACY; sqlType = sql.Decimal(s.precision, s.scale); }
       else sqlType = sql.NVarChar(sql.MAX);
-      bulk.columns.add(c.name, sqlType, { nullable: true });
-    }
+      bulk.columns.add(c.name, sqlType, { nullable: c.nullable !== false });
+    });
 
     for (const row of rows) {
       bulk.rows.add(...cols.map((c, j) => {
         const v = row[j];
         if (v == null) return null;
-        const s = String(v);
-        if (c.sqlType === "BIGINT") return s ? parseInt(s, 10) : null;
-        if (c.sqlType.startsWith("DECIMAL")) return s ? parseFloat(s) : null;
+        const s = v instanceof Date ? v.toISOString().replace("T", " ").replace("Z", "") : String(v);
+        if (asText[j]) {
+          if (s === "") return null;
+          if (!TEXT_LOADED_RE[c.sqlType === "BIGINT" ? "BIGINT" : c.sqlType.startsWith("DECIMAL") ? "DECIMAL" : c.sqlType].test(s)) {
+            throw new Error(`Valor invalido para ${c.name} (${c.sqlType}): ${s.slice(0, 40)}`);
+          }
+          return s;
+        }
+        if (c.sqlType.startsWith("DECIMAL")) return s ? Number(s) : null;
         return s;
       }) as Parameters<typeof bulk.rows.add>);
     }
@@ -309,6 +338,7 @@ export class MssqlStorageConnection implements StorageConnection {
         `IF COL_LENGTH('${esc(schema)}.${esc(staging)}', '${esc(CW_SYNCED_AT)}') IS NULL
          ALTER TABLE ${qStg} ADD ${qSyncedAt} DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(), ${qDeletedAt} DATETIME2 NULL`,
       );
+      { const ix = p.request(); setReqTimeout(ix, 7_200_000); await ix.query(syncedAtIndexSql(schema, staging)); }
       // ── fullSwap: DROP target + RENAME staging → target (transação breve) ──────
       const tx = new sql.Transaction(p);
       await tx.begin();
@@ -354,6 +384,7 @@ export class MssqlStorageConnection implements StorageConnection {
     );
 
     let marked = 0;
+    let preserveStamp = false;
 
     try {
       await p.request().query(`CREATE TABLE ${qMgd} (${colDefsWithMeta})`);
@@ -367,10 +398,24 @@ export class MssqlStorageConnection implements StorageConnection {
         //  - senao (delta parcial): preserva como está — ausência só significa "não mudou neste lote".
         // Schema drift: colunas novas da origem (ausentes no target) entram como NULL;
         // colunas so do target sao descartadas.
+        // Tabela criada pelo caminho de replace "cru" do importer (ou anterior ao soft delete) NÃO tem cw_synced_at/cw_deleted_at: o merge
+        // referenciava t.cw_deleted_at e falhava com "Invalid column name" (visto contra SQL Server real). Acrescenta as colunas que faltam.
+        const metaRes = await p.request().query(
+          `SELECT COL_LENGTH(N'${esc(schema)}.${esc(target)}', N'${esc(CW_SYNCED_AT)}') AS s, COL_LENGTH(N'${esc(schema)}.${esc(target)}', N'${esc(CW_DELETED_AT)}') AS d`,
+        );
+        const metaRow = metaRes.recordset[0] as { s: number | null; d: number | null };
+        if (metaRow.s === null) {
+          const addSynced = p.request(); setReqTimeout(addSynced, 7_200_000);
+          await addSynced.query(`ALTER TABLE ${qTgt} ADD ${qSyncedAt} DATETIME2 NOT NULL CONSTRAINT ${mssqlQuote(`DF_${target}_${CW_SYNCED_AT}`.slice(0, 120))} DEFAULT SYSUTCDATETIME()`);
+        }
+        if (metaRow.d === null) {
+          await p.request().query(`ALTER TABLE ${qTgt} ADD ${qDeletedAt} DATETIME2 NULL`);
+        }
         const tgtColsRes = await p.request().query(
           `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = N'${esc(schema)}' AND TABLE_NAME = N'${esc(target)}'`,
         );
         const tgtCols = new Set((tgtColsRes.recordset as { COLUMN_NAME: string }[]).map(r => r.COLUMN_NAME));
+        preserveStamp = tgtCols.has(RH) && tgtCols.has(CW_SYNCED_AT) && tgtCols.has(CW_DELETED_AT) && cols.some(c => c.name === RH);
         const selectList = cols
           .map(c => (tgtCols.has(c.name) ? `t.${mssqlQuote(c.name)}` : `NULL`))
           .join(", ");
@@ -399,11 +444,24 @@ export class MssqlStorageConnection implements StorageConnection {
       // Copia todos os rows de staging (novos / atualizados) — sempre "vivas": carimba
       // cw_synced_at=agora e cw_deleted_at=NULL (undelete automático se a chave tinha
       // sido excluída antes e voltou a aparecer na origem).
+      // Com a coluna de hash `_cw_rh` nos dois lados, a linha cujo CONTEUDO nao mudou (mesmo hash, viva) mantem o cw_synced_at
+      // anterior (H4): reler linhas iguais nao as reapresenta em `rows?since=`. Sem `_cw_rh`, toda linha lida e carimbada agora.
       const insReq = p.request();
       setReqTimeout(insReq, 7_200_000);
-      await insReq.query(
+      if (preserveStamp) {
+        const sCols = cols.map(c => `s.${mssqlQuote(c.name)}`).join(", ");
+        const rh = mssqlQuote(RH);
+        await insReq.query(
+          `INSERT INTO ${qMgd} (${colListWithMeta})
+           SELECT ${sCols}, COALESCE(p.sa, SYSUTCDATETIME()), NULL FROM ${qStg} s
+           LEFT JOIN (SELECT ${key} AS k, ${rh} AS rh, MAX(${qSyncedAt}) AS sa FROM ${qTgt} WHERE ${qDeletedAt} IS NULL GROUP BY ${key}, ${rh}) p
+             ON p.k = s.${key} AND p.rh = s.${rh} OPTION (MAXDOP 1)`,
+        );
+      } else await insReq.query(
         `INSERT INTO ${qMgd} (${colListWithMeta}) SELECT ${colList}, SYSUTCDATETIME(), NULL FROM ${qStg} OPTION (MAXDOP 1)`,
       );
+
+      { const ix = p.request(); setReqTimeout(ix, 7_200_000); await ix.query(syncedAtIndexSql(schema, mergedName)); }
 
       // Transação breve: DROP target + RENAME merged → target (~ms de lock)
       const tx = new sql.Transaction(p);

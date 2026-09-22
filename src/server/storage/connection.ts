@@ -22,8 +22,12 @@ export const CW_SYNCED_AT = "cw_synced_at";
 export const CW_DELETED_AT = "cw_deleted_at";
 
 /** Nomes das colunas do USUÁRIO: sem as internas (_cw_rh, cw_synced_at, cw_deleted_at). */
+export function isInternalColumn(name: string): boolean {
+  return name === "_cw_rh" || name === CW_SYNCED_AT || name === CW_DELETED_AT;
+}
+
 export function userColumnNames(cols: readonly { name: string }[]): string[] {
-  return cols.map((c) => c.name).filter((n) => n !== "_cw_rh" && n !== CW_SYNCED_AT && n !== CW_DELETED_AT);
+  return cols.map((c) => c.name).filter((n) => !isInternalColumn(n));
 }
 
 export type ColDef = {

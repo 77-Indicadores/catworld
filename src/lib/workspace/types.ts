@@ -30,6 +30,8 @@ export type WorkspaceSource = {
   lastError: string | null;
   lastRefreshedAt: string | null;
   nextRefreshAt: string | null;
+  /** batimento da rodada em andamento (M2) */
+  updatedAt?: string | null;
   connection: { id: string; name: string };
 };
 
@@ -60,6 +62,7 @@ export type WorkspaceDerived = {
   lastError: string | null;
   lastRefreshedAt: string | null;
   nextRefreshAt: string | null;
+  updatedAt?: string | null;
   targetTable: { id: string; rowCount: string; lastDataAt: string | null } | null;
 };
 

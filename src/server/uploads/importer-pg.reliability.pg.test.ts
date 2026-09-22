@@ -61,17 +61,33 @@ d("import Postgres: atomicidade e integridade (real)", () => {
     return p;
   }
 
-  async function run(path: string, table: string, mode: "replace" | "append" | "upsert" = "replace", keyColumn?: string) {
+  async function run(
+    path: string, table: string, mode: "replace" | "append" | "upsert" = "replace", keyColumn?: string,
+    opts: { rowCount?: number; id?: string; fullSnapshot?: boolean; clientPreview?: boolean } = {},
+  ) {
     const prev = await previewFile(path);
-    const id = randomUUID();
-    await prisma.upload.create({
-      data: {
-        id, datasetId, originalFilename: `${table}.csv`, blobName: `rel/${id}.csv`, sizeBytes: 1n, mode, keyColumn: keyColumn ?? null,
-        status: "IMPORTING", rowCount: BigInt(prev.rowCount), previewJson: JSON.stringify(prev), mappingJson: JSON.stringify(prev.columns),
-      },
-    });
+    const id = opts.id ?? randomUUID();
+    const existing = await prisma.upload.findUnique({ where: { id } });
+    if (!existing) {
+      await prisma.upload.create({
+        data: {
+          id, datasetId, originalFilename: `${table}.csv`, blobName: `rel/${id}.csv`, sizeBytes: 1n, mode, keyColumn: keyColumn ?? null,
+          fullSnapshot: opts.fullSnapshot ?? false,
+          status: "IMPORTING", rowCount: BigInt(opts.rowCount ?? prev.rowCount),
+          // preview "do servidor" (source): e a contagem que o gate aceita como esperada; opts.rowCount simula uma origem com mais linhas
+          previewJson: JSON.stringify({ ...prev, source: opts.clientPreview ? undefined : "server", rowCount: opts.rowCount ?? prev.rowCount }), mappingJson: JSON.stringify(prev.columns),
+        },
+      });
+    }
     return importUploadPg(id, path, conn);
   }
+  const setSetting = (key: string, value: string) =>
+    prisma.$executeRawUnsafe(`INSERT INTO cw_system_settings (key, value, updated_at) VALUES ($1,$2,NOW()) ON CONFLICT (key) DO UPDATE SET value=$2`, key, value);
+  const clearSetting = (key: string) => prisma.$executeRawUnsafe(`DELETE FROM cw_system_settings WHERE key=$1`, key);
+  const expectedFingerprintMixed = async (n1: number, n2: number) =>
+    (await pool.query(
+      `SELECT md5(string_agg(i || '|' || CASE WHEN i <= $1 THEN 'v1 ' ELSE 'v2 ' END || i || '|' || trim_scale((i || '.5')::numeric)::text, ',' ORDER BY i)) h FROM generate_series(1, $2::bigint) i`,
+      [n1, n1 + n2])).rows[0].h as string;
 
   const count = async (t: string) => Number((await pool.query(`SELECT count(*) n FROM ${SCHEMA}.${t}`)).rows[0].n);
   /** impressão digital do conteúdo: qualquer linha faltando/duplicada/alterada muda o md5 */
@@ -84,6 +100,9 @@ d("import Postgres: atomicidade e integridade (real)", () => {
     await run(file("a.csv", 5000), "t_replace");
     expect(await count("t_replace")).toBe(5000);
     expect(await fingerprint("t_replace")).toBe(await expectedFingerprint(5000, "v1"));
+    // o consumo incremental (rows?since=) filtra por cw_synced_at: precisa de índice (190-340 ms → 1-4 ms medidos em 500k linhas)
+    const idx = (await pool.query(`SELECT count(*)::int n FROM pg_indexes WHERE schemaname = $1 AND tablename = 't_replace' AND indexdef LIKE '%cw_synced_at%'`, [SCHEMA])).rows[0].n;
+    expect(idx).toBe(1);
   });
 
   it("replace sobre tabela existente (troca atômica): vira exatamente a carga nova", async () => {
@@ -93,12 +112,11 @@ d("import Postgres: atomicidade e integridade (real)", () => {
     expect(await fingerprint("t_swap")).toBe(await expectedFingerprint(4500, "v2"));
   });
 
-  it("o BUG REAL: linha com coluna a mais depois da amostra do sniffer — todas as linhas chegam ao banco", async () => {
+  it("o BUG REAL: linha com coluna a mais (TIP-07): o import é RECUSADO nomeando a linha e nada é publicado pela metade", async () => {
     const n = 60_000;
-    await run(file("c.csv", n, "v1", { 50_000: "50000,x,1,SOBRA,MAIS" }), "t_bad");
-    expect(await count("t_bad")).toBe(n);                          // antes: 49.152 (perdia o resto em silêncio)
-    const ids = (await pool.query(`SELECT count(DISTINCT id) n FROM ${SCHEMA}.t_bad`)).rows[0].n;
-    expect(Number(ids)).toBe(n);                                    // sem duplicata
+    await expect(run(file("c.csv", n, "v1", { 50_000: "50000,x,1,SOBRA,MAIS" }), "t_bad")).rejects.toThrow(/Linha 50001/);
+    // antes: 49.152 linhas entregues sem erro; depois do 1o hotfix: 60.000 com as celulas extras perdidas; agora: falha alta
+    await expect(count("t_bad")).rejects.toThrow();   // a tabela nem foi criada
   }, 120_000);
 
   it("import que FALHA no meio não mexe na tabela existente (atomicidade)", async () => {
@@ -165,5 +183,189 @@ d("import Postgres: atomicidade e integridade (real)", () => {
     const before = await fingerprint("t_dup");
     await expect(run(file("j2.csv", 50, "v2", { 10: "9,dup,1" }), "t_dup", "upsert", "id")).rejects.toThrow();
     expect(await fingerprint("t_dup")).toBe(before);
+  });
+
+  // ── Plano de confiabilidade: integridade, exactly-once, tipos, chave nula ─────────────────────────────────
+
+  it("INTEGRIDADE: arquivo com menos linhas que o esperado NÃO troca a tabela (o incidente da ADL)", async () => {
+    await run(file("k1.csv", 3000, "v1"), "t_integ");
+    const before = await fingerprint("t_integ");
+    // o preview disse 5000 linhas, mas só 1200 chegaram (simula a carga interrompida)
+    await expect(run(file("k2.csv", 1200, "v2"), "t_integ", "replace", undefined, { rowCount: 5000 })).rejects.toThrow(/\[integrity\] ROWS_BELOW_EXPECTED/);
+    expect(await count("t_integ")).toBe(3000);
+    expect(await fingerprint("t_integ")).toBe(before);
+    const stage = (await pool.query(`SELECT count(*)::int n FROM information_schema.tables WHERE table_schema=$1 AND table_name LIKE 'cw_stage_%'`, [SCHEMA])).rows[0].n;
+    expect(stage).toBe(0);                                          // sem staging órfã
+    // a evidência fica registrada: uma linha COMPLETED/OK da 1ª carga e uma FAILED com o motivo estruturado da 2ª
+    const led = (await pool.query(`SELECT outcome, verdict, expected_rows::int e, parsed_rows::int p, prev_rows::int pr, detail_json FROM cw_load_ledger WHERE table_name = 't_integ' AND dataset_id = $1 ORDER BY created_at`, [datasetId])).rows;
+    expect(led.map((r) => [r.outcome, r.verdict])).toEqual([["COMPLETED", "OK"], ["FAILED", "FAILED"]]);
+    expect(led[1]).toMatchObject({ e: 5000 });
+    expect(JSON.parse(led[1].detail_json).reasons.map((x: { code: string }) => x.code)).toContain("ROWS_BELOW_EXPECTED");
+    const ev = (await pool.query(`SELECT count(*)::int n FROM cw_audit_events WHERE event_type = 'DATA_INTEGRITY_SUSPECT' AND detail_json LIKE '%t_integ%' AND detail_json LIKE $1 AND success = false`, [`%${datasetId}%`])).rows[0].n;
+    expect(ev).toBe(1);
+  });
+
+  it("INTEGRIDADE: substituir tabela com dados por arquivo só com cabeçalho é barrado (a menos que allow_empty)", async () => {
+    await run(file("l1.csv", 500, "v1"), "t_empty");
+    await expect(run(file("l2.csv", 0, "v2"), "t_empty")).rejects.toThrow(/EMPTY_REPLACE/);
+    expect(await count("t_empty")).toBe(500);
+    await setSetting("integrity.allow_empty", "true");
+    try {
+      await run(file("l3.csv", 0, "v2"), "t_empty");
+      expect(await count("t_empty")).toBe(0);
+    } finally { await clearSetting("integrity.allow_empty"); }
+  });
+
+  it("INTEGRIDADE: modo warn publica (e avisa) em vez de barrar", async () => {
+    await run(file("m1.csv", 800, "v1"), "t_warn");
+    await setSetting("integrity.mode", "warn");
+    try {
+      await run(file("m2.csv", 300, "v2"), "t_warn", "replace", undefined, { rowCount: 900 });
+      expect(await count("t_warn")).toBe(300);
+    } finally { await clearSetting("integrity.mode"); }
+  });
+
+  it("EXACTLY-ONCE: append reexecutado com o mesmo upload NÃO duplica (queda entre o COMMIT e os metadados)", async () => {
+    await run(file("n1.csv", 1000, "v1"), "t_once");
+    const id = randomUUID();
+    const f = file("n2.csv", 500, "v2", {}, 1001);
+    await run(f, "t_once", "append", undefined, { id });
+    expect(await count("t_once")).toBe(1500);
+    // a retentativa do MESMO upload (o job foi recolocado na fila): nada é acrescentado de novo
+    await run(f, "t_once", "append", undefined, { id });
+    expect(await count("t_once")).toBe(1500);
+    expect(await fingerprint("t_once")).toBe(await expectedFingerprintMixed(1000, 500));
+    // a marca é do upload: um upload NOVO com o mesmo arquivo continua acrescentando (é outra carga)
+    await run(f, "t_once", "append");
+    expect(await count("t_once")).toBe(2000);
+  });
+
+  it("TIPOS: append/upsert nunca estreita a coluna (DECIMAL em BIGINT arredondava)", async () => {
+    const dec = join(dir, "o1.csv"); writeFileSync(dec, "id,nome,valor\n1,a,1.5\n2,b,2.5\n");
+    await run(dec, "t_narrow");
+    const ints = join(dir, "o2.csv"); writeFileSync(ints, "id,nome,valor\n3,c,7\n4,d,8\n"); // inferido BIGINT: cabe em DECIMAL, sem perda
+    await run(ints, "t_narrow", "append");
+    expect(await count("t_narrow")).toBe(4);
+    const v = (await pool.query(`SELECT valor::text v FROM ${SCHEMA}.t_narrow WHERE id::int = 1`)).rows[0].v;
+    expect(Number(v)).toBe(1.5);                                     // não virou 2
+    // o contrário: tabela BIGINT recebendo decimais é recusado, sem tocar a tabela
+    const intTable = join(dir, "o3.csv"); writeFileSync(intTable, "id,nome,valor\n1,a,10\n2,b,20\n");
+    await run(intTable, "t_narrow2");
+    const decimals = join(dir, "o4.csv"); writeFileSync(decimals, "id,nome,valor\n3,c,1.6\n4,d,2.4\n");
+    await expect(run(decimals, "t_narrow2", "append")).rejects.toThrow(/Tipos incompatíveis/);
+    expect(await count("t_narrow2")).toBe(2);
+  });
+
+  it("UPSERT: chave nula é recusada (inseria uma linha nova a cada execução)", async () => {
+    await run(file("p1.csv", 10, "v1"), "t_nullkey");
+    const bad = join(dir, "p2.csv"); writeFileSync(bad, "id,nome,valor\n5,x,1.5\n,sem chave,2.5\n");
+    await expect(run(bad, "t_nullkey", "upsert", "id")).rejects.toThrow(/chave nula/);
+    expect(await count("t_nullkey")).toBe(10);
+  });
+
+  it("UPSERT com fullSnapshot e arquivo vazio: barrado, nada é escondido", async () => {
+    await run(file("q1.csv", 100, "v1"), "t_snap");
+    await expect(run(file("q2.csv", 0, "v2"), "t_snap", "upsert", "id", { fullSnapshot: true })).rejects.toThrow(/EMPTY_REPLACE/);
+    const visible = (await pool.query(`SELECT count(*)::int n FROM ${SCHEMA}.t_snap WHERE cw_deleted_at IS NULL`)).rows[0].n;
+    expect(visible).toBe(100);
+  });
+
+  it("PIPELINE: erro num lote INSERIDO em paralelo ao parse falha o import (sem rejeição solta) e não toca a tabela", async () => {
+    await run(file("s1.csv", 2000, "v1"), "t_pipe");
+    const before = await fingerprint("t_pipe");
+    // 6000 linhas; a coluna valor foi mapeada como BIGINT e na linha 5000 chega "abc": o INSERT desse lote falha enquanto o parser já lê o próximo
+    const bad = file("s2.csv", 6000, "v2", { 5000: "5000,x,abc" });
+    const prev = await previewFile(bad);
+    const mapping = prev.columns.map((c) => (c.sqlName === "valor" ? { ...c, sqlType: "BIGINT" } : c));
+    const id = randomUUID();
+    await prisma.upload.create({ data: { id, datasetId, originalFilename: "t_pipe.csv", blobName: `rel/${id}.csv`, sizeBytes: 1n, mode: "replace", status: "IMPORTING", rowCount: 6000n, previewJson: JSON.stringify(prev), mappingJson: JSON.stringify(mapping) } });
+    await expect(importUploadPg(id, bad, conn)).rejects.toThrow();
+    expect(await count("t_pipe")).toBe(2000);
+    expect(await fingerprint("t_pipe")).toBe(before);
+    const stages = (await pool.query(`SELECT count(*)::int n FROM information_schema.tables WHERE table_schema=$1 AND table_name = $2`, [SCHEMA, `cw_stage_${id.replaceAll("-", "").slice(0, 20)}`])).rows[0].n;
+    expect(stages).toBe(0);                                        // sem staging órfã
+  });
+
+  it("#2 INTEGRIDADE: o rowCount/preview do CLIENTE nao calibra o gate; vale a contagem do servidor (e a divergencia marca SUSPECT)", async () => {
+    // cliente diz 5000 linhas, o arquivo tem 800: antes o import era BARRADO pelo numero do cliente (ou, com cliente menor, deixava passar)
+    const id = randomUUID();
+    const r = await run(file("cl1.csv", 800, "v1"), "t_client_count", "replace", undefined, { rowCount: 5000, clientPreview: true, id });
+    expect(r.rowCount).toBe(800n);
+    const led = await prisma.$queryRawUnsafe<{ verdict: string; expected_rows: bigint; detail_json: string }[]>(`SELECT verdict, expected_rows, detail_json FROM cw_load_ledger WHERE upload_id = $1::uuid`, id);
+    expect(led[0]!.verdict).toBe("SUSPECT");
+    expect(Number(led[0]!.expected_rows)).toBe(800);
+    expect(JSON.parse(led[0]!.detail_json)).toMatchObject({ expectedSource: "server-count", clientRowCount: 5000 });
+    expect(JSON.parse(led[0]!.detail_json).reasons.map((x: { code: string }) => x.code)).toEqual(["CLIENT_COUNT_MISMATCH"]);
+    // cliente MENOR que o arquivo nao esconde uma carga truncada: o servidor conta o arquivo (aqui completo => OK, sem motivo)
+    const id2 = randomUUID();
+    await run(file("cl2.csv", 500, "v1"), "t_client_count2", "replace", undefined, { rowCount: 10, clientPreview: true, id: id2 });
+    const led2 = await prisma.$queryRawUnsafe<{ expected_rows: bigint }[]>(`SELECT expected_rows FROM cw_load_ledger WHERE upload_id = $1::uuid`, id2);
+    expect(Number(led2[0]!.expected_rows)).toBe(500);
+  });
+
+  it("#5 LEDGER com falha NAO desfaz uma carga publicada (o livro e gravado depois da transacao)", async () => {
+    const p = prisma as unknown as { $executeRaw: (...x: unknown[]) => unknown };
+    const orig = p.$executeRaw;
+    let ledgerCalls = 0;
+    p.$executeRaw = function (this: unknown, s: TemplateStringsArray, ...a: unknown[]) {
+      if (Array.isArray(s) && s.join("").includes("cw_load_ledger")) { ledgerCalls++; return Promise.reject(new Error("livro indisponivel")); }
+      return orig.call(this, s, ...a);
+    } as never;
+    try {
+      const id = randomUUID();
+      const r = await run(file("led1.csv", 120, "v1"), "t_ledger_fail", "replace", undefined, { id });
+      expect(r.rowCount).toBe(120n);
+      expect((await prisma.upload.findUnique({ where: { id } }))?.status).toBe("COMPLETED");
+      expect(await count("t_ledger_fail")).toBe(120);
+      expect(ledgerCalls).toBeGreaterThan(0);
+    } finally { p.$executeRaw = orig; }
+  });
+
+  it("#3 EXACTLY-ONCE: o append que CRIA a tabela grava a marca na mesma transacao (retentativa nao duplica)", async () => {
+    const id = randomUUID(); const f = file("ce1.csv", 300, "v1");
+    await run(f, "t_create_once", "append", undefined, { id });
+    expect(await count("t_create_once")).toBe(300);
+    expect((await pool.query(`SELECT count(*)::int n FROM cw_internal.applied_uploads WHERE upload_id = $1`, [id])).rows[0].n).toBe(1);
+    await run(f, "t_create_once", "append", undefined, { id }); // retentativa do MESMO upload
+    expect(await count("t_create_once")).toBe(300);              // antes: 600
+  });
+
+  it("#1 TIPOS: data/decimal AMBIGUOS no arquivo herdam DATE/DECIMAL da tabela existente (append e upsert), nao viram texto", async () => {
+    // carga 1 (nao ambigua: dia 25 > 12 e 1.234,50 so pode ser decimal com virgula) cria DATE e DECIMAL(?,2)
+    const f1 = join(dir, "amb1.csv"); writeFileSync(f1, "id,dia,valor\n1,25/01/2026,\"1.234,50\"\n2,26/01/2026,\"9,25\"\n");
+    await run(f1, "t_amb");
+    expect((await pool.query(`SELECT data_type FROM information_schema.columns WHERE table_schema=$1 AND table_name='t_amb' AND column_name='dia'`, [SCHEMA])).rows[0].data_type).toBe("date");
+    // carga 2: todos os dias <= 12 e "1.234" ambiguo: sozinha vira texto; contra a tabela deve usar dd/mm e virgula decimal
+    const f2 = join(dir, "amb2.csv"); writeFileSync(f2, "id,dia,valor\n3,01/02/2026,1.234\n4,03/04/2026,2.500\n");
+    expect((await previewFile(f2)).columns.find((c) => c.sqlName === "dia")!.sqlType).toBe("NVARCHAR(MAX)"); // premissa do bug
+    await run(f2, "t_amb", "append");
+    const got = (await pool.query(`SELECT id::int i, dia::text d, valor::text v FROM ${SCHEMA}.t_amb ORDER BY id::int`)).rows;
+    expect(got.map((r) => r.d)).toEqual(["2026-01-25", "2026-01-26", "2026-02-01", "2026-04-03"]);
+    expect([Number(got[2].v), Number(got[3].v)]).toEqual([1234, 2500]);   // convenção da tabela (virgula decimal): "1.234" = ponto de milhar
+    // upsert tambem
+    const f3 = join(dir, "amb3.csv"); writeFileSync(f3, "id,dia,valor\n4,05/06/2026,7,5\n".replace("7,5", "\"7,5\""));
+    await run(f3, "t_amb", "upsert", "id");
+    expect((await pool.query(`SELECT dia::text d FROM ${SCHEMA}.t_amb WHERE id::int = 4`)).rows[0].d).toBe("2026-06-05");
+  });
+
+  it("#1 TIPOS: ambiguo SEM convencao conhecida na tabela falha alto, nao repetivel, e nada e gravado", async () => {
+    await run(join(dir, "amb1.csv"), "t_amb_noconv");
+    const tbl = await prisma.datasetTable.findUniqueOrThrow({ where: { datasetId_sqlName: { datasetId, sqlName: "t_amb_noconv" } } });
+    await prisma.datasetVersion.deleteMany({ where: { tableId: tbl.id } });
+    const f2 = join(dir, "amb4.csv"); writeFileSync(f2, "id,dia,valor\n3,01/02/2026,9\n");
+    await expect(run(f2, "t_amb_noconv", "append")).rejects.toThrow(/ambíguas/);
+    expect(await count("t_amb_noconv")).toBe(2);
+  });
+
+  it("ARQUIVO SEM COLUNAS: upload FAILED com motivo, tabela intacta (antes: COMPLETED com 0 linhas)", async () => {
+    await run(file("r1.csv", 50, "v1"), "t_nocols");
+    const nocols = join(dir, "r2.csv"); writeFileSync(nocols, "");
+    const id = randomUUID();
+    await prisma.upload.create({ data: { id, datasetId, originalFilename: "t_nocols.csv", blobName: `rel/${id}.csv`, sizeBytes: 0n, mode: "replace", status: "IMPORTING", mappingJson: "[]" } });
+    await importUploadPg(id, nocols, conn);
+    const up = await prisma.upload.findUnique({ where: { id } });
+    expect(up?.status).toBe("FAILED");
+    expect(up?.errorMessage).toMatch(/sem colunas/);
+    expect(await count("t_nocols")).toBe(50);
   });
 });

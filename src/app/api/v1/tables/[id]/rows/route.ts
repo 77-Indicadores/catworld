@@ -5,9 +5,14 @@ import { canAccess } from "@/server/auth/permissions";
 import { ensureInternalPrincipal, executeReadOnly, grantSchema } from "@/server/azure/sql";
 import { executeLiveReadOnly, liveQuotedTable, type LiveConnection } from "@/server/connections/live";
 import { getStorageConnection } from "@/server/storage/connection";
+import { activeRowsPredicate } from "@/server/storage/active-rows";
 import { ApiError, handleApiError, ok } from "@/server/http";
 import { quoteIdentifier } from "@/server/security/naming";
-import { decodeCursor, pgRemovedSql, pgRowsPageSql, REMOVED_CAP, settleFirstPage, shapeRowsPage, TIE_CAP, type Cursor, type PageRow } from "@/server/tables/since";
+import {
+  BASELINE_SINCE_TXT, decodeCursor, finalizeNextSince, normTs, parseSince, PG_NOW_TXT_SQL, pgRemovedSql, pgRowsPageSql,
+  REMOVED_CAP, rowStampsOf, safetyWindowMs, settleFirstPage, shapeRowsPage, TIE_CAP,
+  type Cursor, type PageRow, type ParsedSince,
+} from "@/server/tables/since";
 
 /** Formata Date como literal SQL seguro (ISO, sem interpolação de input livre). */
 function sqlDateLiteral(d: Date): string {
@@ -38,15 +43,17 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     if (sinceRaw && table.source?.mode === "live") {
       throw new ApiError(400, "SINCE_NOT_SUPPORTED", "\"since\" só é suportado em fontes extract (fontes live não têm cópia local para comparar).");
     }
-    let since: Date | null = null;
+    const wantStamps = request.nextUrl.searchParams.get("stamps") === "1";
+    let parsedSince: ParsedSince | null = null;
     if (sinceRaw) {
-      since = new Date(sinceRaw);
-      if (isNaN(since.getTime())) throw new ApiError(400, "INVALID_SINCE", "\"since\" precisa ser uma data ISO válida");
+      parsedSince = parseSince(sinceRaw); // UTC (sem fuso = UTC), microssegundos; nunca usa o fuso do Node
+      if (!parsedSince) throw new ApiError(400, "INVALID_SINCE", "\"since\" precisa ser uma data ISO valida (ex.: 2026-09-19T10:00:00.123456Z)");
     }
-    // cursor (aditivo): continua a pagina seguinte de um `since` com mais linhas que o limit — ver server/tables/since.ts
+    // so o ramo MSSQL (legado) ainda usa Date (ms)
+    const since: Date | null = parsedSince ? new Date(parsedSince.iso.replace(/(\.\d{3})\d{3}Z$/, "$1Z")) : null;
+    // cursor (aditivo): carrega o estado inteiro e tambem pagina o BASELINE (sem `since`) — ver server/tables/since.ts
     let cursor: Cursor | null = null;
     if (cursorRaw) {
-      if (!since) throw new ApiError(400, "INVALID_CURSOR", "\"cursor\" exige \"since\"");
       cursor = decodeCursor(cursorRaw);
       if (!cursor) throw new ApiError(400, "INVALID_CURSOR", "\"cursor\" invalido");
     }
@@ -80,63 +87,75 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       return result.rows as Record<string, unknown>[];
     };
 
-    if (since) {
-      const sinceLit = `'${sqlDateLiteral(since)}'`;
+    if (conn.provider === "postgres") {   // "live" ja retornou acima; vale tambem SEM `since` (baseline paginado)
       const qSyncedAt = conn.q("cw_synced_at");
       const qDeletedAt = conn.q("cw_deleted_at");
-
-      if (conn.provider === "postgres") {
-        // Paginacao sem perda: ordem (cw_synced_at, chave) + cursor; nextSince conservador. (Ver since.ts.)
-        const qKey = keyColumn ? conn.q(keyColumn) : null;
-        const keySqlType = table.columns.find((c) => c.sqlName === keyColumn)?.sqlType ?? "NVARCHAR(MAX)";
-        if (cursor && !qKey) throw new ApiError(400, "INVALID_CURSOR", "\"cursor\" exige tabela com chave (upsert)");
-        let pageSql: string;
-        try {
-          pageSql = pgRowsPageSql({ qTarget, colList, qSynced: qSyncedAt, qDeleted: qDeletedAt, qKey, keySqlType, sinceLit, cursor, limit });
-        } catch {
-          throw new ApiError(400, "INVALID_CURSOR", "\"cursor\" invalido");
-        }
-        const raw = await conn.query<PageRow>(pageSql);
+      const isBaseline = !parsedSince;
+      const sinceTxt = parsedSince?.txt ?? BASELINE_SINCE_TXT;
+      const sinceLit = `'${sinceTxt}'`;
+      const qKey = keyColumn ? conn.q(keyColumn) : null;
+      const keySqlType = table.columns.find((c) => c.sqlName === keyColumn)?.sqlType ?? "NVARCHAR(MAX)";
+      if (cursor && !qKey) throw new ApiError(400, "INVALID_CURSOR", "\"cursor\" exige tabela com chave (upsert)");
+      const mkSql = (lim: number, cur: Cursor | null) =>
+        pgRowsPageSql({ qTarget, colList, qSynced: qSyncedAt, qDeleted: qDeletedAt, qKey, keySqlType, sinceLit, cursor: cur, limit: lim });
+      let pageSql: string;
+      try { pageSql = mkSql(limit, cursor); } catch { throw new ApiError(400, "INVALID_CURSOR", "\"cursor\" invalido"); }
+      let raw: PageRow[] | null = null;
+      try {
+        raw = await conn.query<PageRow>(pageSql);
+      } catch (e) {
+        // Tabela anterior a feature (sem cw_synced_at): so o baseline cai no caminho antigo (abaixo); com `since` o erro sobe.
+        if (!(isBaseline && (e as { code?: string }).code === "42703")) throw e;
+      }
+      if (raw) {
         const shaped = cursor
-          ? shapeRowsPage(raw, limit, since)
-          : await settleFirstPage(raw, limit, since, () =>
-              conn.query<PageRow>(pgRowsPageSql({ qTarget, colList, qSynced: qSyncedAt, qDeleted: qDeletedAt, qKey, keySqlType, sinceLit, cursor: null, limit: TIE_CAP })));
+          ? shapeRowsPage(raw, limit, sinceTxt)
+          : await settleFirstPage(raw, limit, sinceTxt, () => conn.query<PageRow>(mkSql(TIE_CAP, null)));
+        const stamps = wantStamps ? rowStampsOf(shaped.page) : null;
         const rows = shaped.page.map((r) => {
           const { __cw_synced_at, __cw_synced_txt, __cw_key, ...rest } = r;
           void __cw_synced_at; void __cw_synced_txt; void __cw_key;
           return rest;
         });
 
-        // Exclusoes: so na 1a pagina (nas do cursor ja foram entregues). Sem o teto de `limit` de antes.
+        // Exclusoes: so na 1a pagina de um `since` (baseline nao lista excluidas; paginas de cursor ja as entregaram).
         let removedKeys: unknown[] | null = null;
-        let maxDeletedAt: Date | null = null;
+        let removedMaxTxt: string | null = null;
         let removedTruncated = false;
-        if (qKey) {
+        if (qKey && !isBaseline) {
           removedKeys = [];
           if (!cursor) {
             const removed = await conn.query<{ k: unknown; d: unknown }>(pgRemovedSql({ qTarget, qDeleted: qDeletedAt, qKey, sinceLit }));
             removedTruncated = removed.length > REMOVED_CAP;
             for (const r of removed.slice(0, REMOVED_CAP)) {
               removedKeys.push(r.k);
-              const d = r.d instanceof Date ? r.d : new Date(String(r.d));
-              if (!maxDeletedAt || d > maxDeletedAt) maxDeletedAt = d;
+              const d = normTs(String(r.d)); // TEXTO do banco: sem Date, sem fuso do Node
+              if (d && (!removedMaxTxt || d > removedMaxTxt)) removedMaxTxt = d;
             }
           }
         }
-        let nextSince = shaped.nextSince;
-        if (!shaped.hasMore && !removedTruncated && maxDeletedAt && maxDeletedAt > nextSince) nextSince = maxDeletedAt;
+        const nowTxt = (await conn.query<{ n: string }>(PG_NOW_TXT_SQL))[0]?.n ?? "";
+        const nextSince = finalizeNextSince({ settled: shaped, since: sinceTxt, removedMaxTxt, removedTruncated, nowTxt, windowMs: safetyWindowMs() });
 
         return ok(rows, {
-          columns: colNames,
+          columns: colNames.length ? colNames : (rows.length ? Object.keys(rows[0]!) : []),
           rowCount: rows.length,
           removedKeys,
-          nextSince: nextSince.toISOString(),
+          nextSince,                       // ISO UTC com 6 casas: guarde como TEXTO
           hasMore: shaped.hasMore,
           ...(shaped.nextCursor ? { nextCursor: shaped.nextCursor } : {}),
+          ...(stamps ? { rowStamps: stamps } : {}),        // dedupe no cliente (janela de seguranca)
           ...(removedTruncated ? { removedTruncated: true } : {}),
           ...(shaped.tieGroupTruncated ? { tieGroupTruncated: true } : {}),
+          safetyWindowSec: Math.round(safetyWindowMs() / 1000),
         });
       }
+    }
+
+    if (since) {
+      const sinceLit = `'${sqlDateLiteral(since)}'`;
+      const qSyncedAt = conn.q("cw_synced_at");
+      const qDeletedAt = conn.q("cw_deleted_at");
 
       // SQL Server: comportamento anterior (nao verificado por falta de instancia; ainda sujeito ao limite de empates).
       // Inclui cw_synced_at na própria query (pra achar o "carimbo" desta página sem
@@ -201,13 +220,18 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     // sem passar pelo fluxo de grant por principal do MSSQL.
     let nextSinceBaseline: string | null = null;
     try {
-      const maxRes = await conn.query<{ v: unknown }>(`SELECT MAX(${conn.q("cw_synced_at")}) AS v FROM ${qTarget}`);
+      // Lido como TEXTO: o Date do driver depende do fuso do processo. `parseSince` assume UTC (sem fuso = UTC).
+      const cast = conn.provider === "postgres" ? `MAX(${conn.q("cw_synced_at")})::text` : `CONVERT(varchar(30), MAX(${conn.q("cw_synced_at")}), 126)`;
+      const maxRes = await conn.query<{ v: unknown }>(`SELECT ${cast} AS v FROM ${qTarget}`);
       const v = maxRes[0]?.v;
-      if (v != null) nextSinceBaseline = (v instanceof Date ? v : new Date(String(v))).toISOString();
+      if (v != null) nextSinceBaseline = parseSince(String(v))?.iso ?? null;
     } catch { /* tabela pode não ter cw_synced_at ainda (dados anteriores à feature) */ }
 
+    // Amostra sem `since`: linha marcada como excluida (soft delete) nao e dado. Le como dono (a RLS nao vale): filtra aqui.
+    const activeWhere = await activeRowsPredicate(conn, table.dataset.schemaName, table.sqlName);
+    const activeSql = activeWhere ? ` WHERE ${activeWhere}` : "";
     if (conn.provider === "postgres") {
-      const rows = await conn.query<Record<string, unknown>>(`SELECT ${colList} FROM ${qTarget} LIMIT ${limit}`);
+      const rows = await conn.query<Record<string, unknown>>(`SELECT ${colList} FROM ${qTarget}${activeSql} LIMIT ${limit}`);
       return ok(rows, { columns: colNames.length ? colNames : (rows.length ? Object.keys(rows[0]!) : []), rowCount: rows.length, nextSince: nextSinceBaseline });
     }
 
@@ -216,7 +240,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     await grantSchema(actor.principal, table.dataset.schemaName, "READ", table.dataset.storageServerId);
     const result = await executeReadOnly(
       actor.principal,
-      `SELECT TOP ${limit} ${colNames.length ? colNames.map(c => quoteIdentifier(c)).join(", ") : "*"} FROM ${quoteIdentifier(table.dataset.schemaName)}.${quoteIdentifier(table.sqlName)}`,
+      `SELECT TOP ${limit} ${colNames.length ? colNames.map(c => quoteIdentifier(c)).join(", ") : "*"} FROM ${quoteIdentifier(table.dataset.schemaName)}.${quoteIdentifier(table.sqlName)}${activeSql}`,
       30, limit, [], 0, 120, table.dataset.storageServerId,
     );
     return ok(result.rows, { columns: result.columns, rowCount: result.rowCount, nextSince: nextSinceBaseline });

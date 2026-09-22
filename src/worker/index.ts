@@ -1,6 +1,11 @@
+import { ensureUtcTimezone } from "@/server/runtime-tz";
 import { buildClaimSql } from "./claim";
 import { isSourceBusyError } from "./source-failure";
 import { getUploadFilesDays, purgeExpiredUploadFiles } from "@/server/uploads/file-retention";
+import { releaseAllImportLocks } from "@/server/db/import-lock";
+import { deleteInBatches } from "@/server/db/batched-delete";
+import { purgeLedger } from "@/server/integrity/ledger";
+import { JobCancelledError, runWithCancelToken, watchJobStatus } from "@/server/db/job-cancel";
 import { createWriteStream } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
@@ -13,6 +18,7 @@ import { downloadFile, deleteFile } from "@/server/storage";
 import { env } from "@/server/env";
 import { previewFile, applyTypeOverrides, type FilePreview } from "@/server/uploads/parser";
 import { importUpload } from "@/server/uploads/importer";
+import { isNonRetryable } from "@/server/uploads/non-retryable";
 import { FROM_PREVIEW, queueImportUploadAuto } from "@/server/uploads/actions";
 import { enqueueDueSourceRefreshes, enqueueDueReconciliations, refreshDatasetSource, nextRefreshFromCron } from "@/server/connections/sources";
 import { enqueueDueDerivedRefreshes, refreshDerivedTable } from "@/server/connections/derived";
@@ -20,7 +26,7 @@ import { pickInt } from "@/server/worker/config";
 import { auditJob } from "@/server/audit-request";
 import { startHeartbeat, currentRssMb, recordJobMetric, resolveJobTableId, writeWorkerLiveness, readWorkerLiveness, clearWorkerLiveness } from "./metrics";
 import { setDuckdbMemoryLimit } from "@/server/worker/runtime-limits";
-import { WorkerState, identityConflict, isPidAlive, listProfileNames, loadProfile, parseProfileArg, type WorkerProfileRow } from "./runtime";
+import { WorkerState, abortAndWait, identityConflict, isPidAlive, waitIdentityFree, listProfileNames, loadProfile, parseProfileArg, type WorkerProfileRow } from "./runtime";
 
 // Camada 1 (auditoria): o processo do worker (tsx src/worker/index.ts) roda fora
 // do ciclo de vida do Next.js — instrumentation.ts (que inicializa o Sentry pro
@@ -37,18 +43,29 @@ process.on("unhandledRejection", (e) => { Sentry.captureException(e); console.er
 
 type Claimed = { id: string; type: string; upload_id: string | null; payload_json: string | null; attempts: number; max_attempts: number; weight: number };
 
+// Fuso do processo em UTC antes de qualquer leitura/gravação de data (FON-03): o driver e o Date do JS interpretam timestamp sem fuso no fuso local.
+ensureUtcTimezone();
+
 // Identidade e config deste processo: o perfil (banco), escolhido por `--profile <nome>` — sem variável de ambiente.
 let profile: WorkerProfileRow;
 const state = new WorkerState();
 // SIGTERM/SIGINT ("reiniciar agora", ou prazo do reinicio seguro estourado): para de pegar job e devolve ja os jobs em
 // andamento para a fila (releaseSelf); o processo sai em seguida, sem esperar o job (worker-architecture.md).
 let terminating = false;
+const activeCancelTokens = new Set<{ cancelled: boolean }>();
+const ABORT_GRACE_MS = 15_000;
 function onTerminate() {
   state.stopping = true;
   if (terminating) return;
   terminating = true;
-  void releaseSelf()
-    .catch((e) => console.error("[worker] releaseSelf no encerramento falhou: %s", e instanceof Error ? e.message : e))
+  // Encerramento LIMPO (deploy/reinício): devolve o job com a tentativa reembolsada (não foi falha do job) e libera as travas de import
+  // deste processo na hora, para o próximo dono não esperar o lease expirar (docs/estudo-confiabilidade-dados.md, MOT-10).
+  // ORDEM: aborta o import em andamento (token de cancelamento) e espera ele parar ANTES de devolver o job/travas; senao outro worker
+  // assume o job enquanto este ainda escreve.
+  void abortAndWait(activeCancelTokens, state, ABORT_GRACE_MS)
+    .then((stopped) => { if (!stopped) console.warn("[worker] import não parou em %dms após o aborto; liberando mesmo assim (o processo sai em seguida)", ABORT_GRACE_MS); })
+    .then(() => Promise.allSettled([releaseSelf(true), releaseAllImportLocks()]))
+    .then((rs) => { for (const x of rs) if (x.status === "rejected") console.error("[worker] liberação no encerramento falhou: %s", x.reason instanceof Error ? x.reason.message : x.reason); })
     .finally(() => process.exit(0));
 }
 process.on("SIGTERM", onTerminate);
@@ -125,15 +142,10 @@ async function runMetadataCleanup() {
     const uploadsDays  = pickInt(cfg["retention.uploads_days"], 30, 1, 3650);
     const versionsKeep = pickInt(cfg["retention.dataset_versions_keep"], 10, 1, 1000);
 
-    const deletedJobs = await prisma.$executeRawUnsafe(
-      `DELETE FROM cw_jobs WHERE status IN ('COMPLETED','FAILED') AND created_at < NOW() - ($1 || ' days')::INTERVAL`,
-      String(jobsDays),
-    );
-
-    const deletedAudit = await prisma.$executeRawUnsafe(
-      `DELETE FROM cw_audit_events WHERE created_at < NOW() - ($1 || ' days')::INTERVAL`,
-      String(auditDays),
-    );
+    // Em lotes (um DELETE único de 1,5M linhas levava ~29 s de uma vez: locks, pico de WAL e risco de statement_timeout).
+    const deletedJobs = await deleteInBatches("cw_jobs", `status IN ('COMPLETED','FAILED') AND created_at < NOW() - ($1 || ' days')::INTERVAL`, [String(jobsDays)]);
+    const deletedAudit = await deleteInBatches("cw_audit_events", `created_at < NOW() - ($1 || ' days')::INTERVAL`, [String(auditDays)]);
+    await purgeLedger().catch((e) => console.error("[cleanup] purgeLedger falhou:", e instanceof Error ? e.message : e)); // livro de cargas: 90 dias
 
     // Fetch blobNames before deleting so we can clean up the files on disk.
     const expiredUploads = await prisma.$queryRawUnsafe<{ blob_name: string }[]>(
@@ -287,20 +299,20 @@ async function work(job: Claimed) {
     } finally {
       clearInterval(hb);
     }
-    await prisma.job.update({ where: { id: job.id }, data: { status: "COMPLETED", lockedAt: null, lockedBy: null, heartbeatAt: null, lastError: null } });
+    await completeJob(job.id);
     return;
   }
 
   if (job.type === "SOURCE_REFRESH") {
-    const payload = JSON.parse(job.payload_json ?? "{}") as { datasetSourceId?: string; reconciliation?: boolean };
+    const payload = JSON.parse(job.payload_json ?? "{}") as { datasetSourceId?: string; reconciliation?: boolean; manual?: boolean; acceptDrop?: boolean };
     if (!payload.datasetSourceId) throw new Error("SOURCE_REFRESH sem datasetSourceId");
     const hb = startHeartbeat(job.id);
     try {
-      await refreshDatasetSource(payload.datasetSourceId, { reconciliation: !!payload.reconciliation });
+      await refreshDatasetSource(payload.datasetSourceId, { reconciliation: !!payload.reconciliation, manual: !!payload.manual, acceptDrop: !!payload.acceptDrop });
     } finally {
       clearInterval(hb);
     }
-    await prisma.job.update({ where: { id: job.id }, data: { status: "COMPLETED", lockedAt: null, lockedBy: null, heartbeatAt: null, lastError: null } });
+    await completeJob(job.id);
     return;
   }
 
@@ -313,7 +325,7 @@ async function work(job: Claimed) {
     } finally {
       clearInterval(hb);
     }
-    await prisma.job.update({ where: { id: job.id }, data: { status: "COMPLETED", lockedAt: null, lockedBy: null, heartbeatAt: null, lastError: null } });
+    await completeJob(job.id);
     return;
   }
 
@@ -324,7 +336,7 @@ async function work(job: Claimed) {
   // Guard: skip if already COMPLETED or FAILED (cancelled/re-queued after success)
   if (upload.status === "COMPLETED" || upload.status === "FAILED") {
     console.log(`[worker] upload ${upload.id} já está ${upload.status}, pulando job`);
-    await prisma.job.update({ where: { id: job.id }, data: { status: "COMPLETED", lockedAt: null, lockedBy: null, heartbeatAt: null, lastError: null } });
+    await completeJob(job.id);
     return;
   }
 
@@ -337,12 +349,16 @@ async function work(job: Claimed) {
     });
     if (otherRunning) {
       console.warn(`[worker] upload ${upload.id} já está sendo processado por outro job ${otherRunning.id}, pulando`);
-      await prisma.job.update({ where: { id: job.id }, data: { status: "COMPLETED", lockedAt: null, lockedBy: null, heartbeatAt: null, lastError: null } });
+      await completeJob(job.id);
       return;
     }
   }
 
   const heartbeat = startHeartbeat(job.id);
+  // Cancelamento cooperativo: se o job deixar de estar RUNNING (cancelado) durante o import, o importer aborta antes de publicar.
+  const cancelToken = { cancelled: terminating };
+  activeCancelTokens.add(cancelToken);
+  const stopWatching = watchJobStatus(cancelToken, async () => (await prisma.job.findUnique({ where: { id: job.id }, select: { status: true } }))?.status ?? null);
 
   try {
     if (job.type === "PREVIEW_UPLOAD") {
@@ -356,7 +372,7 @@ async function work(job: Claimed) {
         if (ignored.length) console.warn("[worker] type overrides ignorados (coluna ou tipo inválido) upload=%s: %s", upload.id, ignored.join(", "));
         await prisma.upload.update({
           where: { id: upload.id },
-          data: { previewJson: JSON.stringify(preview), rowCount: BigInt(preview.rowCount) },
+          data: { previewJson: JSON.stringify({ ...preview, source: "server" }), rowCount: BigInt(preview.rowCount) },
         });
         // O upload esta em PREVIEWING aqui: o estado de origem padrao (PENDING_UPLOAD/FAILED) rejeitava com 409.
         await queueImportUploadAuto(upload.id, preview.columns, FROM_PREVIEW);
@@ -369,7 +385,7 @@ async function work(job: Claimed) {
       // This prevents csv-parse quote-handling discrepancies from dropping rows at end of file.
       const file = await localOriginals(upload);
       try {
-        await importUpload(upload.id, file.path);
+        await runWithCancelToken(cancelToken, () => importUpload(upload.id, file.path));
       } finally {
         await rm(file.dir, { recursive: true, force: true });
       }
@@ -377,7 +393,7 @@ async function work(job: Claimed) {
       throw new Error(`Tipo de job desconhecido: ${job.type}`);
     }
 
-    await prisma.job.update({ where: { id: job.id }, data: { status: "COMPLETED", lockedAt: null, lockedBy: null, heartbeatAt: null, lastError: null } });
+    await completeJob(job.id);
     // Only delete the upload file after the import is fully done — not after preview
     // (com retenção de arquivos ligada — padrão — ele fica para o histórico de versões e o METADATA_CLEANUP o apaga depois)
     if (job.type === "IMPORT_UPLOAD" && (await getUploadFilesDays().catch(() => 0)) === 0) {
@@ -385,12 +401,24 @@ async function work(job: Claimed) {
     }
   } finally {
     clearInterval(heartbeat);
+    stopWatching();
+    activeCancelTokens.delete(cancelToken);
   }
+}
+
+/** Conclui o job só se ele ainda é deste executor (RUNNING): cancelamento/recuperação concorrente não é sobrescrito. */
+async function completeJob(jobId: string) {
+  const r = await prisma.job.updateMany({
+    where: { id: jobId, status: "RUNNING" },
+    data: { status: "COMPLETED", lockedAt: null, lockedBy: null, heartbeatAt: null, lastError: null },
+  });
+  if (r.count === 0) console.warn("[worker] job %s já não estava RUNNING ao concluir (cancelado ou recolocado na fila): estado do job preservado", jobId);
 }
 
 async function fail(job: Claimed, error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
-  const retry = job.attempts < job.max_attempts;
+  // Erro deterministico (integridade, conversao de valor, tipo incompativel): repetir nao muda nada; falha ja, sem gastar tentativas.
+  const retry = job.attempts < job.max_attempts && !isNonRetryable(error);
 
   // Try to restore rowCount from previewJson when it was zeroed by a failed import
   let restoreRowCount: bigint | undefined;
@@ -409,9 +437,12 @@ async function fail(job: Claimed, error: unknown) {
   const sourceFailureUpdate = isSourceBusyError(error) ? null : sourceRefreshFailureUpdate(job, message, retry, nextRefreshAt);
   const derivedFailureUpdate = derivedRefreshFailureUpdate(job, message, retry, nextRefreshAt);
 
+  // Estado guardado (docs/estudo-confiabilidade-dados.md, MOT-08): só mexe no job se ele AINDA está RUNNING (um job cancelado, recolocado
+  // na fila por outro executor ou concluído não pode ser ressuscitado/sobrescrito por esta falha) e nunca rebaixa um upload já
+  // COMPLETED ou cancelado (FAILED) para RETRYING.
   await prisma.$transaction([
-    prisma.job.update({
-      where: { id: job.id },
+    prisma.job.updateMany({
+      where: { id: job.id, status: "RUNNING" },
       data: {
         status: retry ? "QUEUED" : "FAILED",
         lastError: message,
@@ -422,8 +453,8 @@ async function fail(job: Claimed, error: unknown) {
       },
     }),
     ...(job.upload_id ? [
-      prisma.upload.update({
-        where: { id: job.upload_id },
+      prisma.upload.updateMany({
+        where: { id: job.upload_id, status: { in: ["PENDING_UPLOAD", "QUEUED_PREVIEW", "PREVIEWING", "AWAITING_CONFIRMATION", "QUEUED_IMPORT", "IMPORTING", "RETRYING"] } },
         data: {
           status: retry ? "RETRYING" : "FAILED",
           errorMessage: message,
@@ -629,10 +660,11 @@ async function loop(concurrencyId: number) {
       });
       await auditJob({
         jobId: job.id, jobType: job.type, success: false, workerLabel, durationMs: Date.now() - t0, attempts: job.attempts,
-        willRetry: job.attempts < job.max_attempts, error: e instanceof Error ? e.message : String(e), ...jobResource(job),
+        willRetry: job.attempts < job.max_attempts && !isNonRetryable(e), error: e instanceof Error ? e.message : String(e), ...jobResource(job),
       });
       try {
-        await fail(job, e);
+        // Abortado pelo proprio encerramento: o job segue RUNNING para o releaseSelf devolve-lo com a tentativa reembolsada.
+        if (!(terminating && e instanceof JobCancelledError)) await fail(job, e);
       } catch (fe) {
         // fail() pode lançar se o DB estiver fora. Loga mas não deixa o loop morrer.
         console.error("[worker] fail() lançou (DB indisponível?): %s", fe instanceof Error ? fe.message : fe);
@@ -644,7 +676,8 @@ async function loop(concurrencyId: number) {
   }
 }
 
-async function releaseSelf() {
+/** `refund`: encerramento limpo devolve a tentativa (não é falha do job); após uma queda (startup) NÃO devolve, para um job que derruba o worker não rodar para sempre. */
+async function releaseSelf(refund = false) {
   const workerId = profile.name;
   const concurrency = profile.concurrency;
   // Match worker-N-1@hostname, worker-N-2@hostname, etc. Parametrizado; '_' e '%' do id nao viram curinga do LIKE.
@@ -653,10 +686,12 @@ async function releaseSelf() {
   const likes = labels.map((_, i) => `${escaped}-${i + 1}@%`);
   const released = await prisma.$executeRawUnsafe(
     `UPDATE cw_jobs
-     SET status='QUEUED', locked_at=NULL, locked_by=NULL, heartbeat_at=NULL, available_at=NOW()
+     SET status='QUEUED', locked_at=NULL, locked_by=NULL, heartbeat_at=NULL, available_at=NOW(),
+         attempts = CASE WHEN $3::boolean THEN GREATEST(attempts - 1, 0) ELSE attempts END
      WHERE status='RUNNING' AND (locked_by LIKE ANY($1::text[]) OR locked_by = ANY($2::text[]))`,
     likes,
     labels,
+    refund,
   );
   if (released > 0) console.log(`[worker] startup: ${released} job(s) do worker anterior liberados`);
 }
@@ -681,9 +716,15 @@ async function bootstrapProfile(): Promise<WorkerProfileRow> {
     process.exit(4);
   }
   const live = await readWorkerLiveness(p.name).catch(() => undefined);
+  const conflict = async () => identityConflict(await readWorkerLiveness(p.name).catch(() => undefined), { host: hostname(), pid: process.pid }, Date.now(), isPidAlive);
   if (identityConflict(live, { host: hostname(), pid: process.pid }, Date.now(), isPidAlive)) {
-    console.error(`[worker] já existe outro processo ativo com o perfil "${p.name}" (pulsação recente). Pare o serviço antigo antes de subir este.`);
-    process.exit(3);
+    // Sob o supervisor a pulsação fresca costuma ser do processo do contêiner anterior: espera envelhecer em vez de crashar.
+    const freed = process.env.CW_SUPERVISED === "1"
+      && await waitIdentityFree({ check: conflict, sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: Date.now });
+    if (!freed) {
+      console.error(`[worker] já existe outro processo ativo com o perfil "${p.name}" (pulsação recente). Pare o serviço antigo antes de subir este.`);
+      process.exit(3);
+    }
   }
   return p;
 }

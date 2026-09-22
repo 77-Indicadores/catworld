@@ -4,6 +4,7 @@ import { resolveActor } from "@/server/auth/actor";
 import { canAccess } from "@/server/auth/permissions";
 import { ApiError, handleApiError, ok } from "@/server/http";
 import { queueSourceRefresh } from "@/server/connections/sources";
+import { audit } from "@/server/audit";
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -24,7 +25,11 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     if (source.mode !== "extract") throw new ApiError(400, "INVALID_SOURCE_MODE", "Apenas fontes extract podem ser atualizadas");
     const body = await request.json().catch(() => ({}));
     const reconciliation = body?.reconciliation === true;
-    return ok(await queueSourceRefresh(source.id, { reconciliation }), undefined, 202);
+    // Atualizacao pedida por uma pessoa: nao e "agendada" (queda grande so marca a tabela como possivelmente incompleta em vez de
+    // barrar). `acceptDrop: true` confirma que o usuario sabe que a origem encolheu/esvaziou e aceita substituir a tabela (auditado).
+    const acceptDrop = body?.acceptDrop === true;
+    if (acceptDrop) await audit(actor, "SOURCE_REFRESH_ACCEPT_DROP", "dataset_source", source.id, { fields: ["acceptDrop"], reconciliation });
+    return ok(await queueSourceRefresh(source.id, { reconciliation, manual: true, acceptDrop }), undefined, 202);
   } catch (e) {
     return handleApiError(e);
   }

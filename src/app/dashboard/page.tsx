@@ -6,10 +6,11 @@ import { presentLongDate, presentTableFreshness, type RefreshInput } from "@/lib
 import { summarizeFreshness, type FreshnessItem } from "@/lib/workspace/summary";
 import { resolveActor } from "@/server/auth/actor";
 import { visibleProjectIds } from "@/server/auth/permissions";
+import { summarizeIntegrity } from "@/server/integrity/ledger";
 
 /** Campos de frescor de uma fonte/derivada (Prisma) no formato do apresentador. */
-function toRefreshInput(x: { mode?: string | null; active?: boolean | null; lastStatus: string | null; lastError: string | null; refreshCron: string | null; nextRefreshAt: Date | null; lastRefreshedAt: Date | null }): RefreshInput {
-  return { mode: x.mode ?? "extract", active: x.active ?? true, lastStatus: x.lastStatus, lastError: x.lastError, refreshCron: x.refreshCron, nextRefreshAt: x.nextRefreshAt?.toISOString() ?? null, lastRefreshedAt: x.lastRefreshedAt?.toISOString() ?? null };
+function toRefreshInput(x: { mode?: string | null; active?: boolean | null; lastStatus: string | null; lastError: string | null; refreshCron: string | null; nextRefreshAt: Date | null; lastRefreshedAt: Date | null; updatedAt?: Date | null }): RefreshInput {
+  return { mode: x.mode ?? "extract", active: x.active ?? true, lastStatus: x.lastStatus, lastError: x.lastError, refreshCron: x.refreshCron, nextRefreshAt: x.nextRefreshAt?.toISOString() ?? null, lastRefreshedAt: x.lastRefreshedAt?.toISOString() ?? null, updatedAt: x.updatedAt?.toISOString() ?? null };
 }
 export const dynamic = "force-dynamic";
 
@@ -28,12 +29,17 @@ export default async function DashboardPage() {
       datasets: {
         where: { active: true },
         include: {
-          tables: { select: { id: true, name: true, lastDataAt: true, source: { select: { mode: true, active: true, lastStatus: true, lastError: true, refreshCron: true, nextRefreshAt: true, lastRefreshedAt: true } } } },
-          derivedTables: { where: { active: true }, select: { targetTableId: true, active: true, lastStatus: true, lastError: true, refreshCron: true, nextRefreshAt: true, lastRefreshedAt: true } },
+          tables: { select: { id: true, name: true, lastDataAt: true, source: { select: { mode: true, active: true, lastStatus: true, lastError: true, refreshCron: true, nextRefreshAt: true, lastRefreshedAt: true, updatedAt: true } } } },
+          derivedTables: { where: { active: true }, select: { targetTableId: true, active: true, lastStatus: true, lastError: true, refreshCron: true, nextRefreshAt: true, lastRefreshedAt: true, updatedAt: true } },
         },
       },
     },
   });
+
+  // Veredito da última carga de cada tabela (livro de integridade): "possivelmente incompleta" vence qualquer "Em dia".
+  // Se o livro estiver indisponível o dashboard segue sem esse selo (nunca some por causa dele).
+  const integrity = await summarizeIntegrity(24).catch(() => null);
+  const suspectByTable = new Map((integrity?.tablesNeedingAttention ?? []).filter((t) => t.tableId).map((t) => [t.tableId!, { verdict: t.verdict, reason: t.reason }]));
 
   // Frescor de verdade (cron, estado da fonte e da derivada), não "24 h sem dado": tabela só de upload não tem agenda.
   const now = new Date();
@@ -45,6 +51,7 @@ export default async function DashboardPage() {
         const dt = derivedByTarget.get(t.id);
         const freshness = presentTableFreshness({
           lastDataAt: t.lastDataAt?.toISOString() ?? null,
+          integrity: suspectByTable.get(t.id) ?? null,
           sources: t.source ? [toRefreshInput(t.source)] : [],
           derived: dt ? toRefreshInput({ ...dt, mode: "extract" }) : null,
         }, now);
@@ -52,7 +59,8 @@ export default async function DashboardPage() {
       }
     }
   }
-  const attention = [...summarizeFreshness(allItems).failing, ...summarizeFreshness(allItems).stale];
+  const summary = summarizeFreshness(allItems);
+  const attention = [...summary.suspect, ...summary.failing, ...summary.stale];
 
   return (
     <div className="space-y-6">

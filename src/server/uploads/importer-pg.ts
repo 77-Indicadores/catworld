@@ -15,13 +15,19 @@ import { extname } from "node:path";
 import { createHash } from "node:crypto";
 import { prisma } from "@/server/db";
 import { withAdvisoryLock } from "@/server/db/advisory-lock";
-import { withImportLock } from "@/server/db/import-lock";
-import { sqlIdentifier } from "@/server/security/naming";
+import { withImportLock, type Lease } from "@/server/db/import-lock";
+import { sqlIdentifier, fitIdentifiers } from "@/server/security/naming";
 import { previewFile, rowsFromFile, type FilePreview, type ParsedColumn, type RowsFromFileOpts } from "./parser";
-import { normalizeDateLike } from "./date-normalize";
+import { convertForPg } from "./convert-values";
 import type { PgStorageConnection } from "@/server/storage/pg-storage";
 import { pgQuote, canonicalToPg } from "@/server/storage/pg-storage";
 import { userColumnNames } from "@/server/storage/connection";
+import { IntegrityError, evaluateLoad, getIntegritySettings, type Evaluation } from "@/server/integrity/policy";
+import { auditIntegrity, evaluationDetail, recordLedger } from "@/server/integrity/ledger";
+import { PG_MARKER_INSERT, PG_MARKER_SELECT, ensurePgMarker } from "./applied-marker";
+import { incompatibleColumns, incompatibleError } from "./type-compat";
+import { loadPrevMapping, resolveAgainstExisting } from "./existing-types";
+import { resolveExpectedRows, type ExpectedRows } from "./expected-rows";
 
 // ─── Type conversion ──────────────────────────────────────────────────────────
 
@@ -30,35 +36,6 @@ const PG_BIGINT_MIN = -9223372036854775808n, PG_BIGINT_MAX = 9223372036854775807
 function bigIntOverflows(s: string): boolean {
   if (!s || !/^-?\d+$/.test(s)) return false;
   try { const b = BigInt(s); return b < PG_BIGINT_MIN || b > PG_BIGINT_MAX; } catch { return false; }
-}
-
-/** Converte valor raw para string que o Postgres aceita via unnest cast */
-function convertForPg(v: unknown, sqlType: string): string | null {
-  const s = v == null ? "" : String(v).trim();
-  if (!s) return null;
-
-  if (sqlType === "BIGINT") {
-    if (!/^-?\d+$/.test(s)) return null;
-    return s; // range já verificado antes do INSERT via reclassifyOverflowCols
-  }
-  if (sqlType.startsWith("DECIMAL")) {
-    const lastDot = s.lastIndexOf(".");
-    const lastComma = s.lastIndexOf(",");
-    const cleaned = lastComma > lastDot
-      ? s.replaceAll(".", "").replace(",", ".")   // BR: "1.234,56"
-      : s.replaceAll(",", "");                    // US: "1,234.56"
-    const n = Number.parseFloat(cleaned);
-    if (!Number.isFinite(n) || Math.abs(n) >= 1e14) return null;
-    return String(n);
-  }
-  if (sqlType === "DATE" || sqlType === "DATETIME2") {
-    const d = normalizeDateLike(s);
-    if (!d) return null;
-    return d;
-  }
-  if (sqlType === "TIME") return s;
-  // TEXT
-  return s.replace(/\x00/g, "") || null;
 }
 
 // ─── Batch flush ─────────────────────────────────────────────────────────────
@@ -115,7 +92,7 @@ async function flushBatch(
   for (const row of batch) {
     for (let j = 0; j < mapping.length; j++) {
       const c = mapping[j]!;
-      params[j]!.push(convertForPg(row[c.sqlName], c.sqlType));
+      params[j]!.push(convertForPg(row[c.sqlName], c));
     }
     if (withRh) {
       const rh = createHash("md5")
@@ -146,6 +123,8 @@ function colDefs(mapping: ParsedColumn[], withRh: boolean): string {
 
 // ─── Main entry point ─────────────────────────────────────────────────────────
 
+async function* emptyRows(): AsyncGenerator<Record<string, unknown>> { /* nada: o append já foi aplicado */ }
+
 export async function importUploadPg(
   uploadId: string,
   source: string | NodeJS.ReadableStream,
@@ -158,13 +137,34 @@ export async function importUploadPg(
   });
   if (!pre.dataset) throw new Error("Dataset não definido");
   const lockTable = pre.table?.sqlName ?? sqlIdentifier(pre.originalFilename.replace(/.[^.]+$/, ""));
-  return withImportLock(`${pre.dataset.id}:${pre.dataset.schemaName}.${lockTable}`, () => importUploadPgLocked(uploadId, source, conn));
+  try {
+    return await withImportLock(`${pre.dataset.id}:${pre.dataset.schemaName}.${lockTable}`, (lease) => importUploadPgLocked(uploadId, source, conn, lease));
+  } catch (e) {
+    // Cada tentativa que falha vira uma linha no livro (com o motivo estruturado quando é uma barra de integridade) e, se for a
+    // integridade, um evento de auditoria com success=false — a evidência que antes ficava só em console.
+    const entry = {
+      kind: "upload" as const, outcome: "FAILED" as const, verdict: (e instanceof IntegrityError ? e.evaluation.verdict : "FAILED") as "FAILED" | "SUSPECT" | "OK",
+      datasetId: pre.dataset.id, uploadId, tableName: lockTable,
+      ...(e instanceof IntegrityError ? e.facts : {}),
+      detail: e instanceof IntegrityError ? evaluationDetail(e.evaluation, { storage: "postgres" }) : { error: (e instanceof Error ? e.message : String(e)).slice(0, 500), storage: "postgres" },
+    };
+    await recordLedger(entry);
+    if (e instanceof IntegrityError) await auditIntegrity({ ...entry, resourceId: uploadId });
+    // Limpa as tabelas temporárias DESTE upload (staging e mesclada): uma falha no meio da carga deixava cópias completas do arquivo no banco
+    // até a próxima retentativa (PER/OBS-13). Os nomes são únicos por upload; nunca toca a tabela de destino.
+    const suffix = uploadId.replaceAll("-", "").slice(0, 20);
+    for (const t of [`cw_stage_${suffix}`, `cw_mgd_${suffix}`]) {
+      await conn.execute(`DROP TABLE IF EXISTS ${pgQuote(pre.dataset.schemaName)}.${pgQuote(t)}`).catch(() => undefined);
+    }
+    throw e;
+  }
 }
 
 async function importUploadPgLocked(
   uploadId: string,
   source: string | NodeJS.ReadableStream,
   conn: PgStorageConnection,
+  lease: Lease,
 ) {
   const importStarted = Date.now();
 
@@ -185,15 +185,22 @@ async function importUploadPgLocked(
     mapping = (await previewFile(source as string)).columns;
   }
   if (!mapping.length) {
+    // Arquivo sem colunas não carrega nada e não pode contar como concluído (a tabela não foi tocada): FAILED, com motivo.
     await prisma.upload.update({
       where: { id: upload.id },
-      data: { status: "COMPLETED", progress: 100, rowCount: 0n, insertedCount: 0, updatedCount: 0, errorMessage: null },
+      data: { status: "FAILED", progress: 100, insertedCount: 0, updatedCount: 0, errorMessage: "Arquivo sem colunas: nada foi importado e a tabela não foi alterada." },
     });
     return { tableId: upload.tableId ?? null, inserted: 0, updated: 0, rowCount: 0n };
   }
 
+  // Postgres corta identificador em 63 bytes em silêncio (duas colunas longas viram a mesma): encurta de forma determinística e única.
+  {
+    const fitted = fitIdentifiers(mapping.map(c => c.sqlName));
+    mapping = mapping.map((c, i) => (fitted[i] === c.sqlName ? c : { ...c, sqlName: fitted[i]! }));
+  }
+
   const ext = extname(upload.originalFilename).toLowerCase();
-  const tableName = upload.table?.sqlName ?? sqlIdentifier(upload.originalFilename.replace(/\.[^.]+$/, ""));
+  const tableName = fitIdentifiers([upload.table?.sqlName ?? sqlIdentifier(upload.originalFilename.replace(/\.[^.]+$/, ""))])[0]!;
   const schema = upload.dataset.schemaName;
   const stage = `cw_stage_${upload.id.replaceAll("-", "").slice(0, 20)}`;
 
@@ -213,6 +220,12 @@ async function importUploadPgLocked(
 
   // Valida compatibilidade antes de criar staging (append/upsert em target existente)
   const targetExists = await conn.tableExists(schema, tableName);
+  // Tabela existente e tipada: a coluna fisica manda (data/decimal ambiguo herda o tipo e a convencao da carga anterior; sem convencao, falha alto).
+  if (targetExists && (upload.mode === "append" || upload.mode === "upsert" || (upload.mode === "replace" && upload.deltaJson != null))) {
+    const tblId = upload.table?.id ?? (await prisma.datasetTable.findUnique({ where: { datasetId_sqlName: { datasetId: upload.dataset.id, sqlName: tableName } }, select: { id: true } }))?.id;
+    const existingCols0 = (await conn.listColumns(schema, tableName)).filter((c) => userColumnNames([c]).length > 0);
+    mapping = resolveAgainstExisting(mapping, existingCols0, await loadPrevMapping(prisma, tblId));
+  }
   if ((upload.mode === "append" || upload.mode === "upsert") && targetExists) {
     const existingCols = await conn.listColumns(schema, tableName);
     // colunas internas (_cw_rh, cw_synced_at, cw_deleted_at) não fazem parte do schema do usuário — ver CW_SYNCED_AT em storage/connection.ts.
@@ -222,7 +235,21 @@ async function importUploadPgLocked(
     if (JSON.stringify(existingNames) !== JSON.stringify(incomingNames)) {
       throw new Error(`Schema incompatível. Esperado: ${incomingNames.join(", ")}; atual: ${existingNames.join(", ")}`);
     }
+    // Só é aceito ALARGAR o tipo: estreitar (DECIMAL em BIGINT, DATETIME em DATE) arredondava/truncava as linhas existentes em silêncio.
+    // (arquivo só com cabeçalho não tem valores para estreitar nada: os tipos inferidos dele não valem)
+    const narrowing = preview && preview.rowCount === 0 ? [] : incompatibleColumns(existingCols.filter((c) => userColumnNames([c]).length > 0), mapping);
+    if (narrowing.length) throw incompatibleError(narrowing);
   }
+
+  // Marca exactly-once: se um append deste upload já foi confirmado (queda entre o COMMIT e os metadados), não recarrega nem
+  // acrescenta de novo — só reconcilia os metadados. Vive no destino, fora dos datasets.
+  // (so o append usa o registro; criar o schema/tabela para todo modo corria em paralelo e falhava — PG 23505)
+  if (upload.mode === "append") await ensurePgMarker(conn);
+  const marker = upload.mode === "append"
+    ? (await conn.queryParams<{ rows: string }>(PG_MARKER_SELECT, [upload.id]))[0]
+    : undefined;
+  // Marca sem a tabela (foi apagada depois): nao ha o que reconciliar; recarrega em vez de "concluir" com tabela vazia.
+  const alreadyApplied = marker !== undefined && targetExists;
 
   // Drop staging anterior (retry idempotente)
   await conn.execute(`DROP TABLE IF EXISTS ${qStaging}`);
@@ -233,24 +260,83 @@ async function importUploadPgLocked(
   let batch: Record<string, unknown>[] = [];
   const reclassifiedCols: string[] = [];
 
-  for await (const row of rowsFromFile(source, mapping, opts)) {
-    batch.push(row);
-    if (batch.length >= BATCH_SIZE) {
-      await flushBatch(conn, schema, stage, mapping, batch, true, reclassifiedCols);
-      total += batch.length;
-      batch = [];
-      const now = Date.now();
-      if (now - lastProgressMs > 10_000) {
-        void prisma.upload.update({
-          where: { id: upload.id },
-          data: { progress: Math.min(75, 35 + Math.floor(total / Math.max(knownRowCount, 1) * 40)) },
-        });
-        lastProgressMs = now;
+  // Pipeline com sobreposição (PER-02): enquanto o lote N é inserido no banco, o parser já lê o lote N+1. Antes era tudo serial
+  // (parse 22% + conversão 35% + INSERT 34% do tempo). No máximo UM lote em voo: memória limitada e a ordem dos INSERTs preservada.
+  // O erro de um lote em voo é capturado (nunca fica como rejeição não tratada, que derrubaria o worker) e relançado no próximo `drain`.
+  let inflight: Promise<void> | null = null;
+  let flushError: unknown = null;
+  const drain = async () => {
+    const p = inflight;
+    inflight = null;
+    if (p) await p;
+    if (flushError) throw flushError;
+  };
+  try {
+    for await (const row of alreadyApplied ? emptyRows() : rowsFromFile(source, mapping, opts)) {
+      batch.push(row);
+      if (batch.length >= BATCH_SIZE) {
+        const full = batch;
+        batch = [];
+        await drain();
+        inflight = flushBatch(conn, schema, stage, mapping, full, true, reclassifiedCols).catch((e) => { flushError = e; });
+        total += full.length;
+        const now = Date.now();
+        if (now - lastProgressMs > 10_000) {
+          void prisma.upload.update({
+            where: { id: upload.id },
+            data: { progress: Math.min(75, 35 + Math.floor(total / Math.max(knownRowCount, 1) * 40)) },
+          }).catch(() => undefined);
+          lastProgressMs = now;
+        }
       }
     }
+    await drain();
+    await flushBatch(conn, schema, stage, mapping, batch, true, reclassifiedCols);
+    total += batch.length;
+  } catch (e) {
+    await drain().catch(() => undefined); // espera o lote em voo terminar antes de propagar (não deixa INSERT solto no banco)
+    throw e;
   }
-  await flushBatch(conn, schema, stage, mapping, batch, true, reclassifiedCols);
-  total += batch.length;
+  if (alreadyApplied) {
+    console.warn("[importUploadPg] append já aplicado (marca exactly-once) — retentativa só reconcilia metadados upload=%s", uploadId);
+    total = Number(marker!.rows);
+  }
+
+  // ── Integridade ANTES de publicar: carregado x esperado x versão anterior ─────────────────────────────────
+  // (docs/estudo-confiabilidade-dados.md, OBS-01/OBS-05). O esperado vem da contagem do arquivo (preview), independente da carga.
+  // FAILED = não troca nada: a tabela anterior continua no ar, completa.
+  let evaluation: Evaluation = { verdict: "OK", reasons: [] };
+  let prevRowsForLedger = 0;
+  let expected: ExpectedRows | null = null;
+  if (!alreadyApplied) {
+    // Linhas da versão anterior: pelo metadado da tabela DESTINO (o upload novo nem sempre traz `tableId`); sem metadado, conta a tabela física.
+    const meta = upload.table ?? await prisma.datasetTable.findUnique({ where: { datasetId_sqlName: { datasetId: upload.dataset.id, sqlName: tableName } }, select: { rowCount: true } });
+    const prevRows = targetExists ? Number(meta?.rowCount ?? (await conn.countRows(schema, tableName))) : 0;
+    prevRowsForLedger = prevRows;
+    const cfg = await getIntegritySettings();
+    // So a contagem do SERVIDOR e prova (o rowCount/preview do navegador nao calibra o gate).
+    expected = await resolveExpectedRows(upload, source);
+    if (expected.clientDisagrees) console.warn("[importUploadPg:integrity] contagem do cliente (%s) difere da do servidor (%d): vale a do servidor upload=%s", expected.clientRowCount, expected.expected, uploadId);
+    evaluation = evaluateLoad({
+      kind: "upload",
+      fullState: upload.mode === "replace" || !targetExists || (upload.mode === "upsert" && upload.fullSnapshot),
+      expectedRows: expected.expected,
+      expectedUnverified: expected.source === "unavailable",
+      clientCountDisagrees: expected.clientDisagrees,
+      parsedRows: total,
+      stagedRows: total,
+      prevRows: prevRows,
+      scheduled: false,
+    }, cfg);
+    if (evaluation.verdict === "FAILED") {
+      await conn.execute(`DROP TABLE IF EXISTS ${qStaging}`).catch(() => undefined);
+      throw new IntegrityError(evaluation, { expectedRows: expected.expected, parsedRows: total, prevRows });
+    }
+    if (evaluation.verdict === "SUSPECT") console.warn("[importUploadPg:integrity] SUSPECT upload=%s %s", uploadId, JSON.stringify(evaluation.reasons));
+  }
+
+  // Ainda sou o dono do lock? Se o lease se perdeu, outro import pode ter mexido na tabela: abortar ANTES de publicar.
+  lease.assert();
 
   if (reclassifiedCols.length) {
     console.warn("[importUploadPg] colunas reclassificadas BIGINT→NVARCHAR por overflow 64-bit: %s upload=%s",
@@ -274,15 +360,25 @@ async function importUploadPgLocked(
 
   if (upload.mode === "replace" || !targetExists) {
     // fullSwap: staging tem estado completo → DROP target + RENAME staging (AccessExclusiveLock ~ms)
-    // Índice em _cw_rh criado na staging ANTES do swap para evitar AEL durante CREATE INDEX
-    await conn.execute(`CREATE INDEX ON ${qStaging} ("_cw_rh")`);
-    await conn.atomicSwap(schema, stage, tableName, mappingWithRh, { targetExists });
+    // (o índice em _cw_rh já foi criado na staging acima; construí-lo duas vezes custava ~8% do import — PER-01)
+    // Append que CRIA a tabela: a marca exactly-once entra na MESMA transacao da troca (create+insert): sem ela, uma queda entre o swap e os
+    // metadados fazia a retentativa acrescentar o arquivo de novo (50.000 virava 100.000).
+    const markCreate = upload.mode === "append" && !targetExists;
+    await conn.atomicSwap(schema, stage, tableName, mappingWithRh, {
+      targetExists,
+      ...(markCreate ? { inSwapTx: async (client) => { await client.query(PG_MARKER_INSERT, [upload.id, tableName, "append", String(total)]); } } : {}),
+    });
     inserted = total;
 
   } else if (upload.mode === "upsert") {
     if (!upload.keyColumn) throw new Error("Upsert exige coluna-chave");
     const key = pgQuote(upload.keyColumn);
     try {
+      // Chave nula nunca casa com nada (NULL = NULL é falso): cada execução inseria a linha de novo. Recusa antes de mesclar.
+      const nullKeys = await conn.withClient((client) => client.query<{ n: string }>(`SELECT COUNT(*)::text AS n FROM ${qStaging} WHERE ${key} IS NULL`));
+      if (Number(nullKeys.rows[0]?.n ?? 0) > 0) {
+        throw new Error(`Arquivo contém ${nullKeys.rows[0]!.n} linha(s) com chave nula na coluna "${upload.keyColumn}": upsert exige chave preenchida em todas as linhas.`);
+      }
       // Verifica chaves duplicadas no arquivo
       const dupRes = await conn.withClient((client) => client.query<{ k: unknown; n: string }>(
         `SELECT ${key} AS k, COUNT(*) n FROM ${qStaging} GROUP BY ${key} HAVING COUNT(*) > 1 LIMIT 20`,
@@ -310,6 +406,7 @@ async function importUploadPgLocked(
       try {
         if (upload.mode === "append") {
           await client.query(`INSERT INTO ${qTarget} (${colList}) SELECT ${colList} FROM ${qStaging}`);
+          await client.query(PG_MARKER_INSERT, [upload.id, tableName, "append", String(total)]); // mesma transação: exactly-once
           await client.query(`DROP TABLE ${qStaging}`);
           inserted = total;
 
@@ -392,6 +489,13 @@ async function importUploadPgLocked(
       },
     }),
   ]));
+
+  // Livro de integridade FORA da transacao dos metadados: uma falha aqui (recordLedger nunca lanca) nao pode desfazer uma carga ja publicada.
+  await recordLedger({
+    kind: "upload", outcome: "COMPLETED", verdict: evaluation.verdict, datasetId: upload.dataset!.id, tableId: table.id, uploadId: upload.id,
+    tableName, mode: upload.mode, expectedRows: expected?.expected ?? null, parsedRows: total, physicalRows: Number(actual), prevRows: prevRowsForLedger,
+    detail: evaluationDetail(evaluation, { importMethod: alreadyApplied ? "already-applied" : "pg-unnest-batch", storage: "postgres", ...(expected ? { expectedSource: expected.source, clientRowCount: expected.clientRowCount } : {}) }),
+  });
 
   return { tableId: table.id, inserted, updated, rowCount: actual };
 }

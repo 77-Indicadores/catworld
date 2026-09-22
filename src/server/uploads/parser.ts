@@ -4,14 +4,19 @@ import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import type { Stream } from "node:stream";
-import { parse } from "csv-parse";
-import iconv from "iconv-lite";
 import ExcelJS from "exceljs";
-import { sqlIdentifier } from "@/server/security/naming";
-import { hasDateTimePart, isDateLike } from "./date-normalize";
+import { detectFileHints as detectHints, csvRecords, CsvFormatError, strictDecodeStream, normalizeEncoding, type FileHints } from "./csv-detect";
+import { sqlIdentifier, uniqueIdentifier } from "@/server/security/naming";
+import { hasDateTimePart, dateCandidates, isOrderAmbiguous, type DateOrder } from "./date-normalize";
+import { accumulateDecimal, decideDecimal, newDecimalAcc, type DecimalAcc, type DecSep } from "./decimal-format";
+import { formatDecimalType } from "@/lib/decimal-type";
+import { normalizeTypeOverride } from "./type-override";
+import { rowTexts, isBlankRow } from "./xlsx-values";
 
-export type ParsedColumn={originalName:string;sqlName:string;sqlType:string;nullable:boolean};
-export type FilePreview={columns:ParsedColumn[];rows:Record<string,unknown>[];rowCount:number;encoding:string;separator:string|null;sheetNames:string[]};
+/** decimalSep/dateOrder: convenção da COLUNA decidida pelo arquivo inteiro (mapeamentos antigos não têm; ver decimal-format.ts e date-normalize.ts). *Ambiguous: ficou TEXT porque a convenção não pôde ser decidida. */
+export type ParsedColumn={originalName:string;sqlName:string;sqlType:string;nullable:boolean;decimalSep?:DecSep;decimalAmbiguous?:boolean;dateOrder?:DateOrder;dateAmbiguous?:boolean;decimalDigits?:number};
+/** `source:"server"`: o preview foi calculado pelo worker (a contagem vale como esperada no gate de integridade). Ausente = veio do cliente (navegador/SDK): nao e prova. */
+export type FilePreview={columns:ParsedColumn[];rows:Record<string,unknown>[];rowCount:number;encoding:string;separator:string|null;sheetNames:string[];source?:"server"};
 export type RowsFromFileOpts={encoding?:string;separator?:string;ext?:string};
 export type ParseStats={parseMethod?:"duckdb"|"csv-parse"|"xlsx"|"stream";parseMs?:number;fileEncoding?:string;fileSeparator?:string;fallbackReason?:string};
 
@@ -19,28 +24,10 @@ export async function previewFile(path:string):Promise<FilePreview>{
  const ext=extname(path).toLowerCase(); if(ext===".csv")return previewCsv(path); if(ext===".xlsx")return previewXlsx(path); if(ext===".xls")throw new Error("XLS legado deve ser convertido pelo worker antes da leitura"); throw new Error("Formato não suportado. Use CSV, XLSX ou XLS");
 }
 
-// P4: Read first 64 KB once to detect both encoding and separator
-async function detectFileHints(path:string):Promise<{encoding:string;separator:string}>{
- const fd=await import("node:fs/promises");
- const handle=await fd.open(path,"r");
- const buffer=Buffer.alloc(65536);
- const{bytesRead}=await handle.read(buffer,0,buffer.length,0);
- await handle.close();
- const sample=buffer.subarray(0,bytesRead);
-
- let encoding:string;
- if(sample[0]===0xef&&sample[1]===0xbb&&sample[2]===0xbf){encoding="utf8"}
- else{try{new TextDecoder("utf-8",{fatal:true}).decode(sample);encoding="utf8"}catch{encoding="win1252"}}
-
- const text=iconv.decode(sample,encoding);
- const candidates=[";",",","\t"];
- const separator=candidates.map(c=>({c,score:text.split(/\r?\n/).slice(0,10).reduce((n,l)=>n+(l.split(c).length-1),0)})).sort((a,b)=>b.score-a.score)[0].c;
-
- return{encoding,separator};
-}
-
+// Encoding, dialeto e leitura estrita de registros vivem em csv-detect.ts (arquivo inteiro, sem U+FFFD em silêncio, separador sem adivinhar).
+const detectFileHints=detectHints;
 function csvPipeStream(source:NodeJS.ReadableStream,encoding:string,separator:string):AsyncIterable<string[]>{
- return source.pipe(iconv.decodeStream(encoding)).pipe(parse({delimiter:separator,bom:true,relax_column_count:true,relax_quotes:true,skip_empty_lines:true})) as AsyncIterable<string[]>;
+ return csvRecords(source,encoding,separator);
 }
 
 async function previewCsv(path:string){
@@ -56,6 +43,22 @@ async function previewCsv(path:string){
  return{columns,rows:objects,rowCount:count,encoding,separator,sheetNames:[]};
 }
 
+/**
+ * Contagem de linhas de dados do arquivo, independente do import (mesma regra do preview: cabecalho fora, linhas vazias fora), SEM inferir tipos.
+ * E a contagem "esperada" quando o preview nao foi feito pelo servidor (o preview do navegador nao e prova). null = formato sem contagem barata.
+ */
+export async function countDataRows(path:string):Promise<number|null>{
+ const ext=extname(path).toLowerCase();
+ if(ext===".csv"){
+  const{encoding,separator}=await detectFileHints(path);
+  let n=0,first=true;
+  for await(const _ of csvPipeStream(createReadStream(path),encoding,separator)){if(first){first=false;continue}n++}
+  return n;
+ }
+ if(ext===".xlsx")return (await previewXlsx(path)).rowCount;
+ return null;
+}
+
 // P6: ExcelJS.stream.xlsx.WorkbookReader (streaming) foi tentado aqui pra evitar
 // carregar o XLSX inteiro em memoria, mas a lib tem um bug de ordenacao interna
 // (_parseWorksheet acessa this.model.sheets antes de xl/workbook.xml terminar de
@@ -64,16 +67,32 @@ async function previewCsv(path:string){
 // bufferizado (Workbook API) mantido; arquivos grandes devem usar CSV (rota
 // totalmente streamed via DuckDB) — ver o limite de XLSX (padrao do codigo, config-contract.md),
 // validado em app/api/v1/uploads/route.ts.
+/** Linhas NÃO vazias da aba (a 1ª é o cabeçalho). Linha totalmente vazia não é registro (antes virava linha de NULLs). */
+function*xlsxDataRows(sheet:ExcelJS.Worksheet):Generator<string[]>{
+ for(let r=1;r<=sheet.rowCount;r++){const t=rowTexts(sheet.getRow(r));if(!isBlankRow(t))yield t}
+}
+const sheetHasData=(sheet:ExcelJS.Worksheet)=>{for(const _ of xlsxDataRows(sheet))return true;return false};
+/** Só uma aba pode ter dados: importar só a 1ª e ignorar o resto seria perder dados em silêncio (TIP-08). */
+function assertSingleDataSheet(workbook:ExcelJS.Workbook){
+ const withData=workbook.worksheets.filter(sheetHasData);
+ if(withData.length>1||(withData.length===1&&withData[0]!==workbook.worksheets[0])){
+  const count=(s:ExcelJS.Worksheet)=>{let n=0;for(const _ of xlsxDataRows(s))n++;return Math.max(0,n-1)};
+  const list=withData.map(s=>`"${s.name}" (${count(s)} linha(s))`).join(", ");
+  const first=workbook.worksheets[0];
+  throw new Error(`A planilha tem dados em ${withData.length>1?"mais de uma aba":"uma aba que não é a primeira"}: ${list}. O Catworld importa UMA aba por arquivo e recusa em vez de ignorar linhas em silêncio. `+
+   `Como resolver: (1) deixe só a aba desejada com dados${first&&!withData.includes(first)?` e coloque-a como primeira aba (hoje a primeira, "${first.name}", está vazia)`:""}; ou (2) exporte cada aba como um arquivo (CSV) e envie um arquivo por aba.`);
+ }
+}
 async function previewXlsx(path:string){
  const workbook=new ExcelJS.Workbook();await workbook.xlsx.readFile(path);const sheet=workbook.worksheets[0];if(!sheet)throw new Error("Planilha sem abas");
- let headers:string[]=[],stats:ColumnStats[]=[];let sampleRows:string[][]=[];let count=0;
- sheet.eachRow({includeEmpty:true},(row,rowNumber)=>{
-  const values=(Array.isArray(row.values)?row.values.slice(1):[]).map(cellValue);
-  if(rowNumber===1){headers=values;stats=headers.map(newStats);return}
+ assertSingleDataSheet(workbook);
+ let headers:string[]=[],stats:ColumnStats[]=[];let sampleRows:string[][]=[];let count=0;let first=true;
+ for(const values of xlsxDataRows(sheet)){
+  if(first){first=false;headers=values;stats=headers.map(newStats);continue}
   count++;
   if(sampleRows.length<20)sampleRows.push(values);
   headers.forEach((_,i)=>{stats[i]??=newStats();updateStats(stats[i],values[i])});
- });
+ }
  // Filter out empty headers so Object.fromEntries never sees undefined keys
  const validIndices=headers.map((h,i)=>h&&h.trim()?i:-1).filter(i=>i>=0);
  headers=validIndices.map(i=>headers[i]);
@@ -83,7 +102,6 @@ async function previewXlsx(path:string){
  return{columns,rows:objects,rowCount:count,encoding:"xlsx",separator:null,sheetNames:workbook.worksheets.map(s=>s.name)};
 }
 
-const cellValue=(value:ExcelJS.CellValue)=>value==null?"":value instanceof Date?value.toISOString():typeof value==="object"?String((value as {text?:string;result?:unknown}).text??(value as {result?:unknown}).result??""):String(value);
 function excelSerialToIso(raw:string,type:string){
  const n=Number(raw);
  if(!Number.isFinite(n)||n<=0||n>100000)return raw;
@@ -96,12 +114,13 @@ function normalizeCellForColumn(value:string,column:ParsedColumn){
  if((column.sqlType==="DATE"||column.sqlType==="DATETIME2")&&/^\d+(\.\d+)?$/.test(value.trim()))return excelSerialToIso(value.trim(),column.sqlType);
  return value;
 }
-type ColumnStats={maxLen:number;hasNull:boolean;allInt:boolean;allDecimal:boolean;allDateLike:boolean;hasTimePart:boolean;allTime:boolean;sampleCount:number;looksIdentifier:boolean};
-function newStats():ColumnStats{return{maxLen:0,hasNull:false,allInt:true,allDecimal:true,allDateLike:true,hasTimePart:false,allTime:true,sampleCount:0,looksIdentifier:false}}
+type ColumnStats={maxLen:number;hasNull:boolean;allInt:boolean;dec:DecimalAcc;okDmy:boolean;okMdy:boolean;dateAmbiguous:boolean;hasTimePart:boolean;allTime:boolean;sampleCount:number;looksIdentifier:boolean};
+function newStats():ColumnStats{return{maxLen:0,hasNull:false,allInt:true,dec:newDecimalAcc(),okDmy:true,okMdy:true,dateAmbiguous:false,hasTimePart:false,allTime:true,sampleCount:0,looksIdentifier:false}}
 const RE_INT=/^-?\d+$/;
-const RE_INT_LEADING_ZERO=/^0\d+/;
-const RE_DECIMAL=/^-?\d{1,3}(?:[.,]\d{3})*[,]\d+$|^-?\d+[.,]\d+$/;
-const RE_TIME=/^\d{1,2}:\d{2}(:\d{2})?$/;
+// zero à esquerda, com ou sem sinal (-007 é código, não o número -7)
+const RE_INT_LEADING_ZERO=/^-?0\d+/;
+// hora com faixa: 25:00, 12:60 e 12:00:61 NÃO são TIME (TIP-15)
+const RE_TIME=/^([01]?\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/;
 const BIGINT_MIN=-9223372036854775808n,BIGINT_MAX=9223372036854775807n;
 function isInt(t:string){
   if(!RE_INT.test(t)||RE_INT_LEADING_ZERO.test(t))return false;
@@ -114,11 +133,13 @@ function updateStats(s:ColumnStats,raw:unknown){
   if(v.length>s.maxLen)s.maxLen=v.length;
   if(RE_INT.test(trimmed)&&RE_INT_LEADING_ZERO.test(trimmed))s.looksIdentifier=true;
   if(s.allInt&&!isInt(trimmed))s.allInt=false;
-  // inteiros são decimais válidos — só invalida se não for nem decimal nem inteiro
-  if(s.allDecimal&&!RE_DECIMAL.test(trimmed)&&!isInt(trimmed))s.allDecimal=false;
-  const dateLike=isDateLike(trimmed),dateTime=hasDateTimePart(trimmed);
-  if(s.allDateLike&&!dateLike)s.allDateLike=false;
-  if(dateTime)s.hasTimePart=true;
+  // decimal: a convenção (ponto/vírgula) é decidida pela coluna inteira em columnsFromStats (decimal-format.ts)
+  accumulateDecimal(s.dec,trimmed);
+  const dc=dateCandidates(trimmed);
+  if(dc.dmy===null)s.okDmy=false;
+  if(dc.mdy===null)s.okMdy=false;
+  if(isOrderAmbiguous(dc))s.dateAmbiguous=true;
+  if(hasDateTimePart(trimmed))s.hasTimePart=true;
   if(s.allTime&&!RE_TIME.test(trimmed))s.allTime=false;
 }
 function textSqlType(){
@@ -127,19 +148,39 @@ function textSqlType(){
 // P5: All columns are always nullable — BULK INSERT treats empty CSV fields as NULL.
 //     Even columns that appear NOT NULL in sample rows can have empty/invalid values later in the file.
 function headerLooksIdentifier(header:string){return /(^|[_\s-])(cpf|cnpj|cep|telefone|phone|celular|whats|codigo|cod|sku|id|documento|doc)([_\s-]|$)/i.test(header)}
-function columnsFromStats(headers:string[],stats:ColumnStats[]):ParsedColumn[]{const used=new Map<string,number>();return headers.map((header,index)=>{let name=sqlIdentifier(header||`col_${index+1}`);const n=(used.get(name)??0)+1;used.set(name,n);if(n>1)name=`${name}_${n}`;const s=stats[index]??newStats();const forceText=s.looksIdentifier||headerLooksIdentifier(header);const sqlType=s.sampleCount===0?"NVARCHAR(MAX)":forceText?textSqlType():s.allInt?"BIGINT":s.allDecimal?"DECIMAL(18,4)":s.allDateLike&&s.hasTimePart?"DATETIME2":s.allDateLike?"DATE":s.allTime?"TIME":textSqlType();return{originalName:header,sqlName:name,sqlType,nullable:true}})}
-
-// Tipos canônicos aceitos como override — os mesmos que columnsFromStats pode produzir.
-// DECIMAL aceita qualquer precisão/escala (ex: "DECIMAL(10,2)"), o resto é exato.
-const OVERRIDABLE_TYPES = new Set(["BIGINT", "DATE", "DATETIME2", "TIME", "NVARCHAR(MAX)"]);
-function isValidTypeOverride(type: string): boolean {
-  return OVERRIDABLE_TYPES.has(type) || /^DECIMAL\(\d{1,2},\d{1,2}\)$/.test(type);
+function columnsFromStats(headers:string[],stats:ColumnStats[]):ParsedColumn[]{const taken=new Set<string>();return headers.map((header,index)=>{const name=uniqueIdentifier(sqlIdentifier(header||`col_${index+1}`),taken);const s=stats[index]??newStats();return{originalName:header,sqlName:name,...inferType(header,s),nullable:true}})}
+/** Tipo da coluna a partir do arquivo INTEIRO. Nunca adivinha: ambíguo ou que não cabe exato vira texto. A convenção (decimalSep/dateOrder) é
+ *  guardada mesmo quando o tipo final é texto (ex.: coluna "id"), para que um override de tipo explícito converta com a mesma regra. */
+function inferType(header:string,s:ColumnStats):{sqlType:string}&Partial<Pick<ParsedColumn,"decimalSep"|"decimalAmbiguous"|"dateOrder"|"dateAmbiguous"|"decimalDigits">>{
+ const text=textSqlType();
+ if(s.sampleCount===0)return{sqlType:text};
+ const dv=decideDecimal(s.dec);
+ const conv:Partial<Pick<ParsedColumn,"decimalSep"|"decimalAmbiguous"|"dateOrder"|"dateAmbiguous"|"decimalDigits">>={};
+ if(dv.kind==="decimal"){conv.decimalSep=dv.sep;conv.decimalDigits=dv.neededDigits}
+ if(dv.kind==="ambiguous")conv.decimalAmbiguous=true;
+ const dateOk=s.okDmy||s.okMdy;
+ if(dateOk){if(s.okDmy&&s.okMdy&&s.dateAmbiguous)conv.dateAmbiguous=true;else conv.dateOrder=s.okDmy?"dmy":"mdy"}
+ if(s.looksIdentifier||headerLooksIdentifier(header))return{sqlType:text,...conv};
+ if(s.allInt)return{sqlType:"BIGINT"};
+ if(dv.kind==="decimal")return{sqlType:formatDecimalType(dv.spec),...conv};
+ if(dv.kind==="ambiguous"||dv.kind==="too-wide")return{sqlType:text,...conv};
+ if(dateOk){
+  if(conv.dateAmbiguous)return{sqlType:text,...conv};
+  return{sqlType:s.hasTimePart?"DATETIME2":"DATE",...conv};
+ }
+ if(s.allTime)return{sqlType:"TIME"};
+ return{sqlType:text};
 }
 
+// Tipos canônicos aceitos como override: ver type-override.ts (também usado pela validação da API).
+export { normalizeTypeOverride };
+export class TypeOverrideError extends Error { nonRetryable = true as const; constructor(message: string) { super(message); this.name = "TypeOverrideError"; } }
+
 /**
- * Aplica overrides de tipo (chave = sqlName ou originalName da coluna, case-insensitive)
- * por cima da inferência automática. Overrides com nome desconhecido ou tipo inválido
- * são ignorados (não derrubam o import) — devolve a lista de nomes de fato aplicados.
+ * Aplica overrides de tipo (chave = sqlName ou originalName da coluna, case-insensitive) por cima da inferência automática.
+ * Override com nome de coluna desconhecido, tipo inválido, ou convenção ambígua (decimal 1,234 / data 04/05) LANÇA TypeOverrideError:
+ * ignorar em silêncio deixaria o import seguir com um tipo que o usuário não pediu (TIP-06). `ignored` fica sempre vazio (mantido por compatibilidade).
+ * A conversão do valor é validada na carga: valor não vazio que não cabe no tipo falha o import (nunca vira NULL).
  */
 export function applyTypeOverrides(columns: ParsedColumn[], overrides: Record<string, string> | null | undefined): { columns: ParsedColumn[]; applied: string[]; ignored: string[] } {
   if (!overrides || !Object.keys(overrides).length) return { columns, applied: [], ignored: [] };
@@ -148,16 +189,21 @@ export function applyTypeOverrides(columns: ParsedColumn[], overrides: Record<st
     byKey.set(c.sqlName.toLowerCase(), c);
     byKey.set(c.originalName.toLowerCase(), c);
   }
-  const applied: string[] = [];
-  const ignored: string[] = [];
+  const problems: string[] = [];
+  const todo: [ParsedColumn, string][] = [];
   for (const [rawName, rawType] of Object.entries(overrides)) {
-    const type = rawType.toUpperCase().trim();
     const col = byKey.get(rawName.toLowerCase());
-    if (!col || !isValidTypeOverride(type)) { ignored.push(rawName); continue; }
-    col.sqlType = type;
-    applied.push(col.sqlName);
+    const type = typeof rawType === "string" ? normalizeTypeOverride(rawType) : null;
+    if (!col) { problems.push(`coluna "${rawName}" não existe no arquivo (colunas: ${columns.map((c) => c.sqlName).join(", ")})`); continue; }
+    if (!type) { problems.push(`tipo "${String(rawType)}" inválido para a coluna "${rawName}" (use BIGINT, DECIMAL(p,s), DATE, DATETIME2, TIME ou NVARCHAR(MAX))`); continue; }
+    if (type.startsWith("DECIMAL") && col.decimalAmbiguous) { problems.push(`coluna "${rawName}": os números são ambíguos (ex.: 1.234 pode ser 1234 ou 1,234); padronize o separador no arquivo`); continue; }
+    if ((type === "DATE" || type === "DATETIME2") && col.dateAmbiguous) { problems.push(`coluna "${rawName}": as datas são ambíguas (dd/mm ou mm/dd); use datas ISO (AAAA-MM-DD) ou inclua um dia maior que 12`); continue; }
+    todo.push([col, type]);
   }
-  return { columns, applied, ignored };
+  if (problems.length) throw new TypeOverrideError(`Override de tipo recusado: ${problems.join("; ")}`);
+  const applied: string[] = [];
+  for (const [col, type] of todo) { col.sqlType = type; applied.push(col.sqlName); }
+  return { columns, applied, ignored: [] };
 }
 
 function xlsxColumnIndices(headers:string[],columns:ParsedColumn[]){
@@ -191,29 +237,38 @@ export async function* rowsFromFile(
  const ext=typeof source==="string"?extname(source).toLowerCase():(opts?.ext??".csv");
 
  if(ext===".csv"){
-  // Fast path: file on disk + UTF-8 encoding → use DuckDB (11× faster than csv-parse).
-  // DuckDB CSV reader only supports UTF-8/UTF-16 — non-UTF-8 files go directly to csv-parse.
+  // Fast path: file on disk → DuckDB com o dialeto JÁ DETECTADO (auto_detect=false): não pode discordar do preview.
+  // DuckDB só lê UTF-8: outros encodings (UTF-16, Windows-1252) são transcodificados (estrito) para um arquivo temporário.
+  // csv-parse é o último recurso (e o único caminho para fim de linha misto).
   if(typeof source==="string"){
-   const fileEncoding=opts?.encoding??((await detectFileHints(source)).encoding);
-   // For non-UTF-8 files: transcode to a temp UTF-8 file so DuckDB (UTF-8 only) can read it.
-   // This gives DuckDB speed even for win1252/latin1 files — csv-parse is the last resort.
-   const {separator} = await detectFileHints(source);
+   const hints:FileHints=await detectFileHints(source);
+   const fileEncoding=opts?.encoding?normalizeEncoding(opts.encoding):hints.encoding;
+   const separator=hints.separator;
    if(stats){stats.fileEncoding=fileEncoding;stats.fileSeparator=separator}
-   if(fileEncoding!=="utf8"){
+   const dialect={separator,headerFields:hints.headerFields,skipLines:hints.sepDirective?1:0};
+   if(hints.mixedEol){
+    // CRLF, LF e CR no mesmo arquivo: o csv-parse trata os tres como fim de registro; o DuckDB nao e usado (nao pode fundir registros)
+    if(stats){stats.parseMethod="csv-parse";stats.fallbackReason="mixed-eol"}
+   }else if(hints.headerFields.length===1){
+    // UMA coluna: o DuckDB devolve a linha em branco como registro NULL (com 2+ colunas ele a pula) e nao distingue `""` de linha em branco.
+    // Linha em branco nao e registro (o preview e o csv-parse a ignoram; `""` e registro): o csv-parse decide por arquivo.
+    if(stats){stats.parseMethod="csv-parse";stats.fallbackReason="single-column"}
+   }else if(fileEncoding!=="utf8"){
     const tmpDir=await mkdtemp(join(tmpdir(),"cw-duckdb-"));
     const tmpFile=join(tmpDir,"converted.csv");
     let usedDuckDB=false;
     try{
-     await pipeline(createReadStream(source),iconv.decodeStream(fileEncoding),createWriteStream(tmpFile,{encoding:"utf8"}));
+     await pipeline(createReadStream(source),strictDecodeStream(fileEncoding),createWriteStream(tmpFile,{encoding:"utf8"}));
      const{rowsFromCsvDuckDB}=await import("./parser-duckdb");
      if(stats)stats.parseMethod="duckdb";
      const t0=Date.now();
-     yield* neverFallBackMidStream(rowsFromCsvDuckDB(tmpFile,columns));
+     yield* neverFallBackMidStream(rowsFromCsvDuckDB(tmpFile,columns,dialect));
      usedDuckDB=true;
      if(stats)stats.parseMs=Date.now()-t0;
     }catch(e){
      if(e instanceof DuckDbMidStreamError)throw e; // já entregou linhas: cair no csv-parse duplicaria tudo
-     if(!usedDuckDB){if(stats){stats.parseMethod="csv-parse";stats.fallbackReason=`duckdb-failed: ${e instanceof Error?e.message.slice(0,200):String(e)}`}console.warn("[parser] DuckDB (non-UTF8 transcoded) falhou, usando csv-parse:",e instanceof Error?e.message:e);}
+     if(e instanceof CsvFormatError)throw e;       // byte inválido no encoding: nunca "consertar" com caractere de substituição
+     if(!usedDuckDB){if(stats){stats.parseMethod="csv-parse";stats.fallbackReason=`duckdb-failed: ${e instanceof Error?e.message.slice(0,200):String(e)}`}console.warn("[parser] DuckDB (transcodificado) falhou, usando csv-parse:",e instanceof Error?e.message:e);}
      else throw e;
     }finally{
      await rm(tmpDir,{recursive:true,force:true}).catch(()=>{});
@@ -224,7 +279,7 @@ export async function* rowsFromFile(
      const{rowsFromCsvDuckDB}=await import("./parser-duckdb");
      if(stats)stats.parseMethod="duckdb";
      const t0=Date.now();
-     yield* neverFallBackMidStream(rowsFromCsvDuckDB(source,columns));
+     yield* neverFallBackMidStream(rowsFromCsvDuckDB(source,columns,dialect));
      if(stats)stats.parseMs=Date.now()-t0;
      return;
     }catch(e){
@@ -233,7 +288,7 @@ export async function* rowsFromFile(
      if(stats){stats.parseMethod="csv-parse";stats.fallbackReason=`duckdb-failed: ${e instanceof Error?e.message.slice(0,200):String(e)}`}
     }
    }
-   // csv-parse fallback (DuckDB failed or unavailable)
+   // csv-parse (DuckDB falhou ou não se aplica): leitura estrita — encoding sem substituição, linha com campos a mais = erro
    if(stats&&!stats.parseMethod)stats.parseMethod="csv-parse";
    const t0csv=Date.now();
    const readable=createReadStream(source);
@@ -265,9 +320,9 @@ export async function* rowsFromFile(
    // ordenacao do WorkbookReader streaming. Tamanho maximo de XLSX e limitado
    // em outra camada (actions.ts) pra conter o risco de memoria.
    const workbook=new ExcelJS.Workbook();await workbook.xlsx.readFile(source);const sheet=workbook.worksheets[0];if(!sheet)return;
+   assertSingleDataSheet(workbook);
    let header=true,columnIndices:number[]=columns.map((_,i)=>i);
-   for(const row of sheet.getRows(1,sheet.rowCount)??[]){
-    const values=(Array.isArray(row.values)?row.values.slice(1):[]).map(cellValue);
+   for(const values of xlsxDataRows(sheet)){
     if(header){header=false;columnIndices=xlsxColumnIndices(values,columns);continue}
     yield Object.fromEntries(columns.map((c,i)=>[c.sqlName,normalizeCellForColumn(values[columnIndices[i]!]??"",c)??null]));
    }
@@ -276,7 +331,19 @@ export async function* rowsFromFile(
   }
   // ExcelJS WorkbookReader accepts both file path and Readable stream
   const reader=new ExcelJS.stream.xlsx.WorkbookReader(source as unknown as Stream,{worksheets:"emit",sharedStrings:"cache",styles:"ignore",hyperlinks:"ignore"});
-  for await(const worksheet of reader){let header=true,columnIndices:number[]=columns.map((_,i)=>i);for await(const row of worksheet){const values=(Array.isArray(row.values)?row.values.slice(1):[]).map(cellValue);if(header){header=false;columnIndices=xlsxColumnIndices(values,columns);continue}yield Object.fromEntries(columns.map((c,i)=>[c.sqlName,normalizeCellForColumn(values[columnIndices[i]!]??"",c)??null]))}break}
+  let sheetNo=0;
+  for await(const worksheet of reader){
+   sheetNo++;
+   let header=true,columnIndices:number[]=columns.map((_,i)=>i);
+   for await(const row of worksheet){
+    const values=rowTexts(row as unknown as ExcelJS.Row);
+    if(isBlankRow(values))continue;
+    // streaming: as abas seguintes à 1ª são lidas só para RECUSAR se tiverem dados (nunca ignorar linhas em silêncio)
+    if(sheetNo>1)throw new Error("A planilha tem dados em mais de uma aba: deixe só uma aba com dados para nenhuma linha ser ignorada.");
+    if(header){header=false;columnIndices=xlsxColumnIndices(values,columns);continue}
+    yield Object.fromEntries(columns.map((c,i)=>[c.sqlName,normalizeCellForColumn(values[columnIndices[i]!]??"",c)??null]));
+   }
+  }
   if(stats)stats.parseMs=Date.now()-t0;
   return;
  }

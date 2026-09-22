@@ -14,6 +14,8 @@ Filtros opcionais: `eventType`, `success=true|false`, `userId`, `tokenId`, `sinc
 | `JOB_COMPLETED` / `JOB_FAILED` | worker: upload, refresh de fonte/derivada, cleanup | `{jobId, type, worker, durationMs, attempts, willRetry, error(500 chars)}`; recurso = upload/fonte/derivada |
 | `WORKER_PROFILE_CREATED/UPDATED/DELETED` | perfil de worker criado/alterado/removido (ADMIN); alterado tambem quando PARAR/INICIAR muda `enabled` (supervisor) | nome, tipos, campos alterados |
 | `WORKER_PRESET_APPLIED` | perfil de desempenho (economico / equilibrado / alto) aplicado na tela Workers (ADMIN): slots dos workers padrão + tetos globais numa transação | perfil, mudanças (chave, de, para), perfis a reiniciar |
+| `DATA_INTEGRITY_SUSPECT` | carga barrada ou marcada como possivelmente incompleta pela barra de integridade (`success=false`); ver `docs/data-integrity.md` | veredito, dataset, tabela, esperado/lido/anterior, motivos estruturados |
+| `INTEGRITY_SETTINGS_CHANGED` | política de integridade alterada (`mode`, `max_drop_pct`, `allow_empty`) | valores novos |
 | `UPLOAD_FILE_DOWNLOADED` | download do arquivo original de um upload pelo histórico da tabela (exige WRITE no dataset) | tabela, versão, nome do arquivo |
 | `WORKER_RESTART_REQUESTED`, `WORKER_COMMAND_REQUESTED/CANCELLED` | comando de reiniciar/parar/iniciar pedido ou cancelado na tela | ação, modo, perfil, prazo |
 | `WORKER_STARTED`, `WORKER_CRASHED` | supervisor sobe / perde um worker (ator `system:supervisor`) | pid, reinícios; código de saída, tempo de vida, próxima tentativa |

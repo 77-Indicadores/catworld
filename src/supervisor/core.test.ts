@@ -124,6 +124,29 @@ describe("quedas e backoff", () => {
     expect(audits.filter((a) => a.type === "WORKER_CRASHED")).toHaveLength(4);
     expect(stateOf(sup).restarts).toBe(4);
   });
+  it("a queda registra QUEM foi afetado: os jobs que estavam RUNNING no perfil", async () => {
+    const { sup, children, db } = setup();
+    const details: Record<string, unknown>[] = [];
+    db.audit = async (_t, _id, d) => { details.push(d); };
+    db.runningJobs = async (name) => (name === "worker-uploads" ? [{ id: "j-1", type: "IMPORT_UPLOAD", attempts: 1 }] : []);
+    await sup.tick();
+    children[0]!.exit(3);
+    await new Promise((r) => setTimeout(r, 10));
+    const crash = details.find((d) => d.code === 3)!;
+    expect(crash.affectedJobs).toEqual([{ id: "j-1", type: "IMPORT_UPLOAD", attempts: 1 }]);
+  });
+  it("sem jobs em andamento (ou consulta falhando) o evento sai igual, sem 'affectedJobs'", async () => {
+    const { sup, children, db } = setup();
+    const details: Record<string, unknown>[] = [];
+    db.audit = async (_t, _id, d) => { details.push(d); };
+    db.runningJobs = async () => { throw new Error("db fora"); };
+    await sup.tick();
+    children[0]!.exit(1);
+    await new Promise((r) => setTimeout(r, 10));
+    const crash = details.find((d) => d.code === 1)!;
+    expect(crash).toBeDefined();
+    expect("affectedJobs" in crash).toBe(false);
+  });
   it("5 quedas seguidas = CRASH_LOOP visível; filho estável por 60s zera o contador", async () => {
     const { sup, advance, last } = setup();
     await sup.tick();

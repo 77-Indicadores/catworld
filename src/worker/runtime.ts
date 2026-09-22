@@ -65,6 +65,18 @@ export class WorkerState {
   }
 }
 
+/**
+ * Encerramento (SIGTERM): PRIMEIRO aborta os imports em andamento (marca os tokens de cancelamento) e espera, ate `graceMs`,
+ * eles pararem; so depois o chamador libera o job/trava. Liberar antes deixava outro worker pegar o job enquanto este ainda escrevia.
+ * Retorna true se todos pararam dentro do prazo.
+ */
+export async function abortAndWait(tokens: Iterable<{ cancelled: boolean }>, state: Pick<WorkerState, "inflight">, graceMs: number, pollMs = 50): Promise<boolean> {
+  for (const t of tokens) t.cancelled = true;
+  const end = Date.now() + graceMs;
+  while (state.inflight > 0 && Date.now() < end) await new Promise((r) => setTimeout(r, pollMs));
+  return state.inflight === 0;
+}
+
 export type Liveness = { at: number; host: string | null; pid: number | null };
 
 /** `2026-09-19T04:22:18.313Z|host|pid` (formato antigo, só o horário, também é aceito). */
@@ -93,6 +105,29 @@ export function identityConflict(
   if (l.host === me.host && l.pid === me.pid) return false;
   if (l.host === me.host) return isPidAlive(l.pid);
   return true; // outro host com pulsação fresca
+}
+
+/**
+ * Sob o supervisor (que detém o advisory lock e já garante uma instância por perfil), a pulsação fresca de um processo
+ * ANTERIOR não é conflito definitivo: depois de um reinício do contêiner ela é do processo morto (e os PIDs se repetem,
+ * então `isPidAlive` acusa um irmão). Espera a pulsação envelhecer (LIVENESS_FRESH_MS) em vez de sair com código 3 e
+ * entrar em loop de crash até esgotar o limite de reinício. Devolve true se a identidade ficou livre a tempo.
+ */
+export async function waitIdentityFree(opts: {
+  check: () => Promise<boolean>; // true = ainda há conflito
+  sleep: (ms: number) => Promise<void>;
+  now: () => number;
+  maxWaitMs?: number;
+  pollMs?: number;
+}): Promise<boolean> {
+  const maxWait = opts.maxWaitMs ?? LIVENESS_FRESH_MS + 15_000;
+  const poll = opts.pollMs ?? 2_000;
+  const start = opts.now();
+  for (;;) {
+    if (!(await opts.check())) return true;
+    if (opts.now() - start >= maxWait) return false;
+    await opts.sleep(poll);
+  }
 }
 
 export function isPidAlive(pid: number): boolean {

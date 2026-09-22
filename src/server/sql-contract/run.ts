@@ -9,6 +9,7 @@ import type { Actor } from "@/server/auth/actor";
 import type { ScopeDataset } from "@/server/auth/permissions";
 import { getPgIsolationMode, syncPgReaderRole, warnIfSuperuser } from "@/server/storage/pg-roles";
 import type { PgStorageConnection } from "@/server/storage/pg-storage";
+import { hideDeletedForStorage } from "./hide-deleted-run";
 
 export type QueryResult = Awaited<ReturnType<typeof executeReadOnly>>;
 
@@ -58,12 +59,14 @@ export async function runStorageQuery(opts: {
   normalize?: boolean;
 }): Promise<QueryResult> {
   const conn = await getStorageConnection(opts.storageServerId);
+  // Linhas excluidas na origem (cw_deleted_at) nunca chegam ao leitor, qualquer ator/provider/modo (ver hide-deleted.ts)
+  const sql = await hideDeletedForStorage(conn, opts.sql, opts.schemas, "storage-query");
   if (conn.provider === "postgres") {
     const { executeReadOnlyPg } = await import("@/server/storage/pg-query");
     const role = await pgRoleForActor(conn, opts.actor, opts.accessible, opts.storageServerId);
     return executeReadOnlyPg(
       conn as unknown as PgStorageConnection,
-      opts.sql,
+      sql,
       opts.timeout,
       opts.limit,
       opts.schemas,
@@ -72,5 +75,5 @@ export async function runStorageQuery(opts: {
       role,
     );
   }
-  return executeReadOnly(opts.actor.principal, opts.sql, opts.timeout, opts.limit, opts.schemas, opts.offset ?? 0, 120, opts.storageServerId, opts.normalize ?? false);
+  return executeReadOnly(opts.actor.principal, sql, opts.timeout, opts.limit, opts.schemas, opts.offset ?? 0, 120, opts.storageServerId, opts.normalize ?? false);
 }

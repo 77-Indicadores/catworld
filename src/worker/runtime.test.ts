@@ -2,7 +2,22 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@/server/db", () => ({ prisma: {} }));
 
-import { LIVENESS_FRESH_MS, WorkerState, assertKnownTypes, identityConflict, parseLiveness, parseProfileArg } from "./runtime";
+import { abortAndWait, LIVENESS_FRESH_MS, WorkerState, assertKnownTypes, identityConflict, parseLiveness, parseProfileArg } from "./runtime";
+
+describe("abortAndWait (SIGTERM: aborta antes de liberar)", () => {
+  it("marca os tokens e espera o job em andamento terminar", async () => {
+    const t = { cancelled: false };
+    const state = { inflight: 1 };
+    setTimeout(() => { state.inflight = 0; }, 60);
+    const ok = await abortAndWait([t], state, 2000, 10);
+    expect(t.cancelled).toBe(true);
+    expect(ok).toBe(true);
+  });
+  it("estoura o prazo se o job nao para", async () => {
+    const ok = await abortAndWait([{ cancelled: false }], { inflight: 1 }, 80, 10);
+    expect(ok).toBe(false);
+  });
+});
 
 describe("parseProfileArg", () => {
   it("aceita --profile nome e --profile=nome", () => {
@@ -78,5 +93,20 @@ describe("guarda de identidade (dois workers com o mesmo rótulo)", () => {
     expect(parseLiveness(`${fresh}|h2|5`)).toMatchObject({ host: "h2", pid: 5 });
     expect(parseLiveness("lixo").at).toBe(0);
     expect(LIVENESS_FRESH_MS).toBeGreaterThan(15_000);
+  });
+});
+
+describe("waitIdentityFree (pulsação de processo do contêiner anterior)", () => {
+  it("espera a pulsação envelhecer e libera em vez de sair com código 3", async () => {
+    const { waitIdentityFree } = await import("./runtime");
+    let t = 0;
+    const r = await waitIdentityFree({ check: async () => t < 40_000, sleep: async (ms) => { t += ms; }, now: () => t });
+    expect(r).toBe(true);
+  });
+  it("desiste depois do limite quando o outro processo continua vivo", async () => {
+    const { waitIdentityFree } = await import("./runtime");
+    let t = 0;
+    const r = await waitIdentityFree({ check: async () => true, sleep: async (ms) => { t += ms; }, now: () => t, maxWaitMs: 10_000 });
+    expect(r).toBe(false);
   });
 });

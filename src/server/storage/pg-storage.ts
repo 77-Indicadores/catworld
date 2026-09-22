@@ -3,6 +3,8 @@
  * Usa pg.Pool com conexões persistentes.
  */
 
+import { randomBytes } from "node:crypto";
+import { physicalDecimal } from "@/lib/decimal-type";
 import { Pool, type PoolClient, type PoolConfig } from "pg";
 import { CW_SYNCED_AT, CW_DELETED_AT, type ColDef, type ColInfo, type StorageConnection } from "./connection";
 import { absentFromStaging, carryPlan, keysJoinSql } from "./delete-detection";
@@ -42,12 +44,14 @@ function parsePgUrl(url: string): PoolConfig {
 /** Canonical → Postgres type */
 export function canonicalToPg(sqlType: string): string {
   if (sqlType === "BIGINT") return "BIGINT";
-  if (sqlType.startsWith("DECIMAL")) return "NUMERIC(18,4)";
+  if (sqlType.startsWith("DECIMAL")) return physicalDecimal(sqlType, "postgres");
   if (sqlType === "DATE") return "DATE";
   if (sqlType === "DATETIME2") return "TIMESTAMP";
   if (sqlType === "TIME") return "TIME";
   return "TEXT"; // NVARCHAR(MAX) e qualquer outro
 }
+
+const RH = "_cw_rh"; // coluna interna de hash da linha (MD5 hex), quando a tabela a tem
 
 /** Postgres type → canonical */
 function pgToCanonical(r: {
@@ -275,7 +279,9 @@ export class PgStorageConnection implements StorageConnection {
     staging: string,
     target: string,
     cols: ColDef[],
-    opts?: { targetExists?: boolean; keyColumn?: string | null; mergedName?: string; fullSnapshot?: boolean; keysTable?: string; keysBefore?: Date },
+    opts?: { targetExists?: boolean; keyColumn?: string | null; mergedName?: string; fullSnapshot?: boolean; keysTable?: string; keysBefore?: Date;
+      /** fullSwap: roda DENTRO da transacao do swap (ex.: marca exactly-once do append que cria a tabela: ou tudo ou nada). Deve ser idempotente (o swap pode repetir por lock_timeout). */
+      inSwapTx?: (client: PoolClient) => Promise<void> },
   ): Promise<{ marked: number }> {
     const qSc = pgQuote(schema);
     const qStg = `${qSc}.${pgQuote(staging)}`;
@@ -296,23 +302,21 @@ export class PgStorageConnection implements StorageConnection {
       await this._pool.query(
         `ALTER TABLE ${qStg} ADD COLUMN IF NOT EXISTS ${qSyncedAt} TIMESTAMP NOT NULL DEFAULT now(), ADD COLUMN IF NOT EXISTS ${qDeletedAt} TIMESTAMP NULL`,
       );
+      // Índice em cw_synced_at ANTES do swap (a staging ainda é invisível, então não trava ninguém): o consumo incremental `rows?since=`
+      // filtra por essa coluna e sem índice cada consulta varria a tabela toda (190-340 ms contra 1-4 ms medidos em 500k linhas; PER-07).
+      await this.ensureSyncedIndex(qStg);
       // ── fullSwap: DROP target + RENAME staging → target (transação breve) ──────
       // MVCC: readers que começaram antes do BEGIN continuam vendo a versão antiga.
-      const client = await this._pool.connect();
       try {
-        await client.query("BEGIN");
-        try {
+        await this.swapTx(async (client) => {
           if (targetExists) await client.query(`DROP TABLE ${qTgt}`);
           await client.query(`ALTER TABLE ${qStg} RENAME TO ${pgQuote(target)}`);
           await hideDeletedRows(client, qTgt);
-          await client.query("COMMIT");
-        } catch (e) {
-          await client.query("ROLLBACK").catch(() => undefined);
-          await this._pool.query(`DROP TABLE IF EXISTS ${qStg}`).catch(() => {});
-          throw e;
-        }
-      } finally {
-        client.release();
+          if (opts?.inSwapTx) await opts.inSwapTx(client);
+        });
+      } catch (e) {
+        await this._pool.query(`DROP TABLE IF EXISTS ${qStg}`).catch(() => {});
+        throw e;
       }
       return { marked: 0 };
     }
@@ -331,6 +335,7 @@ export class PgStorageConnection implements StorageConnection {
     await this._pool.query(`DROP TABLE IF EXISTS ${qMgd}`);
 
     let marked = 0;
+    let preserveStamp = false;
 
     try {
       await this._pool.query(`CREATE TABLE ${qMgd} (${colDefsWithMeta})`);
@@ -351,6 +356,7 @@ export class PgStorageConnection implements StorageConnection {
           [schema, target],
         );
         const tgtCols = new Set(tgtColsRes.rows.map(r => r.column_name));
+        preserveStamp = tgtCols.has(RH) && tgtCols.has(CW_SYNCED_AT) && tgtCols.has(CW_DELETED_AT) && cols.some(c => c.name === RH);
         const selectList = cols
           .map(c => (tgtCols.has(c.name) ? `t.${pgQuote(c.name)}` : `NULL`))
           .join(", ");
@@ -379,32 +385,84 @@ export class PgStorageConnection implements StorageConnection {
 
       // Copia todos os rows de staging (novos / atualizados) — sempre "vivas": carimba
       // cw_synced_at=agora e cw_deleted_at=NULL (undelete automático).
-      await this._pool.query(
+      // Com a coluna de hash `_cw_rh` nos dois lados, a linha cujo CONTEUDO nao mudou (mesmo hash, viva) mantem o cw_synced_at
+      // anterior: reler linhas iguais (delta com janela de sobreposicao) nao as reapresenta em `rows?since=` (H4). Sem `_cw_rh`
+      // nao ha comparacao barata: toda linha lida e carimbada agora (comportamento anterior; documentado em docs/data-integrity.md).
+      if (preserveStamp) {
+        const sCols = cols.map(c => `s.${pgQuote(c.name)}`).join(", ");
+        const rh = pgQuote(RH);
+        await this._pool.query(
+          `INSERT INTO ${qMgd} (${colListWithMeta})
+           SELECT ${sCols}, COALESCE(p.sa, now()), NULL FROM ${qStg} s
+           LEFT JOIN (SELECT ${key} AS k, ${rh} AS rh, MAX(${qSyncedAt}) AS sa FROM ${qTgt} WHERE ${qDeletedAt} IS NULL GROUP BY ${key}, ${rh}) p
+             ON p.k = s.${key} AND p.rh = s.${rh}`,
+        );
+      } else await this._pool.query(
         `INSERT INTO ${qMgd} (${colListWithMeta}) SELECT ${colList}, now(), NULL FROM ${qStg}`,
       );
 
+      // Mesmo índice de cw_synced_at, construído na tabela mesclada (ainda invisível) antes do swap.
+      await this.ensureSyncedIndex(qMgd);
       // Transação breve: DROP target + RENAME merged → target (AccessExclusiveLock ~ms)
-      const client = await this._pool.connect();
-      try {
-        await client.query("BEGIN");
-        try {
-          if (targetExists) await client.query(`DROP TABLE ${qTgt}`);
-          await client.query(`ALTER TABLE ${qMgd} RENAME TO ${pgQuote(target)}`);
-          await hideDeletedRows(client, qTgt);
-          await client.query("COMMIT");
-        } catch (e) {
-          await client.query("ROLLBACK").catch(() => undefined);
-          throw e;
-        }
-      } finally {
-        client.release();
-      }
+      await this.swapTx(async (client) => {
+        if (targetExists) await client.query(`DROP TABLE ${qTgt}`);
+        await client.query(`ALTER TABLE ${qMgd} RENAME TO ${pgQuote(target)}`);
+        await hideDeletedRows(client, qTgt);
+      });
       return { marked };
     } finally {
       // best-effort cleanup
       await this._pool.query(`DROP TABLE IF EXISTS ${qStg}`).catch(() => {});
       await this._pool.query(`DROP TABLE IF EXISTS ${qMgd}`).catch(() => {});
     }
+  }
+
+  /**
+   * Garante UM índice em cw_synced_at. Nomes de índice são únicos por SCHEMA e o índice acompanha o RENAME da tabela: um nome constante
+   * (derivado do nome da staging) colidia com o índice da tabela publicada na carga anterior e o `IF NOT EXISTS` pulava a criação a cada
+   * duas cargas (1,0,1,0). Nome único por execução + checagem por coluna (reaproveitamento de staging não duplica).
+   */
+  private async ensureSyncedIndex(qTable: string): Promise<void> {
+    const has = await this._pool.query(
+      `SELECT 1 FROM pg_index i JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
+       WHERE i.indrelid = $1::regclass AND a.attname = $2 LIMIT 1`,
+      [qTable, CW_SYNCED_AT],
+    );
+    if (has.rows.length) return;
+    await this._pool.query(`CREATE INDEX ${pgQuote(`ix_cws_${randomBytes(6).toString("hex")}`)} ON ${qTable} (${pgQuote(CW_SYNCED_AT)})`);
+  }
+
+  /**
+   * Afinação da troca (DROP + RENAME): o DROP pede AccessExclusiveLock e ESPERA todo leitor que já tinha a tabela aberta; enquanto
+   * espera, TODO leitor novo entra na fila atrás dele. Sem limite (medido: leitor de 12 s = troca parada 11,7 s e leitor novo parado
+   * 11,4 s), um export longo derrubava as consultas de todo mundo. Com `lock_timeout` a troca desiste depressa, solta a fila e tenta
+   * de novo — a troca é atômica, então repetir é seguro (docs/estudo-confiabilidade-dados.md, PER-04).
+   */
+  static swapTuning = { lockTimeoutMs: 3_000, attempts: 40, backoffMs: 1_500 };
+
+  private async swapTx(work: (client: PoolClient) => Promise<void>): Promise<void> {
+    const { lockTimeoutMs, attempts, backoffMs } = PgStorageConnection.swapTuning;
+    let lastError: unknown;
+    for (let i = 1; i <= attempts; i++) {
+      const client = await this._pool.connect();
+      try {
+        await client.query("BEGIN");
+        try {
+          await client.query(`SET LOCAL lock_timeout = ${Math.max(1, Math.floor(lockTimeoutMs))}`);
+          await work(client);
+          await client.query("COMMIT");
+          return;
+        } catch (e) {
+          await client.query("ROLLBACK").catch(() => undefined);
+          if ((e as { code?: string }).code !== "55P03") throw e; // só "lock_not_available" é repetido; qualquer outro erro sobe
+          lastError = e;
+        }
+      } finally {
+        client.release();
+      }
+      await new Promise((r) => setTimeout(r, backoffMs));
+    }
+    throw new Error(`Não consegui trocar a tabela depois de ${attempts} tentativas: leituras longas seguram a tabela (${lastError instanceof Error ? lastError.message : String(lastError)}).`);
   }
 
   async serverNow(): Promise<Date> {

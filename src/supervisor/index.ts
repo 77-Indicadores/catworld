@@ -12,8 +12,11 @@ import pg from "pg";
 import { prisma } from "@/server/db";
 import { env } from "@/server/env";
 import { Supervisor, type ChildHandle, type CoreProfile } from "./core";
+import { ensureUtcTimezone } from "@/server/runtime-tz";
 import { createCoreDb } from "./db";
+import { retakeLeadership } from "./leadership";
 
+ensureUtcTimezone(); // os workers herdam o ambiente: todos em UTC
 const TICK_MS = 3000;
 const STANDBY_RETRY_MS = 10_000;
 const LOCK_NAME = "catworld.supervisor";
@@ -26,7 +29,7 @@ function spawnWorker(profile: CoreProfile): ChildHandle {
   const child = fork(WORKER_ENTRY, ["--profile", profile.name], {
     execArgv: ["--import", "tsx"],
     stdio: ["ignore", "inherit", "inherit", "ipc"],
-    env: process.env,
+    env: { ...process.env, CW_SUPERVISED: "1" },
   });
   return {
     get pid() { return child.pid; },
@@ -40,7 +43,8 @@ function spawnWorker(profile: CoreProfile): ChildHandle {
 async function acquireLeadership(): Promise<pg.Client | null> {
   const url = process.env.CATWORLD_DATABASE_URL;
   if (!url) throw new Error("CATWORLD_DATABASE_URL ausente");
-  const client = new pg.Client({ connectionString: url });
+  // keepAlive: um NAT/balanceador com idle timeout não derruba a conexão do lock por ociosidade
+  const client = new pg.Client({ connectionString: url, keepAlive: true, keepAliveInitialDelayMillis: 10_000 });
   await client.connect();
   const r = await client.query<{ ok: boolean }>("SELECT pg_try_advisory_lock(hashtext($1)) AS ok", [LOCK_NAME]);
   if (r.rows[0]?.ok) return client;
@@ -59,10 +63,27 @@ async function main() {
       await sleep(STANDBY_RETRY_MS);
     }
   }
-  // Perdeu a conexão do lock = perdeu a liderança: sai e o Docker reinicia (evita dois supervisores).
+  // A conexão do lock caiu: o Postgres soltou o lock. Antes o supervisor saía (process.exit(1)) e o contêiner reiniciava, matando os workers
+  // no meio de imports longos. Agora ele tenta PEGAR O LOCK DE NOVO; só sai se outro supervisor já assumiu (senão haveria dois).
   let finishingRef = () => false;
-  lock.on("error", () => { if (finishingRef()) return; console.error("[supervisor] conexão do lock caiu; saindo"); process.exit(1); });
-  lock.on("end", () => { if (finishingRef()) return; console.error("[supervisor] conexão do lock encerrou; saindo"); process.exit(1); });
+  let retaking = false;
+  const watchLock = (client: pg.Client) => {
+    const lost = (why: string) => {
+      if (finishingRef() || retaking) return;
+      retaking = true;
+      console.error(`[supervisor] conexão do lock ${why}; tentando retomar a liderança sem derrubar os workers`);
+      void retakeLeadership(acquireLeadership, { log: (m) => console.error(`[supervisor] ${m}`) }).then((got) => {
+        if (!got) { console.error("[supervisor] não retomei a liderança; saindo"); process.exit(1); }
+        lock = got;
+        watchLock(got);
+        retaking = false;
+        console.log("[supervisor] liderança retomada");
+      });
+    };
+    client.on("error", () => lost("caiu"));
+    client.on("end", () => lost("encerrou"));
+  };
+  watchLock(lock);
 
   const db = createCoreDb(instanceId);
   const orphaned = await db.failOrphanedCommands();

@@ -1,4 +1,5 @@
 import type { NextRequest } from "next/server";
+import { tableNameCollisionWarning } from "@/server/uploads/name-collision";
 import { randomUUID } from "node:crypto";
 import { extname } from "node:path";
 import { z } from "zod";
@@ -11,6 +12,8 @@ import { ApiError, handleApiError, ok } from "@/server/http";
 import { uploadVisibilityWhere } from "@/server/uploads/access";
 import { assertTableInDataset } from "@/server/uploads/actions";
 import { uploadTarget } from "@/server/storage";
+import { stripServerMark } from "@/server/uploads/expected-rows";
+import { normalizeTypeOverride } from "@/server/uploads/type-override";
 import { checkRateLimit } from "@/server/query/protection";
 
 export async function GET(r: NextRequest) {
@@ -55,7 +58,7 @@ export async function POST(r: NextRequest) {
       // normalizado do cabeçalho, valor = um dos tipos canonicos aceitos em
       // applyTypeOverrides). Aplicado durante PREVIEW_UPLOAD, antes do import —
       // ver src/worker/index.ts.
-      typeOverrides: z.record(z.string(), z.string()).optional(),
+      typeOverrides: z.record(z.string(), z.string().refine((t) => normalizeTypeOverride(t) !== null, "tipo de override inválido (use BIGINT, DECIMAL(p,s) com p<=38, DATE, DATETIME2, TIME ou NVARCHAR(MAX))")).optional(),
     }).parse(await r.json());
 
     const limits = await getUploadLimits();
@@ -96,7 +99,8 @@ export async function POST(r: NextRequest) {
         mode: input.mode,
         keyColumn: input.keyColumn ?? null,
         fullSnapshot: input.fullSnapshot ?? false,
-        previewJson: input.previewJson ?? null,
+        // O preview enviado pelo cliente nunca vale como "feito pelo servidor" (source): o gate de integridade so confia na contagem do servidor.
+        previewJson: input.previewJson ? stripServerMark(input.previewJson) : null,
         mappingJson: input.mappingJson ?? null,
         typeOverridesJson: input.typeOverrides ? JSON.stringify(input.typeOverrides) : null,
         rowCount: input.rowCount != null ? BigInt(input.rowCount) : null,
@@ -104,7 +108,9 @@ export async function POST(r: NextRequest) {
       },
     });
 
-    return ok({ upload, sas: await uploadTarget(upload.id) }, undefined, 201);
+    // Colisão de nome (Obras.csv x obras.csv = mesma tabela): não bloqueia, mas o cliente é avisado.
+    const collision = input.datasetId && !input.tableId ? await tableNameCollisionWarning(input.datasetId, input.filename).catch(() => null) : null;
+    return ok({ upload, sas: await uploadTarget(upload.id) }, collision ? { warnings: [collision] } : undefined, 201);
   } catch (e) {
     return handleApiError(e);
   }

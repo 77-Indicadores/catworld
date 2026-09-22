@@ -11,24 +11,26 @@ import type { MssqlStorageConnection } from "@/server/storage/mssql-storage";
 import { ApiError, handleApiError } from "@/server/http";
 import { activeRowsPredicate } from "@/server/storage/active-rows";
 import { fmtCell } from "@/lib/fmt-cell";
-import { mssqlKind, normalizeRows, pgKind, type ColumnKind } from "@/server/sql-contract/result";
+import { legacyPgRows, mssqlKind, normalizeRows, pgKind, type ColumnKind } from "@/server/sql-contract/result";
+import { PG_STRING_TYPES } from "@/server/storage/pg-types";
+import { csvMinimalField, csvTruncationRow } from "@/server/query/export-format";
 
 const BOM = "﻿";
 const SEP = ";";
 
 // ── CSV helpers ───────────────────────────────────────────────────────────────
 
-function csvLine(values: unknown[], isoDates = false): string {
-  return values
+// Neutraliza injecao de formula (=, +, -, @, TAB, CR no inicio de TEXTO) e cita CR/LF soltos; ver export-format.ts.
+// `formulaSafe = false` (?formulaSafe=false) e o opt-out explicito.
+const makeCsvLine = (formulaSafe: boolean) => (values: unknown[], isoDates = false): string =>
+  values
     .map((v) => {
       const cell = fmtCell(v, isoDates);
       if (cell === null) return "";
-      const s = String(cell);
-      return s.includes(SEP) || s.includes('"') || s.includes("\n")
-        ? `"${s.replaceAll('"', '""')}"` : s;
+      // fmtCell devolve numero/booleano tal qual e texto para o resto: so texto e neutralizado
+      return csvMinimalField(typeof cell === "string" ? cell : String(cell), SEP, { formulaSafe: formulaSafe && typeof cell === "string" });
     })
     .join(SEP);
-}
 
 // ── Streaming CSV for storage tables ─────────────────────────────────────────
 
@@ -39,7 +41,9 @@ async function streamStorageCsv(
   columns: string[],
   isoDates = false,
   activeWhere: string | null = null,
+  formulaSafe = true,
 ): Promise<ReadableStream<Uint8Array>> {
+  const csvLine = makeCsvLine(formulaSafe);
   // Linhas excluídas na origem (cw_deleted_at preenchido) não entram no arquivo.
   const whereSql = activeWhere ? ` WHERE ${activeWhere}` : "";
   const enc = new TextEncoder();
@@ -60,13 +64,15 @@ async function streamStorageCsv(
           await client.query(`DECLARE cw_export NO SCROLL CURSOR FOR SELECT * FROM ${quotedTable}${whereSql}`);
           const PAGE = 5_000;
           while (true) {
-            const result = await client.query(`FETCH ${PAGE} FROM cw_export`);
+            // texto do banco (PG_STRING_TYPES): DATE/TIMESTAMP sem depender do fuso do Node, com microssegundos e infinity
+            const result = await client.query({ text: `FETCH ${PAGE} FROM cw_export`, types: PG_STRING_TYPES } as never) as unknown as { rows: Record<string, unknown>[]; fields: { name: string; dataTypeID: number }[] };
             if (result.rows.length === 0) break;
             // dateFormat=iso: DATE/TIME/bigint/decimal pelo tipo da coluna (sem isso DATE sai deslocada por fuso)
             const kinds: Record<string, ColumnKind> = isoDates
               ? Object.fromEntries(result.fields.map((f) => [f.name, pgKind(f.dataTypeID)]))
               : {};
             if (isoDates) normalizeRows(result.rows as Record<string, unknown>[], kinds, "pg");
+            else legacyPgRows(result.rows as Record<string, unknown>[], Object.fromEntries(result.fields.map((f) => [f.name, pgKind(f.dataTypeID)])));
             const chunk = (result.rows as Record<string, unknown>[])
               .map((row) => csvLine(columns.map((c) => row[c]), isoDates))
               .join("\r\n") + "\r\n";
@@ -143,8 +149,10 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const actor = await resolveActor(request);
     const { id } = await params;
     const what = request.nextUrl.searchParams.get("what") ?? "data"; // data | columns
-    // dateFormat=iso (opt-in): datas em ISO-8601 no CSV. Padrao inalterado.
-    const isoDates = request.nextUrl.searchParams.get("dateFormat") === "iso";
+    // dateFormat=iso e o PADRAO (datas ISO-8601, legiveis por maquina); dateFormat=legacy volta ao formato antigo.
+    const isoDates = request.nextUrl.searchParams.get("dateFormat") !== "legacy";
+    const formulaSafe = request.nextUrl.searchParams.get("formulaSafe") !== "false";
+    const csvLine = makeCsvLine(formulaSafe);
 
     const table = await prisma.datasetTable.findUniqueOrThrow({
       where: { id },
@@ -187,10 +195,12 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
           : source.sourceSql!;
       const result = await executeLiveReadOnly(source.connection as LiveConnection, querySql, 120, 500_000, 0, isoDates);
       const rows = result.rows as Record<string, unknown>[];
+      // fonte live: teto de 500.000 linhas; se atingido o arquivo se declara truncado (nome, cabecalho e linha final)
+      const liveTruncated = rows.length >= 500_000;
       const body = enc.encode(
-        BOM + [csvLine(result.columns), ...rows.map((r) => csvLine(result.columns.map((c) => r[c]), isoDates))].join("\r\n"),
+        BOM + [csvLine(result.columns), ...rows.map((r) => csvLine(result.columns.map((c) => r[c]), isoDates)), ...(liveTruncated ? [csvTruncationRow(500_000, result.columns.length, SEP)] : [])].join("\r\n"),
       );
-      return new Response(body, { headers: csvHeaders });
+      return new Response(body, { headers: liveTruncated ? { ...csvHeaders, "Content-Disposition": csvHeaders["Content-Disposition"].replace(".csv", "-TRUNCADO.csv"), "X-Result-Truncated": "true" } : csvHeaders });
     }
 
     // Storage-backed table — fully streamed
@@ -213,6 +223,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       csvColumns,
       isoDates,
       await activeRowsPredicate(storageConn, table.dataset.schemaName, table.sqlName),
+      formulaSafe,
     );
 
     return new Response(csvStream, { headers: csvHeaders });

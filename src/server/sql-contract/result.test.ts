@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mssqlKind, normalizeRows, pgKind } from "./result";
+import { mssqlKind, normalizeRows, pgDateText, pgKind } from "./result";
 
 describe("contrato de resultado", () => {
   it("mssql: date/time/bigint/decimal/binary", () => {
@@ -37,5 +37,14 @@ describe("legacyFormatColumns (colunas que mudam com normalize)", () => {
   it("SQL Server: date, time, decimal e binary", async () => {
     const { legacyFormatColumns } = await import("./result");
     expect(legacyFormatColumns({ a: "date", b: "decimal", c: "bigint", d: "time", e: "other" }, "mssql").sort()).toEqual(["a", "b", "d"]);
+  });
+});
+
+describe("pgDateText", () => {
+  it("nao corta anos com 5+ digitos", () => {
+    expect(pgDateText("12345-01-01")).toBe("12345-01-01");
+    expect(pgDateText("2026-01-31")).toBe("2026-01-31");
+    expect(pgDateText("2026-01-31T00:00:00")).toBe("2026-01-31");
+    expect(pgDateText("infinity")).toBe("infinity");
   });
 });

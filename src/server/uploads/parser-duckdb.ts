@@ -21,32 +21,29 @@ async function getInstance(): Promise<import("@duckdb/node-api").DuckDBInstance>
   return DuckDBInstance.create(":memory:", { threads: "2", memory_limit: getDuckdbMemoryLimit() });
 }
 
+/** Dialeto já detectado (csv-detect.ts): o DuckDB NÃO redetecta nada — não pode discordar do preview (TIP-04). */
+export type CsvDialect = { separator: string; headerFields: string[]; skipLines: number };
+
 export async function* rowsFromCsvDuckDB(
   filePath: string,
   columns: ParsedColumn[],
+  dialect: CsvDialect,
 ): AsyncGenerator<Record<string, unknown>> {
   const instance = await getInstance();
   const conn = await instance.connect();
 
   const safeFilePath = filePath.replace(/\\/g, "/").replace(/'/g, "''");
 
-  // Get actual column names from DuckDB to build originalName → sqlName mapping
-  // parallel=false is required when null_padding=true and the file has quoted newlines;
-  // without it DuckDB throws "parallel scanner does not support null_padding with quoted newlines".
-  // sample_size omitted (default 20480 rows): with all_varchar=true there are no types to infer,
-  // so sample_size=-1 (full-file scan) was wasted I/O — especially painful for 100–200 MB CSVs.
-  const csvOpts = `null_padding=true, parallel=false, all_varchar=true`;
-  const headerResult = await conn.runAndReadAll(
-    `SELECT * FROM read_csv_auto('${safeFilePath}', ${csvOpts}) LIMIT 0`,
-  );
-  const duckHeaders: string[] = [];
-  for (let i = 0; i < headerResult.columnCount; i++) {
-    duckHeaders.push(headerResult.columnName(i));
-  }
+  // auto_detect=false + colunas explícitas (todas VARCHAR, nomes sintéticos c0..cN: o cabeçalho pode ter nomes repetidos ou vazios):
+  // delimitador, aspas, cabeçalho e número de colunas vêm do dialeto detectado, nunca de uma segunda detecção do DuckDB.
+  // parallel=false é necessário com null_padding=true e quebras de linha dentro de aspas.
+  const duckHeaders = dialect.headerFields;
+  const sqlStr = (v: string) => `'${v.replace(/'/g, "''")}'`;
+  const colSpec = duckHeaders.map((_, i) => `'c${i}': 'VARCHAR'`).join(", ");
+  const csvOpts = `auto_detect=false, header=true, skip=${dialect.skipLines}, delim=${sqlStr(dialect.separator)}, quote='"', escape='"', columns={${colSpec}}, null_padding=true, parallel=false`;
 
-  // Build index mapping with duplicate-header support.
-  // indexOf() always returns the first match, so a second column named "nome"
-  // would wrongly map to position 0. Track consumed positions per name.
+  // Índice coluna-do-mapping -> posição no arquivo, com suporte a cabeçalho repetido
+  // (indexOf() acharia sempre a 1ª ocorrência; controla as posições já consumidas por nome).
   const headerPositions = new Map<string, number[]>();
   for (let i = 0; i < duckHeaders.length; i++) {
     const h = duckHeaders[i]!;
@@ -56,7 +53,7 @@ export async function* rowsFromCsvDuckDB(
   const nameConsumed = new Map<string, number>();
   const colIndices: number[] = columns.map((col, fallbackIdx) => {
     const positions = headerPositions.get(col.originalName);
-    if (!positions) return fallbackIdx; // empty/renamed header → positional fallback
+    if (!positions) return fallbackIdx; // renomeada → posicional
     const used = nameConsumed.get(col.originalName) ?? 0;
     nameConsumed.set(col.originalName, used + 1);
     return positions[used] ?? fallbackIdx;
@@ -67,16 +64,23 @@ export async function* rowsFromCsvDuckDB(
   // no primeiro chunk com erro (ex.: uma linha com coluna a mais na linha 60.000 de 100.000 devolvia 59.392 linhas, sem erro) e o
   // import ficava COMPLETED com linhas faltando (visto em produção: 45.056 de 49.022, todo dia). Aqui, se o DuckDB não consegue ler
   // o arquivo INTEIRO, o erro sobe ANTES de qualquer linha ser entregue, e rowsFromFile cai no csv-parse (leniente) sem duplicar.
-  const expected = Number((await conn.runAndReadAll(
-    `SELECT count(*) FROM read_csv_auto('${safeFilePath}', ${csvOpts})`,
-  )).getRows()[0]![0]);
+  let expected: number;
+  try {
+    expected = Number((await conn.runAndReadAll(
+      `SELECT count(*) FROM read_csv('${safeFilePath}', ${csvOpts})`,
+    )).getRows()[0]![0]);
+  } catch (e) {
+    conn.closeSync();
+    try { instance.closeSync?.(); } catch { /* best-effort */ }
+    throw e;
+  }
 
   let yielded = 0;
   try {
     // all_varchar=true: return raw strings, no type casting — same as csv-parse behaviour.
     // Without this, DuckDB converts "10.50" → 10.5 and dates to ISO, breaking downstream logic.
     const reader = await conn.stream(
-      `SELECT * FROM read_csv_auto('${safeFilePath}', ${csvOpts})`,
+      `SELECT * FROM read_csv('${safeFilePath}', ${csvOpts})`,
     );
 
     for await (const chunk of reader) {
