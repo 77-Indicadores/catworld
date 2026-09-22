@@ -38,6 +38,26 @@ Para Firebird-via-FTP, "conectar" tem 4 passos caros e assíncronos, que **não 
 3. Restaurar com `gbak -c` num banco Firebird efêmero, local, só-nosso.
 4. Só então dá para rodar SQL contra ele.
 
+> **Atualização 2 (2026-09-22, provado ponta a ponta contra o backup real do TMK, via `node-firebird` de
+> verdade, não só `isql`):** o arquivo dentro do zip **não é backup lógico do `gbak`** — é uma cópia bruta do
+> `.fdb` ao vivo (ODS 13 = Firebird 4.0/5.0; `gbak -c` falha com "expected backup description record"). O
+> Firebird 3.0 do apt do Debian (ODS 12) não abre esse arquivo ("Wrong ODS version, expected 12, encountered
+> 13"); a imagem precisa do Firebird **5.x**, instalado pelo tarball oficial
+> (`github.com/FirebirdSQL/firebird/releases`), porque bookworm não empacota a série 5. O pipeline final é só
+> baixar+descompactar+anexar direto — sem restore. Duas armadilhas reais encontradas e já corrigidas no código:
+> 1. **Permissão de arquivo**: o serviço Firebird roda como usuário `firebird`; um arquivo baixado/descompactado
+>    pelo processo do worker (outro usuário) dá "No permission for read-write access to database". A imagem
+>    precisa rodar o worker e o Firebird como o **mesmo usuário Unix**, ou ajustar dono/grupo do diretório de
+>    trabalho (`CATWORLD_FIREBIRD_WORKDIR`) para o grupo do Firebird.
+> 2. **`wireCrypt`**: `firebird.ts` não força mais `WIRE_CRYPT_DISABLE` (isso quebra contra o Firebird 5 real
+>    com "Incompatible wire encryption levels" — a suposição de exigir legado só fazia sentido se estivéssemos
+>    falando com o Firebird do CLIENTE, o que nunca é o caso: sempre falamos com o NOSSO servidor).
+>
+> Validado com dado real: `NUMERIC(12,4)` volta string exata (`"0.0000"`) via `numericMode: "string"`; colunas
+> `DOUBLE PRECISION` nativas (comuns para valor monetário em ERPs Firebird antigos, ex. `FAT_NFE.NFE_VALOR`) são
+> corretamente marcadas `lossyNumeric` pelo `mapFirebirdType` — o `isql` exibe muitas casas decimais nesses
+> campos por formatação cosmética, não porque sejam ponto fixo.
+
 > **Atualizado (2026-09-22, testado contra Firebird 3.0.8 real, Debian/Ubuntu):** um único servidor Firebird
 > atende vários `.fdb` ao mesmo tempo — um cliente conecta direto pelo caminho do arquivo, sem precisar
 > registrar alias. Então o passo 3 **não sobe/derruba processo de servidor por conexão**: existe um servidor

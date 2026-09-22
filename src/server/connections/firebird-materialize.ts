@@ -1,22 +1,31 @@
 /**
- * Job CONNECTION_MATERIALIZE: baixa+descompacta+restaura (gbak) o backup Firebird de uma `Connection` do tipo
+ * Job CONNECTION_MATERIALIZE: baixa+descompacta e anexa o arquivo Firebird de uma `Connection` do tipo
  * `firebird-ftp`, no máximo uma vez por versão de arquivo remoto. Ver docs/firebird-ftp-provider.md.
  *
- * Simplificação (confirmada testando contra o Firebird 3.0.8 real): um único servidor Firebird atende vários
- * `.fdb` ao mesmo tempo — um cliente conecta direto pelo caminho do arquivo, sem alias. Este job NUNCA sobe ou
- * derruba um processo de servidor; ele só cria/apaga arquivos `.fdb` no servidor único e sempre-no-ar da
- * imagem (`CATWORLD_FIREBIRD_HOST`/`_PORT`). `ConnectionMaterialization.firebirdHost/Port` guardam esse valor
- * fixo mesmo assim, para o dia em que o servidor Firebird rodar num host separado.
+ * IMPORTANTE (confirmado testando contra o backup real do TMK, 2026-09-22): o arquivo dentro do zip NÃO é um
+ * backup lógico do `gbak` — é uma cópia bruta do `.fdb` ao vivo (ODS 13 = Firebird 4.0/5.0; `gbak -c` falha
+ * nele com "expected backup description record"). Por isso não existe passo de "restaurar": o pipeline é só
+ * baixar, descompactar e anexar DIRETO no arquivo extraído. O motor da imagem precisa ser Firebird 5.x (o
+ * Firebird 3.0 do apt do Debian, ODS 12, não abre um arquivo ODS 13 — "Wrong ODS version, expected 12,
+ * encountered 13"); Debian bookworm não empacota Firebird 5, então a imagem instala pelo tarball oficial
+ * (github.com/FirebirdSQL/firebird/releases), não pelo apt.
  *
- * Trava: CAS otimista em `status` (nunca um advisory lock/transação Postgres segurando por 10-20+ minutos —
- * isso prenderia uma conexão do pool pelo tempo do download+gbak inteiro). Uma materialização "presa" (worker
- * morto no meio) destrava sozinha depois de `STALE_MATERIALIZING_MS`.
+ * Simplificação adicional: um único servidor Firebird atende vários `.fdb` ao mesmo tempo — um cliente conecta
+ * direto pelo caminho do arquivo, sem alias. Este job NUNCA sobe ou derruba um processo de servidor; ele só
+ * cria/apaga arquivos `.fdb` no servidor único e sempre-no-ar da imagem (`CATWORLD_FIREBIRD_HOST`/`_PORT`).
+ * `ConnectionMaterialization.firebirdHost/Port` guardam esse valor fixo mesmo assim, para o dia em que o
+ * servidor Firebird rodar num host separado.
+ *
+ * Trava: CAS otimista em `status` (nunca um advisory lock/transação Postgres segurando por vários minutos —
+ * isso prenderia uma conexão do pool pelo tempo do download inteiro). Uma materialização "presa" (worker morto
+ * no meio) destrava sozinha depois de `STALE_MATERIALIZING_MS`.
  */
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { mkdir, rm, stat as fsStat, readdir } from "node:fs/promises";
 import { join } from "node:path";
-import Firebird from "node-firebird";
+// Import de namespace, nao default — ver nota em firebird.ts (default resolve undefined sob esbuild/tsx).
+import * as Firebird from "node-firebird";
 import { prisma } from "@/server/db";
 import { env } from "@/server/env";
 import { decryptSecret } from "@/server/security/crypto";
@@ -173,42 +182,50 @@ export async function ensureMaterialized(connectionId: string, creds: FtpCredent
   }
 
   const dir = workDirFor(connectionId);
+  // Cada tentativa vai para uma subpasta própria: a materialização ANTERIOR (se houver) fica intacta noutra
+  // subpasta e continua servível até a nova estar provada — nunca sobrescrevemos um .fdb que o servidor ainda
+  // pode ter aberto para uma leitura em andamento.
+  const attemptDir = join(dir, randomUUID());
   try {
-    await assertDiskBudget(dir, remote.size * 2.2); // zip + descompactado, margem para o .fdb restaurado ser maior
-    await rm(dir, { recursive: true, force: true });
-    await mkdir(dir, { recursive: true });
+    // O arquivo dentro do zip NÃO é backup logico do gbak: é uma copia bruta do .fdb ao vivo (confirmado contra
+    // o backup real do TMK — ODS 13, Firebird 4.0/5.0; gbak -c falha nele com "expected backup description
+    // record"). Por isso o pipeline e so baixar + descompactar + anexar DIRETO no arquivo extraido, sem
+    // restore nenhum. Se um dia aparecer um cliente que manda backup logico de verdade, isso precisa de um
+    // passo extra (detectar pelo cabecalho e rodar gbak so nesse caso) — nao assumido aqui.
+    await assertDiskBudget(dir, remote.size * 5); // proporcao real observada no TMK: 1,7GB zip -> 6,5GB descompactado (~3,8x) + folga
+    await mkdir(attemptDir, { recursive: true });
 
-    const zipPath = join(dir, "download.zip");
+    const zipPath = join(attemptDir, "download.zip");
     await downloadRemoteFile(creds, remote.path, zipPath);
 
-    await run("unzip", ["-o", zipPath, "-d", dir]);
+    await run("unzip", ["-o", zipPath, "-d", attemptDir]);
     const innerPattern = config.firebird?.innerFilePattern ?? "*";
-    const extracted = (await readdir(dir)).filter((n) => n !== "download.zip" && globToRegExp(innerPattern).test(n));
+    const extracted = (await readdir(attemptDir)).filter((n) => n !== "download.zip" && globToRegExp(innerPattern).test(n));
     if (extracted.length === 0) throw new Error(`nenhum arquivo dentro do zip bate "${innerPattern}"`);
-    const backupPath = join(dir, extracted[0]!);
+    const fdbPath = join(attemptDir, extracted[0]!);
 
     const server = firebirdServer();
-    const fdbPath = join(dir, `${randomUUID()}.fdb`);
-    // gbak -c: cria o banco do zero a partir do backup. -user/-password: sempre o SYSDBA nosso, nunca credencial do cliente.
-    await run("gbak", ["-c", "-v", "-user", server.user, "-password", server.password, backupPath, fdbPath]);
-
     const endpoint: FirebirdEndpoint = { host: server.host, port: server.port, database: fdbPath, user: server.user, password: server.password, charset: config.firebird?.charset };
-    // Prova de vida antes de publicar como 'ready' — um restore que "termina" mas produz um .fdb ilegível não pode passar.
-    await Firebird.attachAsync({ host: endpoint.host, port: endpoint.port, database: endpoint.database, user: endpoint.user, password: endpoint.password, encoding: (endpoint.charset ?? "UTF8") as never, wireCrypt: Firebird.WIRE_CRYPT_DISABLE })
-      .then((db) => db.detachAsync());
+    // Prova de vida antes de publicar como 'ready': anexa e faz uma consulta real ao catalogo — um arquivo
+    // extraido mas ilegivel (zip truncado, ODS incompativel com o motor instalado) nunca pode passar por pronto.
+    // Sem forcar wireCrypt (negociacao padrao do driver) — ver nota em firebird.ts sobre por que DISABLE quebra
+    // contra o Firebird 5.x real que a imagem usa.
+    await Firebird.attachAsync({ host: endpoint.host, port: endpoint.port, database: endpoint.database, user: endpoint.user, password: endpoint.password, encoding: (endpoint.charset ?? "UTF8") as never })
+      .then((db) => db.queryAsync("SELECT 1 FROM RDB$DATABASE").then(() => db.detachAsync()));
 
-    // Materialização antiga (se houver) some do disco só depois que a nova está provada — nunca um intervalo sem nenhuma.
     const prevPath = already?.endpoint.database;
     await markReady(connectionId, signature, endpoint);
-    await rm(zipPath, { force: true });
-    await rm(backupPath, { force: true });
-    if (prevPath && prevPath !== fdbPath) await dropFirebirdFile(server, prevPath).catch(() => undefined);
+    await rm(zipPath, { force: true }); // so o zip; o .fdb extraido fica (e agora o "database" apontado por ready)
+    if (prevPath && prevPath !== fdbPath) {
+      await dropFirebirdFile(server, prevPath).catch((e) => console.warn(`[firebird-materialize] falha ao derrubar materializacao anterior de ${connectionId}:`, e instanceof Error ? e.message : e));
+      await rm(join(prevPath, ".."), { recursive: true, force: true }).catch(() => undefined);
+    }
 
     return { endpoint, expiresAt: new Date(Date.now() + MATERIALIZATION_TTL_MS) };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     await markFailed(connectionId, message);
-    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    await rm(attemptDir, { recursive: true, force: true }).catch(() => undefined);
     throw e;
   }
 }

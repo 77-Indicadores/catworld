@@ -8,7 +8,11 @@
  * uma senha gerada por materialização (nunca a credencial do cliente). Por isso não há aqui SSH tunnel nem
  * `encryptedCredentials`: quem monta o `FirebirdEndpoint` é o chamador (a partir de `ConnectionMaterialization`).
  */
-import Firebird, { type Database, type Options } from "node-firebird";
+// Import de namespace (nao default): node-firebird e CJS sem export default de verdade — um import default
+// resolve pra undefined sob esbuild/tsx (confirmado rodando scripts/verify-firebird-adapter.ts), mesmo com
+// esModuleInterop:true no tsconfig (isso so cobre a emissao do proprio tsc, nao de outros bundlers/runners).
+import * as Firebird from "node-firebird";
+import type { Database, Options } from "node-firebird";
 import { validateReadOnlySql } from "@/server/security/sql-safety";
 import { sqlIdentifier } from "@/server/security/naming";
 import { ApiError } from "@/server/http";
@@ -34,11 +38,15 @@ function options(endpoint: FirebirdEndpoint): Options {
     password: endpoint.password,
     encoding: (endpoint.charset ?? "UTF8") as Options["encoding"],
     // NUMERIC/DECIMAL e BIGINT/INT128 sempre como string exata — mesmo principio de fidelidade decimal do
-    // resto do projeto (parseDecimalType/fitDecimal): nunca passar por Number e perder digitos.
+    // resto do projeto (parseDecimalType/fitDecimal): nunca passar por Number e perder digitos. Confirmado
+    // contra dado real do TMK: NUMERIC(12,4) volta "0.0000" exato; DOUBLE PRECISION nativo (comum em ERPs
+    // Firebird antigos para campos de valor) NAO e afetado por isto — continua float, por isso mapFirebirdType
+    // marca esses como lossyNumeric.
     numericMode: "string",
-    // Backups antigos (Firebird 2.5 e anteriores) nao falam o wire protocol novo; sem isto a conexao contra
-    // um servidor 3.0 recem-instalado (auth SRP por padrao) falha para bancos restaurados de origem antiga.
-    wireCrypt: Firebird.WIRE_CRYPT_DISABLE,
+    // NAO forcar wireCrypt aqui: e a conexao com o NOSSO servidor (o que restaurou o arquivo), nunca com o do
+    // cliente, entao usamos a negociacao padrao do driver. Forcar DISABLE (pensado originalmente para talvez
+    // precisar falar com um Firebird 2.5/3.0 antigo) quebra contra Firebird 5.x, que e o motor que a imagem usa
+    // (confirmado: erro "Incompatible wire encryption levels" testando contra Firebird 5.0.4 real).
   };
 }
 
