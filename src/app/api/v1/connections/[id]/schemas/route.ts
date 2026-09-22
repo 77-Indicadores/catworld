@@ -4,12 +4,15 @@ import { resolveActor, requireRole } from "@/server/auth/actor";
 import { handleApiError, ok } from "@/server/http";
 import { listSchemas } from "@/server/connections/postgres";
 import { listSchemasMssql } from "@/server/connections/mssql";
+import { listSchemasFirebird } from "@/server/connections/firebird";
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const actor = await resolveActor(request);
     requireRole(actor, ["ADMIN"]);
     const connection = await prisma.connection.findUniqueOrThrow({ where: { id: (await params).id } });
+    // Firebird nao tem schema; listSchemasFirebird devolve um unico "public" fixo (sem materializar nada).
+    if (connection.provider === "firebird-ftp") return ok(await listSchemasFirebird());
     return ok(connection.provider === "mssql" ? await listSchemasMssql(connection) : await listSchemas(connection));
   } catch (e) {
     return handleApiError(e);

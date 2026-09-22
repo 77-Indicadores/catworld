@@ -4,6 +4,7 @@ import { prisma } from "@/server/db";
 import { resolveActor, requireRole } from "@/server/auth/actor";
 import { encryptSecret } from "@/server/security/crypto";
 import { handleApiError, ok } from "@/server/http";
+import { parseFirebirdFtpConfig } from "@/server/connections/sources";
 
 const visible = {
   id: true,
@@ -93,8 +94,44 @@ export async function POST(request: NextRequest) {
       username: z.string().min(1),
       password: z.string().min(1),
     }).merge(sshTunnelSchema);
+    // firebird-ftp: "server"/"port"/"username"/"password" sao do FTP (nao do Firebird — o Firebird e sempre o
+    // efemero nosso, materializado a partir do backup baixado). remotePath/filePattern dizem onde achar o ZIP;
+    // innerFilePattern/charset descrevem o backup dentro do ZIP. Sem tunel SSH aqui: ftp-watch.ts nao suporta.
+    const firebirdFtpSchema = z.object({
+      provider: z.literal("firebird-ftp"),
+      name: z.string().min(2),
+      environment: z.enum(["Produção", "Homologação", "Desenvolvimento"]),
+      server: z.string().min(1, "host do FTP obrigatorio"),
+      port: z.coerce.number().int().min(1).max(65535).default(21),
+      username: z.string().min(1, "usuario do FTP obrigatorio"),
+      password: z.string().min(1, "senha do FTP obrigatoria"),
+      remotePath: z.string().min(1, "caminho remoto obrigatorio"),
+      filePattern: z.string().min(1, "padrao do arquivo obrigatorio (ex.: *.zip)"),
+      innerFilePattern: z.string().min(1).optional(),
+      charset: z.string().min(1).optional(),
+    });
     const raw = await request.json();
     const providerRaw = (raw as Record<string, unknown>)?.provider ?? "postgres";
+    if (providerRaw === "firebird-ftp") {
+      const input = firebirdFtpSchema.parse(raw);
+      const { password, remotePath, filePattern, innerFilePattern, charset, ...data } = input;
+      const metadataJson = JSON.stringify(
+        parseFirebirdFtpConfig(JSON.stringify({
+          ftp: { host: input.server, port: input.port, remotePath, filePattern },
+          firebird: (innerFilePattern || charset) ? { innerFilePattern, charset } : undefined,
+        })),
+      );
+      return ok(await prisma.connection.create({
+        data: {
+          ...data,
+          databaseName: remotePath, // Connection.databaseName exige valor; sem "banco" real antes de materializar, usa o caminho remoto como rotulo
+          sslMode: "disable", // FTP puro; nao se aplica TLS de banco aqui
+          encryptedCredentials: encryptSecret(JSON.stringify({ password })),
+          metadataJson,
+        },
+        select: visible,
+      }), undefined, 201);
+    }
     if (providerRaw === "mssql") {
       const input = mssqlSchema.parse(raw);
       const { password, encrypt, trustServerCert, sshTunnelEnabled, sshHost, sshPort, sshUsername, sshAuthMethod, sshPassword, sshPrivateKey, sshPassphrase, ...data } = input;

@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 import { Cron } from "croner";
+import { z } from "zod";
 import { prisma } from "@/server/db";
 import { withAdvisoryLock } from "@/server/db/advisory-lock";
 import { sqlPool, ensureSchema } from "@/server/azure/sql";
@@ -9,8 +10,13 @@ import { ApiError } from "@/server/http";
 import { KEYS_CHECK_MAX_RATIO, keysCheckExceeds } from "@/server/storage/delete-detection";
 import { evaluateLoad, getIntegritySettings, IntegrityError, type Evaluation } from "@/server/integrity/policy";
 import { auditIntegrity, evaluationDetail, recordLedger } from "@/server/integrity/ledger";
-import { queryColumns, quotedPgTable, sourceClockPg, streamPostgresRows, tableColumns, type SourceColumn } from "./postgres";
-import { queryColumnsMssql, quotedMssqlTable, sourceClockMssql, streamMssqlRows, tableColumnsMssql } from "./mssql";
+import { queryColumns, quotedPgTable, sourceClockPg, streamPostgresRows, tableColumns, type PgConnection, type SourceColumn } from "./postgres";
+import { queryColumnsMssql, quotedMssqlTable, sourceClockMssql, streamMssqlRows, tableColumnsMssql, type MssqlConnection } from "./mssql";
+import {
+  queryColumnsFirebird, quotedFirebirdTable, sourceClockFirebird, streamFirebirdRows, tableColumnsFirebird,
+  type FirebirdEndpoint,
+} from "./firebird";
+import { ensureMaterialized, ftpCredsFromConnection, renewMaterialization, type FirebirdFtpConfig } from "./firebird-materialize";
 import { compareWithCatalog, convertSourceValue, type ResolvedColumn } from "./source-values";
 import { clearSourceOptions, effectiveIntegrity, getSourceOptions, setRunMarker, setSourceOptions, takeRunMarker, type RunMarker, type SourceOptions } from "./source-options";
 import { makeRowConverter } from "./source-row-convert";
@@ -19,6 +25,115 @@ import {
   LEASE_HEARTBEAT_MS, defaultReconciliationCron, deletionCoverageWarning, extractKeysWarning, getSourceSettings, isSkipWarning,
   isLeaseMarker, jitteredReconciliationCron, leaseMarker, previousKeysSkips, resolveColumn, withSkipCount,
 } from "./source-guards";
+
+/** Providers de origem suportados por fonte de dataset (ver createDatasetSource). */
+export const SUPPORTED_SOURCE_PROVIDERS = ["postgres", "mssql", "firebird-ftp"] as const;
+
+/**
+ * Formato de `Connection.metadataJson` para `provider === "firebird-ftp"` (docs/firebird-ftp-provider.md secao 2.1):
+ * onde no FTP achar o backup e como abrir o `.fdb` restaurado. `Connection.username`/`encryptedCredentials` seguem
+ * guardando usuario/senha do FTP (nunca do Firebird — o Firebird e sempre o efêmero nosso, sysdba).
+ * Validado aqui (e não só lá no fundo do materializador) para uma conexão mal configurada falhar com 400 claro na
+ * hora de criar/testar, não minutos depois no meio de um `gbak`.
+ */
+const firebirdFtpConfigSchema = z.object({
+  ftp: z.object({
+    host: z.string().min(1, "ftp.host obrigatorio"),
+    port: z.number().int().min(1).max(65535).optional(),
+    remotePath: z.string().min(1, "ftp.remotePath obrigatorio"),
+    filePattern: z.string().min(1, "ftp.filePattern obrigatorio"),
+  }),
+  firebird: z.object({
+    innerFilePattern: z.string().min(1).optional(),
+    charset: z.string().min(1).optional(),
+  }).optional(),
+});
+
+/** Faz o parse+validacao de `Connection.metadataJson` como `FirebirdFtpConfig`; 400 claro em vez de crash no materializador. */
+export function parseFirebirdFtpConfig(metadataJson: string | null | undefined): FirebirdFtpConfig {
+  if (!metadataJson?.trim()) {
+    throw new ApiError(400, "FIREBIRD_CONFIG_MISSING", "Conexao firebird-ftp exige metadataJson com { ftp: { host, remotePath, filePattern }, firebird?: { innerFilePattern?, charset? } }");
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(metadataJson);
+  } catch {
+    throw new ApiError(400, "FIREBIRD_CONFIG_INVALID", "metadataJson da conexao firebird-ftp nao e um JSON valido");
+  }
+  const parsed = firebirdFtpConfigSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new ApiError(400, "FIREBIRD_CONFIG_INVALID", `metadataJson da conexao firebird-ftp invalido: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
+  }
+  return parsed.data;
+}
+
+/** `Connection` (linha do Prisma) enxuta o bastante para materializar/ler firebird-ftp — mesma forma usada pelos outros providers. */
+type FirebirdCapableConnection = { id: string; provider: string; server: string; port: number | null; username: string; encryptedCredentials: string; metadataJson: string | null };
+
+/**
+ * Garante uma materializacao pronta para `connection` (firebird-ftp) e devolve o endpoint Firebird para ler dela.
+ * Pode DEMORAR (download + gbak, minutos) ou FALHAR (FTP fora do ar, disco cheio, backup corrompido) — nao e o mesmo
+ * tipo de operacao "instantanea" que decrypt+connect e para Postgres/MSSQL. Chame no MAXIMO uma vez por
+ * `refreshDatasetSource`/requisicao (nunca por tabela/call site) e reuse o endpoint devolvido.
+ */
+export async function firebirdEndpointFor(connection: FirebirdCapableConnection): Promise<FirebirdEndpoint> {
+  if (connection.provider !== "firebird-ftp") throw new Error("firebirdEndpointFor chamado para uma conexao que nao e firebird-ftp");
+  const config = parseFirebirdFtpConfig(connection.metadataJson);
+  const creds = ftpCredsFromConnection(connection);
+  const { endpoint } = await ensureMaterialized(connection.id, creds, config);
+  return endpoint;
+}
+
+/**
+ * Ponto único de despacho por provider para as operações de leitura de fonte (mesma ideia do `isMssql ? x : y` de
+ * antes, mas cobrindo os 3 providers e permitindo trocar so o endpoint do Firebird uma vez por rodada — ver
+ * `firebirdEndpointFor`). `connection` e sempre a linha completa (Postgres/MSSQL leem credenciais dela direto);
+ * para firebird-ftp, `firebirdEndpoint` já vem pronto (materializado uma vez pelo chamador).
+ */
+type ProviderCtx =
+  | { kind: "postgres"; connection: PgConnection }
+  | { kind: "mssql"; connection: MssqlConnection }
+  | { kind: "firebird"; endpoint: FirebirdEndpoint };
+
+function providerCtxFor(connection: (PgConnection & MssqlConnection) & { provider: string }, firebirdEndpoint?: FirebirdEndpoint): ProviderCtx {
+  if (connection.provider === "mssql") return { kind: "mssql", connection };
+  if (connection.provider === "firebird-ftp") {
+    if (!firebirdEndpoint) throw new Error("providerCtxFor firebird-ftp exige firebirdEndpoint (chame firebirdEndpointFor antes)");
+    return { kind: "firebird", endpoint: firebirdEndpoint };
+  }
+  return { kind: "postgres", connection };
+}
+
+async function ctxTableColumns(ctx: ProviderCtx, schema: string, table: string): Promise<SourceColumn[]> {
+  if (ctx.kind === "mssql") return tableColumnsMssql(ctx.connection, schema, table);
+  if (ctx.kind === "firebird") return tableColumnsFirebird(ctx.endpoint, schema, table);
+  return tableColumns(ctx.connection, schema, table);
+}
+
+async function ctxQueryColumns(ctx: ProviderCtx, sql: string): Promise<SourceColumn[]> {
+  if (ctx.kind === "mssql") return queryColumnsMssql(ctx.connection, sql);
+  if (ctx.kind === "firebird") return queryColumnsFirebird(ctx.endpoint, sql);
+  return queryColumns(ctx.connection, sql);
+}
+
+/** Firebird nao tem schema (namespace unico por banco) — o parametro e ignorado nesse caso. */
+function ctxQuotedTable(ctx: ProviderCtx, schema: string, table: string): string {
+  if (ctx.kind === "mssql") return quotedMssqlTable(schema, table);
+  if (ctx.kind === "firebird") return quotedFirebirdTable(table);
+  return quotedPgTable(schema, table);
+}
+
+async function ctxSourceClock(ctx: ProviderCtx): Promise<Date> {
+  if (ctx.kind === "mssql") return sourceClockMssql(ctx.connection);
+  if (ctx.kind === "firebird") return sourceClockFirebird(ctx.endpoint);
+  return sourceClockPg(ctx.connection);
+}
+
+function ctxStreamRows(ctx: ProviderCtx, query: string, batchSize: number): AsyncGenerator<Record<string, unknown>[]> {
+  if (ctx.kind === "mssql") return streamMssqlRows(ctx.connection, query, batchSize);
+  if (ctx.kind === "firebird") return streamFirebirdRows(ctx.endpoint, query, batchSize);
+  return streamPostgresRows(ctx.connection, query, batchSize);
+}
 
 /** Cron invalido virava "sem agendamento" em silêncio (a fonte nunca atualizava); agora e 400. Vazio/null = sem agendamento. */
 export function assertValidCron(expr: string | null | undefined, field = "refreshCron"): void {
@@ -277,7 +392,14 @@ export async function createDatasetSource(input: {
   ]);
   if (!dataset) throw new ApiError(404, "DATASET_NOT_FOUND", "Dataset nao encontrado");
   if (!connection || !connection.active) throw new ApiError(404, "CONNECTION_NOT_FOUND", "Conexao nao encontrada");
-  if (!["postgres", "mssql"].includes(connection.provider)) throw new ApiError(400, "UNSUPPORTED_PROVIDER", `Provider ${connection.provider} nao suportado`);
+  if (!SUPPORTED_SOURCE_PROVIDERS.includes(connection.provider as (typeof SUPPORTED_SOURCE_PROVIDERS)[number])) {
+    throw new ApiError(400, "UNSUPPORTED_PROVIDER", `Provider ${connection.provider} nao suportado`);
+  }
+  // Materializar (download+gbak, minutos) numa consulta ad-hoc de toda leitura seria uma UX ruim e nao ha renovacao
+  // de TTL para uma leitura unica — ver live.ts (assertLiveSupported) para a mesma regra no lado de leitura.
+  if (connection.provider === "firebird-ftp" && input.mode === "live") {
+    throw new ApiError(400, "LIVE_NOT_SUPPORTED_FOR_PROVIDER", "Fontes live nao sao suportadas para conexoes firebird-ftp; use uma fonte extract agendada");
+  }
   if (input.sourceKind === "table" && (!input.sourceSchema || !input.sourceTable)) throw new ApiError(400, "INVALID_SOURCE", "Tabela exige schema e nome");
   if (input.sourceKind === "query" && !input.sourceSql?.trim()) throw new ApiError(400, "INVALID_SOURCE", "Consulta obrigatoria");
   // Sem a consulta de reconciliacao, fullSnapshot rodaria sobre a query janelada
@@ -286,9 +408,13 @@ export async function createDatasetSource(input: {
     throw new ApiError(400, "RECONCILIATION_SQL_REQUIRED", "Fontes por consulta exigem uma consulta de reconciliacao (sem filtro de data) para habilitar o cron de reconciliacao");
   }
 
+  // firebird-ftp valida o metadataJson (400 claro) ANTES de gastar minutos tentando materializar.
+  if (connection.provider === "firebird-ftp") parseFirebirdFtpConfig(connection.metadataJson);
+  const firebirdEndpoint = connection.provider === "firebird-ftp" ? await firebirdEndpointFor(connection) : undefined;
+  const ctx = providerCtxFor(connection, firebirdEndpoint);
   const columns = input.sourceKind === "table"
-    ? (connection.provider === "mssql" ? await tableColumnsMssql(connection, input.sourceSchema!, input.sourceTable!) : await tableColumns(connection, input.sourceSchema!, input.sourceTable!))
-    : (connection.provider === "mssql" ? await queryColumnsMssql(connection, input.sourceSql!) : await queryColumns(connection, input.sourceSql!));
+    ? await ctxTableColumns(ctx, input.sourceSchema!, input.sourceTable!)
+    : await ctxQueryColumns(ctx, input.sourceSql!);
   if (!columns.length) throw new ApiError(400, "EMPTY_SOURCE", "Fonte nao retornou colunas");
   assertDeleteDetection(input);
   const detect = input.mode === "extract" && !!input.detectDeletions;
@@ -426,14 +552,23 @@ export async function refreshDatasetSource(datasetSourceId: string, opts?: { rec
   }
 
   const isMssql = source.connection.provider === "mssql";
+  const isFirebird = source.connection.provider === "firebird-ftp";
   const settings = await getSourceSettings();
+
+  // firebird-ftp: materializa (ou reusa, se ainda dentro do TTL) UMA vez por rodada desta fonte — nunca por
+  // chamada dentro desta função. Pode demorar (download+gbak, minutos) ou falhar (FTP fora do ar, disco cheio).
+  // `ctx` carrega esse endpoint pronto para toda leitura abaixo (colunas, relogio, streaming, chaves).
+  const firebirdEndpoint = isFirebird ? await firebirdEndpointFor(source.connection) : undefined;
+  const ctx = providerCtxFor(source.connection, firebirdEndpoint);
+  const dialect: "postgres" | "mssql" | "firebird" = isMssql ? "mssql" : isFirebird ? "firebird" : "postgres";
 
   // Reconciliacao em fonte por consulta usa o SQL sem filtro de data (sourceSqlReconciliation),
   // nunca o sourceSql janelado normal — ja validado acima que existe quando reconciliation=true.
   const effectiveSourceSql = reconciliation && source.sourceKind === "query" ? source.sourceSqlReconciliation! : source.sourceSql!;
   const baseTableQuery = source.sourceKind === "table"
-    ? `SELECT * FROM ${isMssql ? quotedMssqlTable(source.sourceSchema!, source.sourceTable!) : quotedPgTable(source.sourceSchema!, source.sourceTable!)}`
+    ? `SELECT * FROM ${ctxQuotedTable(ctx, source.sourceSchema!, source.sourceTable!)}`
     : effectiveSourceSql;
+  // Firebird usa aspas duplas como o Postgres (identificador delimitado ANSI); só MSSQL usa colchetes.
   const quoteCol = (col: string) => isMssql ? `[${col.replace(/]/g, "]]")}]` : `"${col.replace(/"/g, '""')}"`;
 
   const storageConn = await getStorageConnection(source.dataset.storageServerId);
@@ -479,6 +614,9 @@ export async function refreshDatasetSource(datasetSourceId: string, opts?: { rec
       data: { lastStatus: "running", updatedAt: new Date() },
     }).then(r => { heartbeatFailures = 0; if (r.count === 0) leaseLost = true; })
       .catch(() => { if (++heartbeatFailures >= maxHeartbeatFailures) leaseLost = true; });
+    // Mesmo heartbeat que renova a trava da fonte renova o TTL do .fdb materializado: sem isso, uma
+    // extracao longa poderia ter o Firebird apagado por baixo pela limpeza periodica (purgeExpiredMaterializations).
+    if (isFirebird) renewMaterialization(source.connectionId).catch(() => undefined);
   }, LEASE_HEARTBEAT_MS);
   heartbeat.unref?.();
   const assertLease = () => {
@@ -493,8 +631,8 @@ export async function refreshDatasetSource(datasetSourceId: string, opts?: { rec
     if (opts?.acceptDrop) marker.acceptDrop = true;
     // ── Estrutura da origem x catalogo (FON-11/15) e resolucao de colunas (FON-14) ──────────────────────────────────────
     const rawColumns: SourceColumn[] = source.sourceKind === "table"
-      ? (isMssql ? await tableColumnsMssql(source.connection, source.sourceSchema!, source.sourceTable!) : await tableColumns(source.connection, source.sourceSchema!, source.sourceTable!))
-      : (isMssql ? await queryColumnsMssql(source.connection, effectiveSourceSql) : await queryColumns(source.connection, effectiveSourceSql));
+      ? await ctxTableColumns(ctx, source.sourceSchema!, source.sourceTable!)
+      : await ctxQueryColumns(ctx, effectiveSourceSql);
     const catalog = (source.targetTable.columns as { sqlName: string; sqlType: string }[] | undefined)?.map(c => ({ sqlName: c.sqlName, sqlType: c.sqlType }));
     const cmp = compareWithCatalog(rawColumns as ResolvedColumn[], catalog);
     const columns = cmp.columns as SourceColumn[];
@@ -520,7 +658,7 @@ export async function refreshDatasetSource(datasetSourceId: string, opts?: { rec
     let cap: string | null = null;
     if (trackDelta && kind === "temporal") {
       let now: Date;
-      try { now = await (isMssql ? sourceClockMssql(source.connection) : sourceClockPg(source.connection)); } catch { now = new Date(); }
+      try { now = await ctxSourceClock(ctx); } catch { now = new Date(); }
       cap = deltaCap(now, settings.futureToleranceHours);
     }
 
@@ -550,7 +688,7 @@ export async function refreshDatasetSource(datasetSourceId: string, opts?: { rec
     // Numa rodada de reconciliacao, o delta e ignorado de proposito: le a tabela inteira (sem WHERE) para detectar exclusoes.
     const useDelta = trackDelta && !reconciliation && wm != null && !poisoned && !schemaChange;
     const query = useDelta
-      ? `${baseTableQuery} WHERE ${buildDeltaPredicate({ kind, quotedColumn: quoteCol(deltaCol!.originalName), watermark: wm!, dialect: isMssql ? "mssql" : "postgres", lookbackMinutes: settings.lookbackMinutes })}`
+      ? `${baseTableQuery} WHERE ${buildDeltaPredicate({ kind, quotedColumn: quoteCol(deltaCol!.originalName), watermark: wm!, dialect, lookbackMinutes: settings.lookbackMinutes })}`
       : baseTableQuery;
 
     await storageConn.dropTableIfExists(schema, stage);
@@ -560,7 +698,7 @@ export async function refreshDatasetSource(datasetSourceId: string, opts?: { rec
     const deltaIdx = trackDelta ? columns.findIndex(c => c.sqlName === deltaCol!.sqlName) : -1;
     const STREAM_BATCH = 1000;
     const rowConverter = makeRowConverter(columns, options);
-    for await (const rows of (isMssql ? streamMssqlRows(source.connection, query, STREAM_BATCH) : streamPostgresRows(source.connection, query, STREAM_BATCH))) {
+    for await (const rows of ctxStreamRows(ctx, query, STREAM_BATCH)) {
       assertLease();
       const bulkRows = rows.map(row => rowConverter.convertRow(row));
       if (deltaIdx >= 0) for (const r of bulkRows) { const v = r[deltaIdx]; tracker.push(v == null ? null : normalizeWatermark(v, kind)); }
@@ -624,7 +762,7 @@ export async function refreshDatasetSource(datasetSourceId: string, opts?: { rec
         // marcacao, aplica o delta e deixa o aviso visivel em lastError.
         let read: Awaited<ReturnType<typeof readSourceKeys>> | null = null;
         try {
-          read = await readSourceKeys({ source, keyCol: keyCol!, storageConn, schema, keysTable, isMssql, quoteCol });
+          read = await readSourceKeys({ source, keyCol: keyCol!, storageConn, schema, keysTable, ctx, quoteCol });
         } catch (e) {
           keysWarning = `KEYS_READ_FAILED: deteccao de exclusoes ignorada: ${e instanceof ApiError ? `${e.code} - ` : ""}${e instanceof Error ? e.message : String(e)} (nenhuma linha foi marcada como excluida; as linhas alteradas foram aplicadas)`;
         }
@@ -768,13 +906,13 @@ async function livePrevRows(storageConn: StorageConnection, schema: string, tabl
  * auxiliar e removida pelo chamador (finally).
  */
 async function readSourceKeys(o: {
-  source: { sourceKind: string; sourceSchema: string | null; sourceTable: string | null; keysSql: string | null; connection: Parameters<typeof streamPostgresRows>[0] };
-  keyCol: SourceColumn; storageConn: StorageConnection; schema: string; keysTable: string; isMssql: boolean; quoteCol: (c: string) => string;
+  source: { sourceKind: string; sourceSchema: string | null; sourceTable: string | null; keysSql: string | null };
+  keyCol: SourceColumn; storageConn: StorageConnection; schema: string; keysTable: string; ctx: ProviderCtx; quoteCol: (c: string) => string;
 }): Promise<{ keys: bigint }> {
-  const { source, keyCol, storageConn, schema, keysTable, isMssql, quoteCol } = o;
+  const { source, keyCol, storageConn, schema, keysTable, ctx, quoteCol } = o;
   let keysQuery: string;
   if (source.sourceKind === "table") {
-    keysQuery = `SELECT ${quoteCol(keyCol.originalName)} FROM ${isMssql ? quotedMssqlTable(source.sourceSchema!, source.sourceTable!) : quotedPgTable(source.sourceSchema!, source.sourceTable!)}`;
+    keysQuery = `SELECT ${quoteCol(keyCol.originalName)} FROM ${ctxQuotedTable(ctx, source.sourceSchema!, source.sourceTable!)}`;
   } else {
     if (!source.keysSql?.trim()) throw new ApiError(400, "KEYS_SQL_REQUIRED", "Fonte sem consulta de chaves configurada");
     keysQuery = source.keysSql;
@@ -784,7 +922,7 @@ async function readSourceKeys(o: {
   await storageConn.dropTableIfExists(schema, keysTable);
   await storageConn.createTable(schema, keysTable, keyDef);
   let keys = 0n;
-  for await (const rows of (isMssql ? streamMssqlRows(source.connection, keysQuery, 5000) : streamPostgresRows(source.connection, keysQuery, 5000))) {
+  for await (const rows of ctxStreamRows(ctx, keysQuery, 5000)) {
     const batch: (string | null)[][] = [];
     for (const row of rows) {
       const values = Object.values(row);
