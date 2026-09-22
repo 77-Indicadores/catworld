@@ -11,6 +11,16 @@ const schema = z.object({
   AUTH_SECRET: z.string().min(32),
   CATWORLD_UPLOAD_DIR: z.string().default("./var/uploads"),
   CATWORLD_PUBLIC_ORIGIN: z.string().url().optional(),
+  /** Provider firebird-ftp (docs/firebird-ftp-provider.md): servidor Firebird único da imagem, um .fdb por
+   *  conexão materializada. Segredo de infra (senha do SYSDBA que NÓS definimos ao provisionar a imagem, não
+   *  a do cliente) — por isso vive aqui e não em Configurações > Worker. Opcional: só é exigido na hora de
+   *  materializar uma conexão firebird-ftp, não em toda instalação do Catworld. */
+  CATWORLD_FIREBIRD_HOST: z.string().default("127.0.0.1"),
+  CATWORLD_FIREBIRD_PORT: z.coerce.number().int().positive().default(3050),
+  CATWORLD_FIREBIRD_SYSDBA_PASSWORD: z.string().optional(),
+  CATWORLD_FIREBIRD_WORKDIR: z.string().default("/var/lib/catworld/firebird-restore"),
+  /** Teto de espaço do CATWORLD_FIREBIRD_WORKDIR antes de recusar uma nova materialização (docs secao 2.6). */
+  CATWORLD_FIREBIRD_MAX_DISK_BYTES: z.coerce.number().int().positive().default(20 * 1024 * 1024 * 1024),
 });
 
 /** Envs de worker que existiam antes dos perfis: agora são IGNORADAS (só avisamos, uma vez, para a migração). */
