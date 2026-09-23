@@ -59,10 +59,14 @@ describe("normalizeTypeOverride (validação da API)", () => {
 });
 
 describe("override honrado na conversão", () => {
-  it("DECIMAL(10,2) recusa 3 casas e valor grande demais (não arredonda, não vira NULL)", () => {
+  it("DECIMAL(10,2): mapeamento antigo arredonda 3 casas, mas estouro de dígitos inteiros ainda lança", () => {
     const c = { sqlType: "DECIMAL(10,2)", decimalSep: "." as const };
     expect(convertForPg("12.34", c)).toBe("12.34");
+    expect(convertForPg("12.345", c)).toBe("12.35"); // mapeamento antigo: arredonda, não lança (compatibilidade)
+    expect(() => convertForPg("123456789.00", c)).toThrow(ValueConversionError); // estouro de dígitos inteiros: nunca arredonda isso
+  });
+  it("DECIMAL(10,2) com decimalDigits do arquivo (mapeamento novo): continua exato, lança em vez de arredondar", () => {
+    const c = { sqlType: "DECIMAL(10,2)", decimalSep: "." as const, decimalDigits: 3 };
     expect(() => convertForPg("12.345", c)).toThrow(ValueConversionError);
-    expect(() => convertForPg("123456789.00", c)).toThrow(ValueConversionError);
   });
 });

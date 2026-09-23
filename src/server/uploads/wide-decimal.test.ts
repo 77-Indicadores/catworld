@@ -24,10 +24,11 @@ describe("DECIMAL largo no TDS", () => {
     expect(convertForTds("-99999999999999.9999", { sqlType: "DECIMAL(18,4)", decimalSep: ".", decimalDigits: 18 })).toBe("-99999999999999.9999");
     expect(convertForTds("1234.5678", { sqlType: "DECIMAL(18,4)", decimalSep: ".", decimalDigits: 8 })).toBe(1234.5678);
   });
-  it("mapeamento antigo (sem decimalDigits) com valor de 18 digitos: texto exato (antes lancava); o que nao cabe no tipo ainda lanca", () => {
+  it("mapeamento antigo (sem decimalDigits) com valor de 18 digitos: texto exato (antes lancava); escala além do tipo arredonda, não lança", () => {
     expect(convertForTds("12345678901234.5678", { sqlType: "DECIMAL(18,4)", decimalSep: "." })).toBe("12345678901234.5678");
     expect(convertForTds("1234567890123456789012.5", { sqlType: "DECIMAL(38,10)", decimalSep: "." })).toBe("1234567890123456789012.5");
-    expect(() => convertForTds("1.23456", { sqlType: "DECIMAL(18,4)", decimalSep: "." })).toThrow(ValueConversionError);
+    // mapeamento antigo: escala além do tipo arredonda (compatibilidade), nunca lança.
+    expect(convertForTds("1.23456", { sqlType: "DECIMAL(18,4)", decimalSep: "." })).toBe("1.2346");
   });
   it("valor que não cabe no tipo declarado lança mesmo sendo largo", () => {
     expect(() => convertForTds("1.23456", { sqlType: "DECIMAL(18,4)", decimalSep: ".", decimalDigits: 18 })).toThrow(ValueConversionError);

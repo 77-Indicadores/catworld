@@ -6,7 +6,7 @@
  *  - decimais nunca passam por Number/parseFloat no caminho Postgres: string canônica validada por `decimalFits`;
  *  - vazio (só espaços) continua virando NULL (regra existente de chaves/importação, ver relatório).
  */
-import { parseDecimalType, decimalFits, DECIMAL_LEGACY, type DecimalSpec } from "@/lib/decimal-type";
+import { parseDecimalType, decimalFits, legacyRoundDecimal, DECIMAL_LEGACY, type DecimalSpec } from "@/lib/decimal-type";
 import { canonicalDecimal, type DecSep } from "./decimal-format";
 import { normalizeDateLike, type DateOrder } from "./date-normalize";
 
@@ -27,7 +27,17 @@ function decimalOrThrow(s: string, col: ConvertColumn): { canon: string; spec: D
   const spec = parseDecimalType(col.sqlType) ?? DECIMAL_LEGACY;
   const canon = canonicalDecimal(s, col.decimalSep);
   if (canon === null) throw new ValueConversionError(col, s, "não é um número decimal válido");
-  if (!decimalFits(canon, spec)) throw new ValueConversionError(col, s, `excede a precisão/escala DECIMAL(${spec.precision},${spec.scale}) (seria arredondado ou truncado)`);
+  if (!decimalFits(canon, spec)) {
+    // Mapeamento ANTIGO (sem decimalDigits do arquivo inteiro, ex.: coluna existente antes desta fidelidade
+    // exata) arredonda em vez de recusar — é o que sempre aconteceu, e recusar quebrou cargas que rodavam há
+    // anos (incidente em produção, 2026-09-22). Mapeamento NOVO (decimalDigits setado) continua exato: se não
+    // coube é porque a coluna deveria ter sido alargada, e arredondar esconderia esse defeito.
+    if (col.decimalDigits == null) {
+      const rounded = legacyRoundDecimal(canon, spec);
+      if (rounded !== null) return { canon: rounded, spec };
+    }
+    throw new ValueConversionError(col, s, `excede a precisão/escala DECIMAL(${spec.precision},${spec.scale}) (seria arredondado ou truncado)`);
+  }
   return { canon, spec };
 }
 
@@ -105,7 +115,10 @@ export function convertForTds(v: unknown, col: ConvertColumn | string): unknown 
     const [datePart, rest = ""] = d.split(/[T ]/);
     const [timeRaw = "", frac = ""] = rest.split(".");
     const time = timeRaw || "00:00:00";
-    if (/[1-9]/.test(frac.slice(3))) throw new ValueConversionError(c, s, "fração de segundo além de milissegundos (o driver TDS só grava até ms)");
+    // Trunca fração além de milissegundo em vez de recusar o valor: o driver TDS carrega DATETIME2 como Date
+    // do JS (precisão de ms), então microssegundos nunca sobreviveriam de qualquer forma. Recusar o arquivo
+    // inteiro por isso quebrou cargas que sempre funcionaram (incidente em produção, 2026-09-22: CSVs exportados
+    // de origem Postgres trazem timestamptz com 6 casas por padrão) — a truncação já é o que sempre aconteceu.
     const [hh, mm, ss = "00"] = time.split(":");
     const ms = frac.slice(0, 3).padEnd(3, "0");
     const date = new Date(`${datePart}T${hh}:${mm}:${ss}.${ms}Z`);
@@ -115,7 +128,7 @@ export function convertForTds(v: unknown, col: ConvertColumn | string): unknown 
   if (sqlType === "TIME") {
     // mssql sql.Time exige Date; construído em UTC porque o driver lê os campos UTC (useUTC=true)
     const t = timeOrThrow(s, c);
-    if (/[1-9]/.test(t.frac.slice(3))) throw new ValueConversionError(c, s, "fração de segundo além de milissegundos");
+    // Trunca em vez de recusar — ver nota equivalente em DATE/DATETIME2 acima.
     return new Date(Date.UTC(1970, 0, 1, t.h, t.m, t.s, Number(t.frac.slice(0, 3).padEnd(3, "0"))));
   }
   const t = s.replace(/\x00/g, ""); // NUL corrompe o stream BCP (erro 4815)

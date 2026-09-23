@@ -59,3 +59,32 @@ export function decimalFits(value: string, spec: DecimalSpec): boolean {
   const f = (m[2] ?? "").replace(/0+$/, "").length;
   return f <= spec.scale && i <= spec.precision - spec.scale;
 }
+
+/**
+ * Arredonda (meio para cima, em texto — nunca passa por Number) um valor com mais casas decimais que `spec.scale`
+ * para caber em `spec`. `null` se nem arredondando cabe (dígitos inteiros a mais: isso é estouro de verdade, não
+ * arredondamento). Uso: SOMENTE colunas de mapeamento antigo (já existiam com um DECIMAL(p,s) fixo antes da coluna
+ * ganhar `decimalDigits` do arquivo inteiro) — é o comportamento que sempre existiu e automações de anos dependem
+ * dele (incidente em produção, 2026-09-22: falhar em vez de arredondar quebrou cargas que sempre funcionaram).
+ * Colunas novas (com `decimalDigits`) continuam alargando o tipo em vez de arredondar — ver `isWideDecimal`.
+ */
+export function legacyRoundDecimal(value: string, spec: DecimalSpec): string | null {
+  const m = /^([-+]?)(\d*)(?:\.(\d*))?$/.exec(value.trim());
+  if (!m) return null;
+  const sign = m[1] === "-" ? "-" : "";
+  const intPart = (m[2] ?? "") || "0";
+  const frac = m[3] ?? "";
+  if (frac.length <= spec.scale) return decimalFits(value, spec) ? value.trim() : null;
+  const keep = frac.slice(0, spec.scale);
+  const roundUp = frac.charCodeAt(spec.scale) >= 53; // '5'
+  // Junta parte inteira + casas mantidas num único inteiro (BigInt, nunca float) e soma 1 se precisa arredondar
+  // — o próprio BigInt cuida do "vai um" propagando por todos os dígitos (99.99 -> 100.0 na escala 1, etc.).
+  const digits = BigInt(intPart + keep) + (roundUp ? 1n : 0n);
+  let digitsStr = digits.toString();
+  if (digitsStr.length <= spec.scale) digitsStr = digitsStr.padStart(spec.scale + 1, "0");
+  const newIntPart = digitsStr.slice(0, digitsStr.length - spec.scale) || "0";
+  const newFrac = spec.scale > 0 ? digitsStr.slice(digitsStr.length - spec.scale) : "";
+  if (newIntPart.length > spec.precision - spec.scale) return null; // arredondar transbordou os dígitos inteiros: estouro real, não é só arredondamento
+  const result = spec.scale > 0 ? `${sign}${newIntPart}.${newFrac}` : `${sign}${newIntPart}`;
+  return decimalFits(result, spec) ? result : null;
+}
