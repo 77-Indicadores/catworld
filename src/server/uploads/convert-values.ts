@@ -6,7 +6,7 @@
  *  - decimais nunca passam por Number/parseFloat no caminho Postgres: string canônica validada por `decimalFits`;
  *  - vazio (só espaços) continua virando NULL (regra existente de chaves/importação, ver relatório).
  */
-import { parseDecimalType, decimalFits, DECIMAL_LEGACY, type DecimalSpec } from "@/lib/decimal-type";
+import { parseDecimalType, decimalFits, legacyRoundDecimal, DECIMAL_LEGACY, type DecimalSpec } from "@/lib/decimal-type";
 import { canonicalDecimal, type DecSep } from "./decimal-format";
 import { normalizeDateLike, type DateOrder } from "./date-normalize";
 
@@ -27,7 +27,17 @@ function decimalOrThrow(s: string, col: ConvertColumn): { canon: string; spec: D
   const spec = parseDecimalType(col.sqlType) ?? DECIMAL_LEGACY;
   const canon = canonicalDecimal(s, col.decimalSep);
   if (canon === null) throw new ValueConversionError(col, s, "não é um número decimal válido");
-  if (!decimalFits(canon, spec)) throw new ValueConversionError(col, s, `excede a precisão/escala DECIMAL(${spec.precision},${spec.scale}) (seria arredondado ou truncado)`);
+  if (!decimalFits(canon, spec)) {
+    // Mapeamento ANTIGO (sem decimalDigits do arquivo inteiro, ex.: coluna existente antes desta fidelidade
+    // exata) arredonda em vez de recusar — é o que sempre aconteceu, e recusar quebrou cargas que rodavam há
+    // anos (incidente em produção, 2026-09-22). Mapeamento NOVO (decimalDigits setado) continua exato: se não
+    // coube é porque a coluna deveria ter sido alargada, e arredondar esconderia esse defeito.
+    if (col.decimalDigits == null) {
+      const rounded = legacyRoundDecimal(canon, spec);
+      if (rounded !== null) return { canon: rounded, spec };
+    }
+    throw new ValueConversionError(col, s, `excede a precisão/escala DECIMAL(${spec.precision},${spec.scale}) (seria arredondado ou truncado)`);
+  }
   return { canon, spec };
 }
 
