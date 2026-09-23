@@ -41,12 +41,28 @@ type StrictDecoder = { write(chunk: Buffer): string; end(): string };
 
 function strictDecoder(encoding: CsvEncoding): StrictDecoder {
   if (encoding === "win1252") {
-    const dec = iconv.getDecoder("win1252");
-    const check = (s: string) => {
-      if (s.includes("�")) throw new CsvFormatError("O arquivo tem byte inválido para Windows-1252 (não seria possível ler o valor sem trocá-lo por \"�\"). Reexporte o arquivo em UTF-8.");
-      return s;
+    // Windows-1252 e um byte = um caractere (sem estado entre chunks, sem sequencia multi-byte), entao dá para
+    // decodificar o chunk inteiro de uma vez e casar posicao a posicao com os bytes de entrada.
+    //
+    // 5 bytes (0x81, 0x8D, 0x8F, 0x90, 0x9D) nao tem carater definido em Windows-1252 de verdade e o iconv-lite
+    // devolve U+FFFD para eles. Antes isso era aceito (ERPs brasileiros antigos costumam emitir esses bytes —
+    // controle C1/Latin-1 cru, nao lixo) e continua sendo: em vez de falhar o arquivo inteiro, cai para o valor
+    // Latin-1 do byte (mesma convencao que o resto do ecossistema Node usa como "binary"/"latin1"), que nunca e
+    // ambiguo porque o mapeamento byte->caractere so muda para esses 5 valores especificos, nunca para o resto
+    // da tabela Windows-1252. Falhar essas cargas quebrou automacoes que rodavam havia anos — corrigido
+    // 2026-09-22 apos incidente em producao (import de dezenas de arquivos da VERATTO/POLIVIEW parou de funcionar).
+    const check = (chunkStr: string, raw: Buffer) => {
+      if (!chunkStr.includes("�")) return chunkStr;
+      let out = "";
+      for (let i = 0; i < chunkStr.length; i++) {
+        out += chunkStr[i] === "�" && i < raw.length ? String.fromCharCode(raw[i]!) : chunkStr[i];
+      }
+      return out;
     };
-    return { write: (c) => check(dec.write(c) ?? ""), end: () => check(dec.end() ?? "") };
+    return {
+      write: (c) => check(iconv.decode(c, "win1252"), c),
+      end: () => "",
+    };
   }
   const label = encoding === "utf8" ? "utf-8" : encoding === "utf16le" ? "utf-16le" : "utf-16be";
   // ignoreBOM=false: o BOM inicial é consumido

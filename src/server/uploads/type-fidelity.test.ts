@@ -217,8 +217,8 @@ describe("TIP-09: convertForTds (função pura; ponta a ponta exige SQL Server r
     expect((convertForTds("2023-01-15", { sqlType: "DATE" }) as Date).toISOString()).toBe("2023-01-15T00:00:00.000Z");
     expect((convertForTds("08:30:15.250", { sqlType: "TIME" }) as Date).toISOString()).toBe("1970-01-01T08:30:15.250Z");
   });
-  it("fração além de milissegundos lança (o driver não grava); zeros à direita passam", () => {
-    expect(() => convertForTds("2023-01-15 08:30:00.1234567", { sqlType: "DATETIME2" })).toThrow(ValueConversionError);
+  it("fração além de milissegundos trunca (nunca lança: o driver carrega DATETIME2 como Date do JS, sem essa precisão de qualquer forma — incidente em produção 2026-09-22, CSVs de origem Postgres trazem timestamptz com 6 casas por padrão)", () => {
+    expect((convertForTds("2023-01-15 08:30:00.1234567", { sqlType: "DATETIME2" }) as Date).toISOString()).toBe("2023-01-15T08:30:00.123Z");
     expect((convertForTds("2023-01-15 08:30:00.0000000", { sqlType: "DATETIME2" }) as Date).toISOString()).toBe("2023-01-15T08:30:00.000Z");
   });
   it("DECIMAL: número exato até 15 dígitos; acima disso lança (driver usa Number)", () => {

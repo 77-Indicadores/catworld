@@ -105,7 +105,10 @@ export function convertForTds(v: unknown, col: ConvertColumn | string): unknown 
     const [datePart, rest = ""] = d.split(/[T ]/);
     const [timeRaw = "", frac = ""] = rest.split(".");
     const time = timeRaw || "00:00:00";
-    if (/[1-9]/.test(frac.slice(3))) throw new ValueConversionError(c, s, "fração de segundo além de milissegundos (o driver TDS só grava até ms)");
+    // Trunca fração além de milissegundo em vez de recusar o valor: o driver TDS carrega DATETIME2 como Date
+    // do JS (precisão de ms), então microssegundos nunca sobreviveriam de qualquer forma. Recusar o arquivo
+    // inteiro por isso quebrou cargas que sempre funcionaram (incidente em produção, 2026-09-22: CSVs exportados
+    // de origem Postgres trazem timestamptz com 6 casas por padrão) — a truncação já é o que sempre aconteceu.
     const [hh, mm, ss = "00"] = time.split(":");
     const ms = frac.slice(0, 3).padEnd(3, "0");
     const date = new Date(`${datePart}T${hh}:${mm}:${ss}.${ms}Z`);
@@ -115,7 +118,7 @@ export function convertForTds(v: unknown, col: ConvertColumn | string): unknown 
   if (sqlType === "TIME") {
     // mssql sql.Time exige Date; construído em UTC porque o driver lê os campos UTC (useUTC=true)
     const t = timeOrThrow(s, c);
-    if (/[1-9]/.test(t.frac.slice(3))) throw new ValueConversionError(c, s, "fração de segundo além de milissegundos");
+    // Trunca em vez de recusar — ver nota equivalente em DATE/DATETIME2 acima.
     return new Date(Date.UTC(1970, 0, 1, t.h, t.m, t.s, Number(t.frac.slice(0, 3).padEnd(3, "0"))));
   }
   const t = s.replace(/\x00/g, ""); // NUL corrompe o stream BCP (erro 4815)
