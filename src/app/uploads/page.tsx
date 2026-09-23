@@ -12,6 +12,11 @@ import { visibleProjectIds } from "@/server/auth/permissions";
 export const dynamic = "force-dynamic";
 
 const ACTIVE = ["QUEUED", "RUNNING", "FAILED"] as const;
+// guardedQueue (actions.ts) marca o job anterior como FAILED com esse lastError sempre que uma nova tentativa é
+// enfileirada (retry) — é contabilidade interna, nunca a tentativa "atual": por construção sempre existe um job
+// mais novo por trás. Mostrar isso na fila fazia uploads que já progrediram (ou já concluíram) aparecerem como
+// erro precisando de atenção.
+const NOT_SUPERSEDED = { NOT: { status: "FAILED" as const, lastError: "Superseded by retry" } };
 
 const MODE_LABELS: Record<string, string> = {
   replace: "substituição",
@@ -36,7 +41,7 @@ export default async function UploadsPage() {
 
   const [previewJobs, importJobs, sourceJobs, completedCounts, cancelableCount] = await Promise.all([
     prisma.job.findMany({
-      where: { type: "PREVIEW_UPLOAD", status: { in: [...ACTIVE] } },
+      where: { type: "PREVIEW_UPLOAD", status: { in: [...ACTIVE] }, ...NOT_SUPERSEDED },
       orderBy: [{ weight: "asc" }, { createdAt: "asc" }],
       include: {
         upload: {
@@ -48,7 +53,7 @@ export default async function UploadsPage() {
       },
     }),
     prisma.job.findMany({
-      where: { type: "IMPORT_UPLOAD", status: { in: [...ACTIVE] } },
+      where: { type: "IMPORT_UPLOAD", status: { in: [...ACTIVE] }, ...NOT_SUPERSEDED },
       orderBy: [{ weight: "asc" }, { createdAt: "asc" }],
       include: {
         upload: {
