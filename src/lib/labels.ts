@@ -20,6 +20,8 @@ export const JOB_TYPE_LABEL: Record<string, { label: string; hint: string }> = {
   SOURCE_REFRESH: { label: "Atualização de fonte", hint: "Sincroniza dados de uma conexão externa (extract)" },
   DERIVED_REFRESH: { label: "Tabela derivada", hint: "Recalcula tabelas derivadas por SQL" },
   METADATA_CLEANUP: { label: "Limpeza diária", hint: "Apaga jobs, auditoria e uploads antigos conforme a retenção" },
+  MIGRATE_STORAGE_PROJECT: { label: "Migração de projeto (storage)", hint: "Copia os datasets de um projeto inteiro para outro servidor de armazenamento" },
+  MIGRATE_STORAGE_DATASET: { label: "Migração de dataset (storage)", hint: "Copia um dataset para outro servidor de armazenamento" },
 };
 
 export const COMMAND_ACTION_LABEL: Record<string, string> = {

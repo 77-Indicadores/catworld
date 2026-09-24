@@ -5,7 +5,7 @@
 import { z } from "zod";
 
 /** Tipos de job que um worker pode processar. Também validados no banco (CHECK) porque o `claim` os interpola no SQL. */
-export const KNOWN_JOB_TYPES = ["PREVIEW_UPLOAD", "IMPORT_UPLOAD", "SOURCE_REFRESH", "DERIVED_REFRESH", "METADATA_CLEANUP"] as const;
+export const KNOWN_JOB_TYPES = ["PREVIEW_UPLOAD", "IMPORT_UPLOAD", "SOURCE_REFRESH", "DERIVED_REFRESH", "METADATA_CLEANUP", "MIGRATE_STORAGE_PROJECT", "MIGRATE_STORAGE_DATASET"] as const;
 export type JobType = (typeof KNOWN_JOB_TYPES)[number];
 
 /**
@@ -21,6 +21,10 @@ export const JOB_WEIGHTS_BY_TYPE: Record<JobType, readonly number[]> = {
   SOURCE_REFRESH: [0, 2],
   DERIVED_REFRESH: [2],
   METADATA_CLEANUP: [0],
+  // Copia tabela por tabela entre StorageServers — mesma classe de custo (I/O + memória) de um
+  // DERIVED_REFRESH grande, então só a faixa pesada.
+  MIGRATE_STORAGE_PROJECT: [2],
+  MIGRATE_STORAGE_DATASET: [2],
 };
 
 export const PROFILE_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;

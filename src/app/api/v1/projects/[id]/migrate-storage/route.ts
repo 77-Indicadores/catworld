@@ -1,99 +1,20 @@
 /**
  * POST /api/v1/projects/[id]/migrate-storage
  *
- * Migra todos os datasets do projeto para um StorageServer de destino.
- * Suporta cross-provider (sqlserver ↔ postgres).
- * Não remove dados da origem.
+ * Enfileira a migracao de todos os datasets do projeto para um StorageServer de destino
+ * (MIGRATE_STORAGE_PROJECT, processado em background pelo worker — ver src/worker/index.ts
+ * e src/server/storage/migrate.ts). Suporta cross-provider (sqlserver <-> postgres).
+ * Nao remove dados da origem. So retorna o jobId; acompanhamento e via /api/v1/jobs/active.
  */
 import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/server/db";
 import { resolveActor, requireRole } from "@/server/auth/actor";
 import { handleApiError, ok, ApiError } from "@/server/http";
-import { getStorageConnection } from "@/server/storage/connection";
-import type { StorageConnection, ColDef } from "@/server/storage/connection";
-import { stableOrderBy } from "@/server/odata/stable-order";
+import { withAdvisoryLock } from "@/server/db/advisory-lock";
+import { findActiveMigrationConflict } from "@/server/storage/migrate";
 
 const bodySchema = z.object({ targetStorageServerId: z.string().uuid() });
-
-async function copySchema(
-  src: StorageConnection,
-  dst: StorageConnection,
-  schema: string,
-): Promise<{ table: string; rows: number }[]> {
-  // Cria schema no destino
-  await dst.createSchemaIfNotExists(schema);
-
-  const tables = await src.listTables(schema);
-  const results: { table: string; rows: number }[] = [];
-
-  for (const table of tables) {
-    const cols = await src.listColumns(schema, table);
-
-    // Colunas internas (ex: _cw_rh) mantidas como tipo texto
-    const colDefs: ColDef[] = cols.map(c => ({
-      name: c.name,
-      sqlType: c.sqlType,
-      nullable: true,
-    }));
-
-    // Recria tabela no destino
-    await dst.dropTableIfExists(schema, table);
-    await dst.createTable(schema, table, colDefs);
-
-    // Copia dados em batches via query raw na origem + bulkInsert no destino
-    const BATCH = 2000;
-    let offset = 0;
-    let totalRows = 0;
-    const srcQ = src.q(schema);
-    const srcT = src.q(table);
-    const colList = cols.map(c => src.q(c.name)).join(", ");
-
-    // OFFSET so e seguro com ordem total: ctid no Postgres; no SQL Server, todas as colunas ordenaveis.
-    const orderBy = src.provider === "sqlserver"
-      ? (stableOrderBy(cols.map(c => ({ name: c.name, sqlType: c.sqlType })), (n) => src.q(n)) ?? "(SELECT NULL)")
-      : "ctid";
-    // mssql usa OFFSET/FETCH, postgres usa LIMIT/OFFSET
-    const page = (off: number) => src.provider === "sqlserver"
-      ? `SELECT ${colList} FROM ${srcQ}.${srcT} ORDER BY ${orderBy} OFFSET ${off} ROWS FETCH NEXT ${BATCH} ROWS ONLY`
-      : `SELECT ${colList} FROM ${srcQ}.${srcT} ORDER BY ${orderBy} LIMIT ${BATCH} OFFSET ${off}`;
-
-    while (true) {
-      const rows = await src.query<Record<string, unknown>>(page(offset));
-      if (!rows.length) break;
-
-      const bulkRows = rows.map(row => cols.map(c => {
-        const v = row[c.name];
-        if (v == null) return null;
-        if (v instanceof Date) {
-          // Coluna TIME no MSSQL chega como Date com data 1970-01-01 — extrai só HH:MM:SS
-          const t = c.sqlType?.toLowerCase() ?? "";
-          if (t === "time" || t.startsWith("time(")) {
-            return v.toISOString().slice(11, 19); // "HH:MM:SS"
-          }
-          return v.toISOString();
-        }
-        // String que veio do MSSQL representando time (ex: "1970-01-01T07:00:00.000Z")
-        if (typeof v === "string" && /^1970-01-01T\d{2}:\d{2}:\d{2}/.test(v)) {
-          const t = c.sqlType?.toLowerCase() ?? "";
-          if (t === "time" || t.startsWith("time(")) {
-            return v.slice(11, 19); // "HH:MM:SS"
-          }
-        }
-        return String(v);
-      }));
-      await dst.bulkInsert(schema, table, colDefs, bulkRows);
-
-      totalRows += rows.length;
-      offset += BATCH;
-      if (rows.length < BATCH) break;
-    }
-
-    results.push({ table, rows: totalRows });
-  }
-
-  return results;
-}
 
 export async function POST(r: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -107,33 +28,31 @@ export async function POST(r: NextRequest, { params }: { params: Promise<{ id: s
       select: {
         id: true,
         name: true,
-        datasets: {
-          where: { active: true },
-          select: { id: true, schemaName: true, storageServerId: true },
-        },
+        datasets: { where: { active: true }, select: { id: true, storageServerId: true } },
       },
     });
     if (!project) throw new ApiError(404, "NOT_FOUND", "Projeto não encontrado");
-
-    const datasetsToMigrate = project.datasets.filter(d => d.storageServerId !== targetStorageServerId);
-    if (!datasetsToMigrate.length) {
+    if (!project.datasets.some(d => d.storageServerId !== targetStorageServerId)) {
       throw new ApiError(400, "ALREADY_ON_TARGET", "Todos os datasets já estão neste servidor");
     }
 
-    const dstConn = await getStorageConnection(targetStorageServerId);
-    const datasetResults: { datasetId: string; schema: string; tables: { table: string; rows: number }[] }[] = [];
-
-    for (const dataset of datasetsToMigrate) {
-      const srcConn = await getStorageConnection(dataset.storageServerId);
-      const tables = await copySchema(srcConn, dstConn, dataset.schemaName);
-      await prisma.dataset.update({
-        where: { id: dataset.id },
-        data: { storageServerId: targetStorageServerId },
+    // Lock por projeto: evita duas migrações de projeto simultâneas (mesmo risco de corrupção por
+    // corrida que no endpoint de dataset — ver comentário lá).
+    const job = await withAdvisoryLock(projectId, async () => {
+      const conflict = await findActiveMigrationConflict({ projectId, datasetIds: project.datasets.map(d => d.id) });
+      if (conflict) {
+        throw new ApiError(409, "MIGRATION_IN_PROGRESS", "Já existe uma migração de storage em andamento para este projeto (ou para algum dataset dele)");
+      }
+      return prisma.job.create({
+        data: {
+          type: "MIGRATE_STORAGE_PROJECT",
+          weight: 2,
+          payloadJson: JSON.stringify({ projectId, targetStorageServerId, projectName: project.name }),
+        },
       });
-      datasetResults.push({ datasetId: dataset.id, schema: dataset.schemaName, tables });
-    }
+    });
 
-    return ok({ datasetsMigrated: datasetResults.length, datasets: datasetResults });
+    return ok({ jobId: job.id }, undefined, 202);
   } catch (e) {
     return handleApiError(e);
   }

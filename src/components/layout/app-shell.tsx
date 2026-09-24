@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { useDarkMode } from "@/lib/use-dark-mode";
+import { BackgroundJobsBadge } from "./background-jobs-badge";
 import {
   ArrowUpFromLine, BookOpen, CheckCircle2, ChevronRight, CircleUserRound, CircleX, CloudCog, Database,
   FolderKanban, Home, LayoutDashboard, LogOut, Menu, Moon, ScrollText,
@@ -140,6 +141,7 @@ export function AppShell({ children, user, signOutAction }: { children: React.Re
             <button aria-label="Abrir menu" aria-expanded={sidebarOpen} className="btn btn-ghost btn-sm btn-square lg:hidden" onClick={() => setSidebarOpen(true)}><Menu size={20} /></button>
           )}
           <div className="ml-auto flex items-center gap-1">
+            <BackgroundJobsBadge enabled={user?.role === "ADMIN"} />
             <button aria-label={dark ? "Usar tema claro" : "Usar tema escuro"} className="btn btn-ghost btn-sm btn-square" onClick={toggleTheme}>{dark ? <Sun size={18} /> : <Moon size={18} />}</button>
             {user && (
               <div className="dropdown dropdown-end">
