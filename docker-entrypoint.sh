@@ -13,13 +13,14 @@ npx prisma migrate deploy
 # nao pelo pacote apt do Debian (que so tem a serie 3.0/ODS 12, incompativel). Sobe aqui, em segundo plano,
 # SOMENTE se a senha do SYSDBA estiver configurada (instalacoes sem nenhuma conexao firebird-ftp nao precisam).
 #
-# NAO PROVADO EM CONTAINER REAL (worktree sem Docker) — escrito com base na documentacao do instalador tarball
-# oficial da Firebird Foundation; precisa de um `docker build` + `docker run` de verdade para validar antes de
-# producao, principalmente: (1) o nome/local exatos do binario de servico de longa duracao nesta versao (o
-# instalador tarball tradicionalmente chama `fbguard`, mas confirme em /opt/firebird/bin apos o `install.sh
-# -silent` rodar), (2) se `/opt/firebird/SYSDBA.password` e criado no MESMO formato (linha com a senha entre
-# aspas) que o pacote Debian usava — se o formato for outro, o grep abaixo nao acha a senha default e o aviso
-# de "nao foi possivel trocar" aparece (nesse caso, trocar para ler o arquivo como texto puro).
+# VALIDADO EM CONTAINER REAL (docker build + docker run, 2026-09-25, Firebird 5.0.4.1812 tarball oficial):
+# (1) o binario de servico de longa duracao fica em /opt/firebird/bin/fbguard, como esperado — mas o install.sh
+# so roda ate o fim se `procps` (fornece `ps`, usado pelo proprio installer) e `libtommath1` (dependencia de
+# runtime do fbguard) estiverem instalados ANTES dele — sem eles o install.sh aborta com "Please install
+# required library 'tommath' before firebird" (ver Dockerfile). (2) `/opt/firebird/SYSDBA.password` NAO usa o
+# formato com aspas do pacote Debian — e um arquivo tipo shell-env com comentarios `#` e a linha
+# `ISC_PASSWORD=<senha>` (sem aspas); por isso o parsing abaixo le essa linha especificamente, em vez de
+# procurar aspas ou tratar o arquivo inteiro como uma senha só.
 FIREBIRD_BIN=/opt/firebird/bin
 if [ -n "$CATWORLD_FIREBIRD_SYSDBA_PASSWORD" ] && [ -x "$FIREBIRD_BIN/fbguard" ]; then
   DEFAULT_PW_FILE=/opt/firebird/SYSDBA.password
@@ -27,8 +28,7 @@ if [ -n "$CATWORLD_FIREBIRD_SYSDBA_PASSWORD" ] && [ -x "$FIREBIRD_BIN/fbguard" ]
   # nossa via gsec contra a security database viva — o arquivo sozinho é só documentação, gsec precisa do
   # servidor de pé para autenticar e regravar a security database.
   if [ -f "$DEFAULT_PW_FILE" ]; then
-    DEFAULT_PW=$(grep -oE '"[^"]+"' "$DEFAULT_PW_FILE" | head -1 | tr -d '"')
-    [ -z "$DEFAULT_PW" ] && DEFAULT_PW=$(tr -d '\n\r ' < "$DEFAULT_PW_FILE")
+    DEFAULT_PW=$(grep '^ISC_PASSWORD=' "$DEFAULT_PW_FILE" | head -1 | cut -d= -f2-)
     if [ -n "$DEFAULT_PW" ]; then
       "$FIREBIRD_BIN/fbguard" -daemon -forever &
       FB_BOOTSTRAP_PID=$!

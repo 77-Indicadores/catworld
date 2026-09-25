@@ -21,9 +21,12 @@ ENV TZ=UTC
 # restore. Debian bookworm so tem Firebird 3.0 (ODS 12) no apt, que RECUSA abrir esse arquivo ("Wrong ODS
 # version, expected 12, encountered 13"); por isso o Firebird 5.0.x oficial e instalado via tarball (nao existe
 # pacote apt pra ele no bookworm). unzip: descompacta o ZIP baixado do FTP. curl: baixa o tarball do GitHub
-# Releases (removido do runtime final junto com o proprio tarball, so serve pra instalar).
+# Releases (removido do runtime final junto com o proprio tarball, so serve pra instalar). procps e libtommath1:
+# dependencias de runtime do install.sh/fbguard do tarball oficial (nao vem no bookworm-slim; sem elas o
+# install.sh aborta com "Please install required library 'tommath' before firebird" — confirmado com
+# `docker build` real em 2026-09-25).
 RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y --no-install-recommends \
-      libreoffice-calc ca-certificates unzip curl \
+      libreoffice-calc ca-certificates unzip curl procps libtommath1 \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL -o /tmp/firebird.tar.gz https://github.com/FirebirdSQL/firebird/releases/download/v5.0.4/Firebird-5.0.4.1812-0-linux-x64.tar.gz \
     && mkdir -p /tmp/firebird-install \
