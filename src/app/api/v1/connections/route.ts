@@ -22,6 +22,9 @@ const visible = {
   sshPort: true,
   sshUsername: true,
   sshAuthMethod: true,
+  // Sem segredo (senha/credenciais ficam so em encryptedCredentials): só host/caminho/padrão do FTP e do
+  // backup, que a UI precisa pra preencher o formulário de edição de uma conexão firebird-ftp.
+  metadataJson: true,
   lastStatus: true,
   lastLatencyMs: true,
   lastCheckedAt: true,
