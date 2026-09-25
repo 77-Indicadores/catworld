@@ -118,7 +118,8 @@ export default function ConnectionsPage() {
     const missing = requiredFields.filter(k => !String(payload[k] ?? "").trim());
     const needsPassword = !editing && !String(payload.password ?? "").trim();
     if (missing.length || needsPassword) {
-      setFormTest({ ok: false, message: "Preencha servidor, banco e credenciais antes de testar." });
+      const what = provider === "firebird-ftp" ? "servidor FTP, caminho remoto/padrão do arquivo e credenciais" : "servidor, banco e credenciais";
+      setFormTest({ ok: false, message: `Preencha ${what} antes de testar.` });
       return;
     }
     setFormTesting(true); setFormTest(null);
