@@ -96,6 +96,11 @@ export default function ConnectionsPage() {
       // Sem tunel SSH nem databaseName/SSL de verdade para este provider (ver POST /api/v1/connections).
       delete payload.sslMode; delete payload.databaseName;
       payload.sshTunnelEnabled = false;
+      // innerFilePattern/charset sao opcionais (z.string().min(1).optional()): um <input> vazio manda "" via
+      // FormData, e "" reprova o min(1) mesmo sendo optional (optional só pula quando o valor é undefined) —
+      // sem isto, salvar com esses campos em branco (o caso comum) falharia na validacao.
+      if (!String(payload.innerFilePattern ?? "").trim()) delete payload.innerFilePattern;
+      if (!String(payload.charset ?? "").trim()) delete payload.charset;
     } else {
       payload.sshTunnelEnabled = f.get("sshTunnelEnabled") === "on";
     }

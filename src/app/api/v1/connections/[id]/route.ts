@@ -67,6 +67,9 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
           firebird: (nextInnerFilePattern || nextCharset) ? { innerFilePattern: nextInnerFilePattern, charset: nextCharset } : undefined,
         }))),
       };
+      // Connection.databaseName exige valor e dobra de rotulo pra firebird-ftp (POST usa remotePath — ver
+      // route.ts); sem isto, editar o caminho remoto deixaria o card mostrando o caminho antigo.
+      if (remotePath !== undefined) data.databaseName = remotePath;
     }
     let sshUpdate: Record<string, unknown> = {};
     if (sshTunnelEnabled === false) {
