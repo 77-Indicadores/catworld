@@ -39,7 +39,7 @@ describe("regras de edição", () => {
   });
   it("avisa tipos de job sem nenhum perfil habilitado", () => {
     expect(uncoveredJobTypes([{ enabled: true, jobTypes: ["PREVIEW_UPLOAD", "IMPORT_UPLOAD"] }, { enabled: false, jobTypes: ["SOURCE_REFRESH"] }]))
-      .toEqual(["SOURCE_REFRESH", "DERIVED_REFRESH", "METADATA_CLEANUP"]);
+      .toEqual(["SOURCE_REFRESH", "DERIVED_REFRESH", "METADATA_CLEANUP", "MIGRATE_STORAGE_PROJECT", "MIGRATE_STORAGE_DATASET"]);
     expect(uncoveredJobTypes([{ enabled: true, jobTypes: [...KNOWN_JOB_TYPES] }])).toEqual([]);
   });
   it("memoryLimitBytes", () => {
@@ -82,9 +82,11 @@ describe("faixas (weights)", () => {
   });
 
   const lane = (jobTypes: string[], weights: number[], enabled = true) => ({ enabled, jobTypes, weights });
+  // syncLong tambem cobre MIGRATE_STORAGE_PROJECT/DATASET (mesma faixa pesada de DERIVED_REFRESH) — ver
+  // src/lib/worker-presets.ts.
   const FOUR = [
     lane(["SOURCE_REFRESH", "METADATA_CLEANUP"], [0, 1]),
-    lane(["SOURCE_REFRESH", "DERIVED_REFRESH"], [2]),
+    lane(["SOURCE_REFRESH", "DERIVED_REFRESH", "MIGRATE_STORAGE_PROJECT", "MIGRATE_STORAGE_DATASET"], [2]),
     lane(["PREVIEW_UPLOAD", "IMPORT_UPLOAD"], [0, 1]),
     lane(["PREVIEW_UPLOAD", "IMPORT_UPLOAD"], [2]),
   ];
@@ -95,7 +97,7 @@ describe("faixas (weights)", () => {
   });
 
   it("os perfis legados (sem filtro de peso) cobrem tudo", () => {
-    const legacy = [lane(["SOURCE_REFRESH", "DERIVED_REFRESH", "METADATA_CLEANUP"], []), lane(["PREVIEW_UPLOAD", "IMPORT_UPLOAD"], [])];
+    const legacy = [lane(["SOURCE_REFRESH", "DERIVED_REFRESH", "METADATA_CLEANUP", "MIGRATE_STORAGE_PROJECT", "MIGRATE_STORAGE_DATASET"], []), lane(["PREVIEW_UPLOAD", "IMPORT_UPLOAD"], [])];
     expect(uncoveredLanes(legacy)).toEqual([]);
   });
 

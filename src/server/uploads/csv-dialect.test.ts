@@ -47,9 +47,11 @@ describe("TIP-03: encoding decidido pelo arquivo inteiro", () => {
     expect(rows[rows.length - 1]!.nome).toBe("maçã");
     expect(rows.some((r) => String(r.nome).includes("�"))).toBe(false);
   });
-  it("byte inválido para Windows-1252 (0x81) é ERRO, não U+FFFD", async () => {
+  it("byte sem carater definido em Windows-1252 (0x81) cai para Latin-1, nunca U+FFFD (incidente 2026-09-22: quebrava cargas antigas)", async () => {
     const buf = Buffer.concat([Buffer.from("id,nome\n1,a"), Buffer.from([0x81]), Buffer.from("b\n2,\xe7\n", "latin1")]);
-    await expect(read(put(buf))).rejects.toThrow(/Windows-1252/);
+    const { rows } = await read(put(buf));
+    expect(String(rows[0]!.nome)).toBe(`a${String.fromCharCode(0x81)}b`);
+    expect(rows.some((r) => String(r.nome).includes("�"))).toBe(false);
   });
   it("UTF-8 com BOM: BOM não vira parte do nome da coluna", async () => {
     const { prev } = await read(put("﻿id,nome\n1,a\n"));

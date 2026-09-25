@@ -49,8 +49,8 @@ describe("TIP-01: DECIMAL(p,s) inferido do arquivo inteiro", () => {
     expect(convertForPg("9007199254740993.10", c)).toBe("9007199254740993.10");
     expect(convertForPg("12345678901234567890123456.99", c)).toBe("12345678901234567890123456.99");
   });
-  it("valor que não cabe no DECIMAL declarado LANÇA (não vira NULL nem arredonda)", () => {
-    const c = { sqlType: "DECIMAL(10,2)", decimalSep: "." as const };
+  it("valor que não cabe no DECIMAL declarado LANÇA (não vira NULL nem arredonda) — mapeamento novo (decimalDigits do arquivo)", () => {
+    const c = { sqlType: "DECIMAL(10,2)", decimalSep: "." as const, decimalDigits: 2 };
     expect(() => convertForPg("1.234", c)).toThrow(ValueConversionError);
     expect(() => convertForPg("123456789.00", c)).toThrow(ValueConversionError);
     expect(() => convertForPg("abc", c)).toThrow(ValueConversionError);
@@ -102,11 +102,25 @@ describe("TIP-02: separador decimal/milhar decidido por coluna", () => {
     expect(c.sqlType).toBe("BIGINT");
     expect(convertForPg("-25", c)).toBe("-25");
   });
-  it("mapeamento antigo (sem decimalSep): sem Number e sem NULL; o que não cabe lança", () => {
+  it("mapeamento antigo (sem decimalSep): sem Number e sem NULL", () => {
     const legacy = { sqlType: "DECIMAL(18,4)" };
     expect(convertForPg("1.234,56", legacy)).toBe("1234.56");
     expect(convertForPg("1,234.56", legacy)).toBe("1234.56");
-    expect(() => convertForPg("0.000123", legacy)).toThrow(ValueConversionError);
+  });
+  it("mapeamento antigo (sem decimalDigits): escala além do tipo ARREDONDA, nunca lança (incidente em produção 2026-09-22: recusar quebrou cargas que sempre funcionaram)", () => {
+    const legacy = { sqlType: "DECIMAL(18,4)" };
+    expect(convertForPg("0.000123", legacy)).toBe("0.0001");
+    expect(convertForPg("18.870115", legacy)).toBe("18.8701");
+    expect(convertForPg("18.87016", legacy)).toBe("18.8702"); // meio pra cima
+    expect(convertForTds("18.870115", legacy)).toBe("18.8701"); // DECIMAL(18,4) legado é "largo" (precisão 18 > 15): texto exato, não Number
+  });
+  it("mapeamento NOVO (com decimalDigits do arquivo): continua exato, lança se não coube (a coluna deveria ter sido alargada)", () => {
+    const modern = { sqlType: "DECIMAL(18,4)", decimalDigits: 6 };
+    expect(() => convertForPg("0.000123", modern)).toThrow(ValueConversionError);
+  });
+  it("mapeamento antigo: estouro de dígitos INTEIROS continua lançando (isso não é arredondamento)", () => {
+    const legacy = { sqlType: "DECIMAL(6,2)" };
+    expect(() => convertForPg("123456.789", legacy)).toThrow(ValueConversionError);
   });
 });
 
@@ -217,14 +231,15 @@ describe("TIP-09: convertForTds (função pura; ponta a ponta exige SQL Server r
     expect((convertForTds("2023-01-15", { sqlType: "DATE" }) as Date).toISOString()).toBe("2023-01-15T00:00:00.000Z");
     expect((convertForTds("08:30:15.250", { sqlType: "TIME" }) as Date).toISOString()).toBe("1970-01-01T08:30:15.250Z");
   });
-  it("fração além de milissegundos lança (o driver não grava); zeros à direita passam", () => {
-    expect(() => convertForTds("2023-01-15 08:30:00.1234567", { sqlType: "DATETIME2" })).toThrow(ValueConversionError);
+  it("fração além de milissegundos trunca (nunca lança: o driver carrega DATETIME2 como Date do JS, sem essa precisão de qualquer forma — incidente em produção 2026-09-22, CSVs de origem Postgres trazem timestamptz com 6 casas por padrão)", () => {
+    expect((convertForTds("2023-01-15 08:30:00.1234567", { sqlType: "DATETIME2" }) as Date).toISOString()).toBe("2023-01-15T08:30:00.123Z");
     expect((convertForTds("2023-01-15 08:30:00.0000000", { sqlType: "DATETIME2" }) as Date).toISOString()).toBe("2023-01-15T08:30:00.000Z");
   });
   it("DECIMAL: número exato até 15 dígitos; acima disso lança (driver usa Number)", () => {
     // (mapeamento novo: decimalDigits do arquivo; sem ele o tipo largo vai como texto exato, ver wide-decimal.test.ts)
     expect(convertForTds("1234.5678", { sqlType: "DECIMAL(18,4)", decimalSep: ".", decimalDigits: 8 })).toBe(1234.5678);
     expect(() => convertForTds("12345678901234567.5", { sqlType: "DECIMAL(38,4)", decimalSep: ".", decimalDigits: 8 })).toThrow(ValueConversionError);
-    expect(() => convertForTds("0.00012", { sqlType: "DECIMAL(18,4)", decimalSep: "." })).toThrow(ValueConversionError);
+    // mapeamento antigo (sem decimalDigits): arredonda, nunca lança — ver teste dedicado em TIP-02.
+    expect(convertForTds("0.00012", { sqlType: "DECIMAL(18,4)", decimalSep: "." })).toBe("0.0001");
   });
 });

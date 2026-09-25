@@ -55,10 +55,19 @@ export type RefreshInput = {
 
 const F = (kind: FreshnessKind, label: string, tone: Status, severity: number, reason: string | null = null): Freshness => ({ kind, label, tone, reason, severity });
 
+/** Fonte/arquivo veio vazio: o gate de integridade já barrou a publicação e manteve a tabela anterior — não é erro, é resultado vazio. */
+const EMPTY_OUTCOME_RE = /Arquivo sem colunas|EMPTY_REPLACE/;
+export function isEmptyOutcome(message: string | null | undefined): boolean {
+  return !!message && EMPTY_OUTCOME_RE.test(message);
+}
+
 export function presentRefreshFreshness(src: RefreshInput, now: Date = new Date()): Freshness {
   if (src.active === false) return F("paused", "Pausada", "inactive", 1);
   const status = normalizeRunStatus(src.lastStatus);
-  if (status === "failed") return F("failing", "Com erro", "error", 6, src.lastError);
+  if (status === "failed") {
+    if (isEmptyOutcome(src.lastError)) return F("empty", "Vazio (tabela anterior mantida)", "inactive", 2, src.lastError);
+    return F("failing", "Com erro", "error", 6, src.lastError);
+  }
   if (status === "running" || status === "queued") {
     // "Na fila"/"Atualizando" há muito tempo não é "em andamento": é parado. Antes esse estado voltava antes do teste de atraso e uma fonte
     // presa na fila por dias nunca aparecia como atrasada (docs/estudo-confiabilidade-dados.md, OBS-07).

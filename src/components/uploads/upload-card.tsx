@@ -2,11 +2,11 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { CheckCircle2, CircleAlert, CircleX, Clock3, Loader2, RefreshCw, X } from "lucide-react";
+import { CheckCircle2, CircleAlert, CircleDashed, CircleX, Clock3, Loader2, RefreshCw, X } from "lucide-react";
 import type { Upload, Dataset, Project } from "@prisma/client";
 import { fmtBytes, fmtRelative, fmtDuration } from "@/lib/fmt";
 import { useApiAction, useFeedback } from "@/components/ui/feedback";
-import { formatInt } from "@/lib/present";
+import { formatInt, isEmptyOutcome } from "@/lib/present";
 
 type JobSummary = { lockedBy: string | null; status: string; weight: number; attempts: number; maxAttempts: number };
 type UploadWithDataset = Upload & { dataset: (Dataset & { project: Project }) | null; jobs: JobSummary[] };
@@ -59,7 +59,10 @@ export function UploadCard({ upload, importSummary }: { upload: UploadWithDatase
   const [cancelling, setCancelling] = useState(false);
   const [retrying, setRetrying] = useState(false);
 
-  const cfg = STATUS_CONFIG[upload.status] ?? { cls: "badge-ghost", icon: Clock3, label: upload.status };
+  const isEmpty = upload.status === "FAILED" && isEmptyOutcome(upload.errorMessage);
+  const cfg = isEmpty
+    ? { cls: "badge-ghost", icon: CircleDashed, label: "Vazio" }
+    : STATUS_CONFIG[upload.status] ?? { cls: "badge-ghost", icon: Clock3, label: upload.status };
   const Icon = cfg.icon;
   const isInProgress = ["QUEUED_PREVIEW", "QUEUED_IMPORT", "IMPORTING", "RETRYING"].includes(upload.status);
   const canCancel = CANCELLABLE.has(upload.status);
@@ -173,7 +176,7 @@ export function UploadCard({ upload, importSummary }: { upload: UploadWithDatase
         </div>
 
         {upload.status === "FAILED" && upload.errorMessage && (
-          <p className="mt-2 rounded-lg bg-error/10 px-3 py-2 text-xs text-error">
+          <p className={`mt-2 rounded-lg px-3 py-2 text-xs ${isEmpty ? "bg-base-200 text-base-content/65" : "bg-error/10 text-error"}`}>
             {upload.errorMessage}
           </p>
         )}

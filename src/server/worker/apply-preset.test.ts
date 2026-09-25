@@ -77,7 +77,7 @@ describe("applyPreset a partir do estado legado (o de produção hoje)", () => {
     expect(updates[0]!.args.data).toMatchObject({ jobTypes: ["SOURCE_REFRESH", "METADATA_CLEANUP"], weights: [0, 1], concurrency: 3, enabled: true });
     expect(updates[1]!.args.data).toMatchObject({ jobTypes: UP_TYPES, weights: [0, 1], concurrency: 2 });
     expect(creates.map((c) => c.args.data.name)).toEqual(["worker-sync-long", "worker-uploads-heavy"]);
-    expect(creates[0]!.args.data).toMatchObject({ jobTypes: ["SOURCE_REFRESH", "DERIVED_REFRESH"], weights: [2], concurrency: 1, enabled: true });
+    expect(creates[0]!.args.data).toMatchObject({ jobTypes: ["SOURCE_REFRESH", "DERIVED_REFRESH", "MIGRATE_STORAGE_PROJECT", "MIGRATE_STORAGE_DATASET"], weights: [2], concurrency: 1, enabled: true });
     expect(creates[1]!.args.data).toMatchObject({ jobTypes: UP_TYPES, weights: [2], concurrency: 1 });
     expect(o.filter((x) => x.op === "setting").map((x) => [x.key, x.value])).toEqual([
       ["worker.max_heavy_jobs", "2"], ["worker.max_syncs_per_storage", "2"], ["worker.import_batch_delay_ms", "150"],

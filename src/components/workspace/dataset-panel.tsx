@@ -4,6 +4,7 @@ import { ChevronDown, Code2, Database, DatabaseZap, Plus, Server, Trash2, Upload
 import { CopyableId } from "@/components/ui/copyable-id";
 import { EditCatalogDialog } from "@/components/management/edit-catalog-dialog";
 import { UploadFlow } from "./upload-flow";
+import { DatasetMigrateStorageDialog } from "./dataset-migrate-storage-dialog";
 import { SourceDialog } from "./source-dialog";
 import { PowerBIDialog } from "./powerbi-dialog";
 import { useApiAction, useFeedback } from "@/components/ui/feedback";
@@ -56,7 +57,10 @@ export function DatasetPanel({ dataset, projectSlug, publicOrigin, storageServer
             <div className="mt-1.5 flex flex-wrap items-center gap-1">
               <CopyableId value={dataset.id} label="Dataset ID" />
               {storageServers.length > 0 && (
-                <StorageServerBadge dataset={dataset} storageServers={storageServers} />
+                <>
+                  <StorageServerBadge dataset={dataset} storageServers={storageServers} />
+                  <DatasetMigrateStorageDialog dataset={dataset} storageServers={storageServers} onChanged={onChanged} />
+                </>
               )}
             </div>
           </div>

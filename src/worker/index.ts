@@ -23,6 +23,7 @@ import { isNonRetryable } from "@/server/uploads/non-retryable";
 import { FROM_PREVIEW, queueImportUploadAuto } from "@/server/uploads/actions";
 import { enqueueDueSourceRefreshes, enqueueDueReconciliations, refreshDatasetSource, nextRefreshFromCron } from "@/server/connections/sources";
 import { enqueueDueDerivedRefreshes, refreshDerivedTable } from "@/server/connections/derived";
+import { migrateProjectStorage, migrateDatasetStorage } from "@/server/storage/migrate";
 import { pickInt } from "@/server/worker/config";
 import { auditJob } from "@/server/audit-request";
 import { startHeartbeat, currentRssMb, recordJobMetric, resolveJobTableId, writeWorkerLiveness, readWorkerLiveness, clearWorkerLiveness } from "./metrics";
@@ -327,6 +328,32 @@ async function work(job: Claimed) {
     const hb = startHeartbeat(job.id);
     try {
       await refreshDerivedTable(payload.derivedTableId);
+    } finally {
+      clearInterval(hb);
+    }
+    await completeJob(job.id);
+    return;
+  }
+
+  if (job.type === "MIGRATE_STORAGE_PROJECT") {
+    const payload = JSON.parse(job.payload_json ?? "{}") as { projectId?: string; targetStorageServerId?: string };
+    if (!payload.projectId || !payload.targetStorageServerId) throw new Error("MIGRATE_STORAGE_PROJECT sem projectId/targetStorageServerId");
+    const hb = startHeartbeat(job.id);
+    try {
+      await migrateProjectStorage(payload.projectId, payload.targetStorageServerId);
+    } finally {
+      clearInterval(hb);
+    }
+    await completeJob(job.id);
+    return;
+  }
+
+  if (job.type === "MIGRATE_STORAGE_DATASET") {
+    const payload = JSON.parse(job.payload_json ?? "{}") as { datasetId?: string; targetStorageServerId?: string };
+    if (!payload.datasetId || !payload.targetStorageServerId) throw new Error("MIGRATE_STORAGE_DATASET sem datasetId/targetStorageServerId");
+    const hb = startHeartbeat(job.id);
+    try {
+      await migrateDatasetStorage(payload.datasetId, payload.targetStorageServerId);
     } finally {
       clearInterval(hb);
     }

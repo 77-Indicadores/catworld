@@ -5,13 +5,18 @@ import { UploadPoller } from "@/components/uploads/upload-poller";
 import { QueueLane, type QueueItem } from "@/components/uploads/queue-lane";
 import { FailedActions } from "@/components/uploads/failed-actions";
 import { fmtBytes } from "@/lib/fmt";
-import { formatInt } from "@/lib/present";
+import { formatInt, isEmptyOutcome } from "@/lib/present";
 import { resolveActor } from "@/server/auth/actor";
 import { visibleProjectIds } from "@/server/auth/permissions";
 
 export const dynamic = "force-dynamic";
 
 const ACTIVE = ["QUEUED", "RUNNING", "FAILED"] as const;
+// guardedQueue (actions.ts) marca o job anterior como FAILED com esse lastError sempre que uma nova tentativa é
+// enfileirada (retry) — é contabilidade interna, nunca a tentativa "atual": por construção sempre existe um job
+// mais novo por trás. Mostrar isso na fila fazia uploads que já progrediram (ou já concluíram) aparecerem como
+// erro precisando de atenção.
+const NOT_SUPERSEDED = { NOT: { status: "FAILED" as const, lastError: "Superseded by retry" } };
 
 const MODE_LABELS: Record<string, string> = {
   replace: "substituição",
@@ -36,7 +41,7 @@ export default async function UploadsPage() {
 
   const [previewJobs, importJobs, sourceJobs, completedCounts, cancelableCount] = await Promise.all([
     prisma.job.findMany({
-      where: { type: "PREVIEW_UPLOAD", status: { in: [...ACTIVE] } },
+      where: { type: "PREVIEW_UPLOAD", status: { in: [...ACTIVE] }, ...NOT_SUPERSEDED },
       orderBy: [{ weight: "asc" }, { createdAt: "asc" }],
       include: {
         upload: {
@@ -48,7 +53,7 @@ export default async function UploadsPage() {
       },
     }),
     prisma.job.findMany({
-      where: { type: "IMPORT_UPLOAD", status: { in: [...ACTIVE] } },
+      where: { type: "IMPORT_UPLOAD", status: { in: [...ACTIVE] }, ...NOT_SUPERSEDED },
       orderBy: [{ weight: "asc" }, { createdAt: "asc" }],
       include: {
         upload: {
@@ -152,7 +157,8 @@ export default async function UploadsPage() {
   const previewItems = visiblePreviewJobs.map(uploadToItem);
   const importItems  = visibleImportJobs.map(uploadToItem);
 
-  const failedCount = [...previewItems, ...importItems, ...syncItems].filter(i => i.status === "FAILED").length;
+  const failedCount = [...previewItems, ...importItems, ...syncItems]
+    .filter(i => i.status === "FAILED" && !isEmptyOutcome(i.lastError)).length;
 
   const allStatuses = [
     ...previewItems.map(i => i.status),

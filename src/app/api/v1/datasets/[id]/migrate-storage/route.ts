@@ -1,24 +1,21 @@
 /**
  * POST /api/v1/datasets/[id]/migrate-storage
  *
- * Migra os dados de um dataset de um StorageServer para outro.
- * Copia schema e todas as tabelas (incluindo _cw_rh, índices básicos).
- * Atualiza storage_server_id ao final se tudo ocorrer bem.
- *
- * Restrições:
- *  - Ambos os servidores devem ser SQL Server acessíveis
- *  - Operação síncrona — use apenas para datasets pequenos/médios
- *  - Não remove dados do servidor de origem
+ * Enfileira a migracao de um dataset para outro StorageServer (MIGRATE_STORAGE_DATASET,
+ * processado em background pelo worker — ver src/worker/index.ts e src/server/storage/migrate.ts).
+ * Suporta cross-provider (sqlserver <-> postgres) — antes desta versao, a copia era feita aqui
+ * mesmo via mssql cru e so funcionava SQL Server -> SQL Server; agora reusa a mesma
+ * implementacao (StorageConnection) da migracao por projeto, com tipagem correta na copia
+ * (a versao anterior gravava tudo como NVARCHAR(MAX), perdendo fidelidade de tipo).
+ * Nao remove dados da origem. So retorna o jobId; acompanhamento e via /api/v1/jobs/active.
  */
 import type { NextRequest } from "next/server";
 import { z } from "zod";
-import sql from "mssql";
 import { prisma } from "@/server/db";
 import { resolveActor, requireRole } from "@/server/auth/actor";
 import { handleApiError, ok, ApiError } from "@/server/http";
-import { getStoragePool } from "@/server/storage/pool";
-import { quoteIdentifier } from "@/server/security/naming";
-import { stableOrderBy } from "@/server/odata/stable-order";
+import { withAdvisoryLock } from "@/server/db/advisory-lock";
+import { findActiveMigrationConflict } from "@/server/storage/migrate";
 
 const bodySchema = z.object({ targetStorageServerId: z.string().uuid() });
 
@@ -31,135 +28,30 @@ export async function POST(r: NextRequest, { params }: { params: Promise<{ id: s
 
     const dataset = await prisma.dataset.findUniqueOrThrow({
       where: { id },
-      select: { id: true, name: true, schemaName: true, storageServerId: true },
+      select: { id: true, name: true, projectId: true, storageServerId: true },
     });
-
     if (dataset.storageServerId === targetStorageServerId) {
       throw new ApiError(400, "SAME_SERVER", "Dataset já está neste servidor");
     }
 
-    const schema = dataset.schemaName;
-    const srcPool = await getStoragePool(dataset.storageServerId);
-    const dstPool = await getStoragePool(targetStorageServerId);
-
-    // Cria o schema no destino se não existir
-    const dstReq = dstPool.request();
-    const qSchema = quoteIdentifier(schema);
-    await dstReq.query(
-      `IF SCHEMA_ID(N'${schema.replaceAll("'", "''")}') IS NULL EXEC(N'CREATE SCHEMA ${qSchema}')`,
-    );
-
-    // Lista as tabelas do schema na origem
-    const tablesRes = await srcPool.request()
-      .input("schema", sql.NVarChar(128), schema)
-      .query<{ name: string }>(
-        `SELECT t.name FROM sys.tables t JOIN sys.schemas s ON t.schema_id=s.schema_id WHERE s.name=@schema ORDER BY t.name`,
-      );
-
-    const tables = tablesRes.recordset.map((r) => r.name);
-    if (tables.length === 0) {
-      // Nenhuma tabela física — só atualiza o ponteiro
-      await prisma.dataset.update({ where: { id }, data: { storageServerId: targetStorageServerId } });
-      return ok({ tablescopied: 0, message: "Nenhuma tabela física. Ponteiro atualizado." });
-    }
-
-    const results: { table: string; rows: number }[] = [];
-
-    for (const table of tables) {
-      const qTable = quoteIdentifier(table);
-      const qFull = `${qSchema}.${qTable}`;
-
-      // Descobre colunas na origem
-      const colsRes = await srcPool.request()
-        .input("schema", sql.NVarChar(128), schema)
-        .input("table", sql.NVarChar(128), table)
-        .query<{ col: string; type: string; max_len: number; prec: number; scale: number; nullable: number; is_identity: number }>(
-          `SELECT c.name col,
-                  ty.name type,
-                  c.max_length max_len,
-                  c.precision prec,
-                  c.scale scale,
-                  c.is_nullable nullable,
-                  c.is_identity
-           FROM sys.columns c
-           JOIN sys.types ty ON c.user_type_id=ty.user_type_id
-           WHERE c.object_id=OBJECT_ID(QUOTENAME(@schema)+'.'+QUOTENAME(@table))
-           ORDER BY c.column_id`,
-        );
-
-      const cols = colsRes.recordset;
-      if (cols.length === 0) continue;
-
-      // Constrói DDL da tabela no destino
-      const colDefs = cols.map((c) => {
-        const q = quoteIdentifier(c.col);
-        const nullable = c.nullable ? "NULL" : "NOT NULL";
-        const t = c.type.toLowerCase();
-        if (["nvarchar", "varchar", "nchar", "char"].includes(t)) {
-          const len = c.max_len === -1 ? "MAX" : String(t.startsWith("n") ? c.max_len / 2 : c.max_len);
-          return `${q} ${c.type.toUpperCase()}(${len}) ${nullable}`;
-        }
-        if (["decimal", "numeric"].includes(t)) return `${q} ${c.type.toUpperCase()}(${c.prec},${c.scale}) ${nullable}`;
-        if (["datetime2", "time", "datetimeoffset"].includes(t)) return `${q} ${c.type.toUpperCase()}(${c.scale}) ${nullable}`;
-        return `${q} ${c.type.toUpperCase()} ${nullable}`;
-      });
-
-      // Drop + recreate no destino
-      await dstPool.request().query(
-        `IF OBJECT_ID(N'${schema.replaceAll("'", "''")}.${table.replaceAll("'", "''")}',N'U') IS NOT NULL DROP TABLE ${qFull}`,
-      );
-      await dstPool.request().query(`CREATE TABLE ${qFull} (${colDefs.join(", ")})`);
-
-      // Copia dados em batches de 2000 linhas
-      const nonIdentity = cols.filter((c) => !c.is_identity);
-      const selectCols = nonIdentity.map((c) => quoteIdentifier(c.col)).join(", ");
-      const insertCols = selectCols;
-
-      // Paginacao por OFFSET so e segura com ordem total: identity (chave) ou, sem ela, todas as colunas ordenaveis.
-      const identityCol = cols.find((c) => c.is_identity);
-      const orderBy = identityCol ? quoteIdentifier(identityCol.col) : (stableOrderBy(cols.map((c) => ({ name: c.col, sqlType: c.type })), quoteIdentifier) ?? "(SELECT NULL)");
-
-      let offset = 0;
-      const batchSize = 2000;
-      let totalRows = 0;
-
-      while (true) {
-        const batchRes = await srcPool.request()
-          .query<Record<string, unknown>>(
-            `SELECT ${selectCols} FROM ${qFull} ORDER BY ${orderBy} OFFSET ${offset} ROWS FETCH NEXT ${batchSize} ROWS ONLY`,
-          );
-
-        const rows = batchRes.recordset;
-        if (rows.length === 0) break;
-
-        // Bulk insert via Table
-        const bulkTable = new sql.Table(qFull);
-        bulkTable.create = false;
-        for (const c of nonIdentity) {
-          bulkTable.columns.add(c.col, sql.NVarChar(sql.MAX), { nullable: true });
-        }
-        for (const row of rows) {
-          bulkTable.rows.add(...nonIdentity.map((c) => {
-            const v = row[c.col];
-            return v === null || v === undefined ? null : String(v);
-          }));
-        }
-
-        const bulkReq = new sql.Request(dstPool);
-        await bulkReq.bulk(bulkTable);
-
-        totalRows += rows.length;
-        offset += batchSize;
-        if (rows.length < batchSize) break;
+    // Lock por dataset: sem isso, dois cliques rápidos (ou duas abas) veem "nenhum job ativo" ao
+    // mesmo tempo e ambos criam um job — dois workers copiando pra mesma tabela de destino ao mesmo
+    // tempo corrompe a cópia (um dropa/recria enquanto o outro ainda lê/escreve).
+    const job = await withAdvisoryLock(id, async () => {
+      const conflict = await findActiveMigrationConflict({ datasetId: id, projectId: dataset.projectId });
+      if (conflict) {
+        throw new ApiError(409, "MIGRATION_IN_PROGRESS", "Já existe uma migração de storage em andamento para este dataset (ou para o projeto inteiro)");
       }
+      return prisma.job.create({
+        data: {
+          type: "MIGRATE_STORAGE_DATASET",
+          weight: 2,
+          payloadJson: JSON.stringify({ datasetId: id, targetStorageServerId, datasetName: dataset.name }),
+        },
+      });
+    });
 
-      results.push({ table, rows: totalRows });
-    }
-
-    // Atualiza o ponteiro apenas se tudo deu certo
-    await prisma.dataset.update({ where: { id }, data: { storageServerId: targetStorageServerId } });
-
-    return ok({ tablesCopied: results.length, tables: results });
+    return ok({ jobId: job.id }, undefined, 202);
   } catch (e) {
     return handleApiError(e);
   }
