@@ -5,7 +5,7 @@ import { UploadPoller } from "@/components/uploads/upload-poller";
 import { QueueLane, type QueueItem } from "@/components/uploads/queue-lane";
 import { FailedActions } from "@/components/uploads/failed-actions";
 import { fmtBytes } from "@/lib/fmt";
-import { formatInt } from "@/lib/present";
+import { formatInt, isEmptyOutcome } from "@/lib/present";
 import { resolveActor } from "@/server/auth/actor";
 import { visibleProjectIds } from "@/server/auth/permissions";
 
@@ -157,7 +157,8 @@ export default async function UploadsPage() {
   const previewItems = visiblePreviewJobs.map(uploadToItem);
   const importItems  = visibleImportJobs.map(uploadToItem);
 
-  const failedCount = [...previewItems, ...importItems, ...syncItems].filter(i => i.status === "FAILED").length;
+  const failedCount = [...previewItems, ...importItems, ...syncItems]
+    .filter(i => i.status === "FAILED" && !isEmptyOutcome(i.lastError)).length;
 
   const allStatuses = [
     ...previewItems.map(i => i.status),

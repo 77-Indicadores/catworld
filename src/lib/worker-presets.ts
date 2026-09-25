@@ -15,7 +15,7 @@
 
 import { fmtDecimal } from "@/lib/present/count";
 
-export type JobTypeName = "PREVIEW_UPLOAD" | "IMPORT_UPLOAD" | "SOURCE_REFRESH" | "DERIVED_REFRESH" | "METADATA_CLEANUP";
+export type JobTypeName = "PREVIEW_UPLOAD" | "IMPORT_UPLOAD" | "SOURCE_REFRESH" | "DERIVED_REFRESH" | "METADATA_CLEANUP" | "MIGRATE_STORAGE_PROJECT" | "MIGRATE_STORAGE_DATASET";
 
 export type LaneId = "syncFast" | "syncLong" | "uploadsLight" | "uploadsHeavy";
 
@@ -35,7 +35,10 @@ export type Lane = {
 /** As quatro faixas. `worker-sync` e `worker-uploads` já existiam (migration 202609190001) e passam a ser as faixas leves. */
 export const LANES: readonly Lane[] = [
   { id: "syncFast", name: "worker-sync", label: "Sync rápido", hint: "Fontes e limpeza que levam segundos", jobTypes: ["SOURCE_REFRESH", "METADATA_CLEANUP"], weights: [0, 1], family: "sync" },
-  { id: "syncLong", name: "worker-sync-long", label: "Sync longo", hint: "Fontes de vários minutos (ex.: ADL) e tabelas derivadas", jobTypes: ["SOURCE_REFRESH", "DERIVED_REFRESH"], weights: [2], family: "sync" },
+  // MIGRATE_STORAGE_*: mesma classe de custo (I/O + memória) de um DERIVED_REFRESH grande — ver JOB_WEIGHTS_BY_TYPE
+  // em server/worker/profiles.ts. Sem isso aqui, reaplicar um preset removeria a cobertura que a migration
+  // (202609240001) deu ao worker-sync-long na instalação, e uma instalação NOVA nunca teria essa faixa coberta.
+  { id: "syncLong", name: "worker-sync-long", label: "Sync longo", hint: "Fontes de vários minutos (ex.: ADL), tabelas derivadas e migração de storage", jobTypes: ["SOURCE_REFRESH", "DERIVED_REFRESH", "MIGRATE_STORAGE_PROJECT", "MIGRATE_STORAGE_DATASET"], weights: [2], family: "sync" },
   { id: "uploadsLight", name: "worker-uploads", label: "Uploads leves", hint: "Prévia e importação de arquivos pequenos", jobTypes: ["PREVIEW_UPLOAD", "IMPORT_UPLOAD"], weights: [0, 1], family: "uploads" },
   { id: "uploadsHeavy", name: "worker-uploads-heavy", label: "Uploads pesados", hint: "Importação acima de 15 MB (CSV) ou 10 MB (Excel)", jobTypes: ["PREVIEW_UPLOAD", "IMPORT_UPLOAD"], weights: [2], family: "uploads" },
 ] as const;

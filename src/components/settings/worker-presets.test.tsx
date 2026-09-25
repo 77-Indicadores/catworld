@@ -32,7 +32,7 @@ beforeEach(() => {
           supervisor: { supervised },
           profiles: lanes ? [
             { id: SYNC_ID, name: "worker-sync", jobTypes: ["SOURCE_REFRESH", "METADATA_CLEANUP"], weights: [0, 1], concurrency: slots.sync, enabled: true, runningJobs: 1, queuedJobs: 49 },
-            { id: LONG_ID, name: "worker-sync-long", jobTypes: ["SOURCE_REFRESH", "DERIVED_REFRESH"], weights: [2], concurrency: slots.long, enabled: true, runningJobs: 0, queuedJobs: 2 },
+            { id: LONG_ID, name: "worker-sync-long", jobTypes: ["SOURCE_REFRESH", "DERIVED_REFRESH", "MIGRATE_STORAGE_PROJECT", "MIGRATE_STORAGE_DATASET"], weights: [2], concurrency: slots.long, enabled: true, runningJobs: 0, queuedJobs: 2 },
             { id: UP_ID, name: "worker-uploads", jobTypes: ["PREVIEW_UPLOAD", "IMPORT_UPLOAD"], weights: [0, 1], concurrency: slots.up, enabled: true, runningJobs: 1, queuedJobs: 21 },
             { id: HEAVY_ID, name: "worker-uploads-heavy", jobTypes: ["PREVIEW_UPLOAD", "IMPORT_UPLOAD"], weights: [2], concurrency: slots.heavy, enabled: true, runningJobs: 0, queuedJobs: 3 },
           ] : [

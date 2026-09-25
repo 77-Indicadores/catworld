@@ -23,6 +23,45 @@ type Server = {
 };
 
 type TestResult = { healthy: boolean; latencyMs: number; database: string } | { error: string };
+type ServerDataset = { id: string; name: string; project: { id: string; name: string; slug: string } };
+
+/** A contagem sozinha não diz QUAIS datasets estão no servidor — carrega a lista só quando aberto (evita N requests no load da tela). */
+function DatasetsCell({ server }: { server: Server }) {
+  const [datasets, setDatasets] = useState<ServerDataset[] | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  if (server._count.datasets === 0) return <span className="text-center text-sm text-base-content/70">0</span>;
+
+  function load() {
+    if (datasets || loading) return;
+    setLoading(true);
+    apiRequest<{ datasets: ServerDataset[] }>(`/api/v1/storage-servers/${server.id}/datasets`)
+      .then(({ data }) => setDatasets(data?.datasets ?? []))
+      .catch(() => setDatasets([]))
+      .finally(() => setLoading(false));
+  }
+
+  return (
+    <div className="dropdown dropdown-end">
+      <button tabIndex={0} className="btn btn-ghost btn-xs" onClick={load}>{server._count.datasets}</button>
+      <div tabIndex={0} className="dropdown-content z-50 mt-1 max-h-80 w-72 overflow-y-auto rounded-box border border-base-300 bg-base-100 p-2 text-left shadow-xl">
+        <p className="px-1 pb-1 text-[10px] font-semibold uppercase tracking-wide text-base-content/65">Datasets neste servidor</p>
+        {loading && <p className="px-1 py-2 text-xs text-base-content/65">Carregando…</p>}
+        {datasets && datasets.length === 0 && <p className="px-1 py-2 text-xs text-base-content/65">Nenhum dataset ativo.</p>}
+        {datasets && datasets.length > 0 && (
+          <ul className="space-y-0.5">
+            {datasets.map(d => (
+              <li key={d.id} className="rounded px-1 py-1 text-xs hover:bg-base-200">
+                <span className="block truncate font-medium">{d.name}</span>
+                <span className="block truncate text-base-content/65">{d.project.name}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function statusBadge(s: Server) {
   if (!s.active) return <span className="badge badge-sm badge-ghost gap-1"><Clock3 size={11} />Inativo</span>;
@@ -196,7 +235,7 @@ export function StorageServerManager({ initialServers }: { initialServers: Serve
                         </div>
                       </td>
                       <td data-label="URL" className="max-w-xs truncate font-mono text-xs text-base-content/65">{maskedUrl(s.url)}</td>
-                      <td data-label="Datasets" className="text-center text-sm">{s._count.datasets}</td>
+                      <td data-label="Datasets" className="text-center text-sm"><DatasetsCell server={s} /></td>
                       <td data-label="Status" className="text-center">
                         {tr && "error" in tr
                           ? <span className="badge badge-sm badge-error gap-1"><CircleX size={11} />{tr.error}</span>
