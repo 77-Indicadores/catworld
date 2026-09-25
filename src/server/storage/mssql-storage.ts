@@ -30,6 +30,12 @@ function parseMssqlUrl(url: string): sql.config {
       encrypt: params.encrypt !== "false",
       trustServerCertificate: params.trustservercertificate === "true",
       packetSize: 16384,
+      // Sem isso, o driver (tedious) le DATETIME2/DATETIME assumindo o fuso LOCAL do processo, deslocando o
+      // valor (DATETIME2 do SQL Server nao tem fuso — e um timestamp cru, que este projeto sempre trata como
+      // UTC, nunca fuso do host). Mascarado em producao porque o processo roda com TZ=UTC (deslocamento = 0),
+      // mas afeta qualquer leitura por MssqlStorageConnection.query() fora desse ambiente — encontrado migrando
+      // uma linha com cw_synced_at conhecido e vendo o valor voltar 3h adiantado.
+      useUTC: true,
     },
     requestTimeout: 600_000,
     connectionTimeout: 30_000,

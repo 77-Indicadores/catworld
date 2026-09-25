@@ -30,7 +30,7 @@ function DatasetsCell({ server }: { server: Server }) {
   const [datasets, setDatasets] = useState<ServerDataset[] | null>(null);
   const [loading, setLoading] = useState(false);
 
-  if (server._count.datasets === 0) return <span className="text-center text-sm text-base-content/40">0</span>;
+  if (server._count.datasets === 0) return <span className="text-center text-sm text-base-content/70">0</span>;
 
   function load() {
     if (datasets || loading) return;
