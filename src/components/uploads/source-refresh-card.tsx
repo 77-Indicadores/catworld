@@ -1,9 +1,9 @@
 "use client";
 
-import { CheckCircle2, CircleX, Clock3, DatabaseZap, ExternalLink, Loader2 } from "lucide-react";
+import { CheckCircle2, CircleDashed, CircleX, Clock3, DatabaseZap, ExternalLink, Loader2 } from "lucide-react";
 import { fmtRelative, fmtDuration } from "@/lib/fmt";
 import { Time } from "@/components/ui/time";
-import { presentCount } from "@/lib/present";
+import { presentCount, isEmptyOutcome } from "@/lib/present";
 
 export type SourceRefreshWithSource = {
   id: string;
@@ -43,7 +43,10 @@ function fmtRows(n: string | null) {
 }
 
 export function SourceRefreshCard({ job }: { job: SourceRefreshWithSource }) {
-  const cfg = STATUS_CONFIG[job.status] ?? { cls: "badge-ghost", icon: Clock3, label: job.status };
+  const isEmpty = job.status === "FAILED" && isEmptyOutcome(job.lastError);
+  const cfg = isEmpty
+    ? { cls: "badge-ghost", icon: CircleDashed, label: "Vazio" }
+    : STATUS_CONFIG[job.status] ?? { cls: "badge-ghost", icon: Clock3, label: job.status };
   const Icon = cfg.icon;
   const isRunning = job.status === "RUNNING";
   const isDone = job.status === "COMPLETED" || job.status === "FAILED";
@@ -112,7 +115,7 @@ export function SourceRefreshCard({ job }: { job: SourceRefreshWithSource }) {
         </div>
 
         {job.status === "FAILED" && job.lastError && (
-          <p className="mt-2 rounded-lg bg-error/10 px-3 py-2 text-xs text-error">
+          <p className={`mt-2 rounded-lg px-3 py-2 text-xs ${isEmpty ? "bg-base-200 text-base-content/65" : "bg-error/10 text-error"}`}>
             {job.lastError}
           </p>
         )}

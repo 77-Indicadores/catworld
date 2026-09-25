@@ -2,9 +2,9 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Archive, CircleX, Eye, Loader2, RefreshCw, Upload as UploadIcon, X, Zap } from "lucide-react";
+import { Archive, CircleDashed, CircleX, Eye, Loader2, RefreshCw, Upload as UploadIcon, X, Zap } from "lucide-react";
 import { fmtBytes, fmtRelative } from "@/lib/fmt";
-import { formatInt } from "@/lib/present";
+import { formatInt, isEmptyOutcome } from "@/lib/present";
 import { useApiAction } from "@/components/ui/feedback";
 
 export type QueueItem = {
@@ -47,6 +47,7 @@ function JobRow({ item, position }: { item: QueueItem; position?: number }) {
 
   const isRunning = item.status === "RUNNING";
   const isFailed  = item.status === "FAILED";
+  const isEmpty   = isFailed && isEmptyOutcome(item.lastError);
   const isQueued  = item.status === "QUEUED";
   const isHeavy   = item.weight >= 2;
 
@@ -65,12 +66,13 @@ function JobRow({ item, position }: { item: QueueItem; position?: number }) {
   }
 
   return (
-    <div className={`px-4 py-3 ${isRunning ? "bg-info/5" : isFailed ? "bg-error/5" : ""}`}>
+    <div className={`px-4 py-3 ${isRunning ? "bg-info/5" : isEmpty ? "" : isFailed ? "bg-error/5" : ""}`}>
       <div className="flex items-start gap-2">
         {/* Position / status indicator */}
         <div className="mt-0.5 w-6 shrink-0 text-center">
           {isRunning && <Loader2 size={14} className="animate-spin text-info" />}
-          {isFailed  && <CircleX size={14} className="text-error" />}
+          {isFailed && isEmpty && <CircleDashed size={14} className="text-base-content/65" />}
+          {isFailed && !isEmpty && <CircleX size={14} className="text-error" />}
           {isQueued  && <span className="text-[11px] font-mono text-base-content/65">{position}°</span>}
         </div>
 
@@ -103,7 +105,7 @@ function JobRow({ item, position }: { item: QueueItem; position?: number }) {
           )}
 
           {isFailed && item.lastError && (
-            <p className="mt-1 rounded bg-error/10 px-2 py-1 text-[11px] text-error line-clamp-2">
+            <p className={`mt-1 rounded px-2 py-1 text-[11px] line-clamp-2 ${isEmpty ? "bg-base-200 text-base-content/65" : "bg-error/10 text-error"}`}>
               {item.lastError}
             </p>
           )}
@@ -149,10 +151,11 @@ export function QueueLane({
   const cfg = LANE_CONFIG[type];
   const Icon = cfg.icon;
 
-  const running = items.filter(i => i.status === "RUNNING");
-  const queued  = items.filter(i => i.status === "QUEUED");
-  const failed  = items.filter(i => i.status === "FAILED");
-  const total   = items.length;
+  const running    = items.filter(i => i.status === "RUNNING");
+  const queued     = items.filter(i => i.status === "QUEUED");
+  const failed     = items.filter(i => i.status === "FAILED");
+  const failedReal = failed.filter(i => !isEmptyOutcome(i.lastError));
+  const total      = items.length;
 
   return (
     <div className="rounded-box border border-base-300 bg-base-100 flex flex-col">
@@ -171,8 +174,11 @@ export function QueueLane({
           {queued.length > 0 && (
             <span className="badge badge-ghost badge-sm">{queued.length} na fila</span>
           )}
-          {failed.length > 0 && (
-            <span className="badge badge-error badge-sm">{failed.length}</span>
+          {failedReal.length > 0 && (
+            <span className="badge badge-error badge-sm">{failedReal.length}</span>
+          )}
+          {failed.length > failedReal.length && (
+            <span className="badge badge-ghost badge-sm">{failed.length - failedReal.length} vazio{failed.length - failedReal.length > 1 ? "s" : ""}</span>
           )}
           {total === 0 && (
             <span className="text-xs text-base-content/65">vazia</span>

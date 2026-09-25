@@ -5,7 +5,7 @@ import { Time } from "@/components/ui/time";
 import { apiRequest, errorMessage } from "@/lib/api-client";
 import { fmtDuration } from "@/lib/fmt";
 import { JOB_TYPE_LABEL } from "@/lib/labels";
-import { fmtBytes, formatInt } from "@/lib/present";
+import { fmtBytes, formatInt, isEmptyOutcome } from "@/lib/present";
 import type { HistoryRun, HistoryVersion, TableHistory } from "@/server/tables/history";
 
 const UPLOAD_MODE: Record<string, string> = { replace: "substituiu", append: "acrescentou", upsert: "atualizou por chave" };
@@ -29,18 +29,19 @@ function VersionRow({ v, tableId }: { v: HistoryVersion; tableId: string }) {
 
 function RunRow({ r }: { r: HistoryRun }) {
   const failed = r.status === "FAILED";
+  const empty = failed && isEmptyOutcome(r.error);
   return (
     <li className="flex flex-col gap-0.5 border-b border-base-300 py-2 last:border-0">
       <div className="flex items-center justify-between gap-2">
         <span className="font-medium">{JOB_TYPE_LABEL[r.kind]?.label ?? r.kind}</span>
-        <StatusBadge status={failed ? "error" : "healthy"} label={failed ? "Falhou" : "Concluída"} />
+        <StatusBadge status={empty ? "inactive" : failed ? "error" : "healthy"} label={empty ? "Vazio" : failed ? "Falhou" : "Concluída"} />
       </div>
       <p className="text-base-content/70">
         <Time iso={r.startedAt} relative />
         {r.durationMs !== null && ` · levou ${fmtDuration(r.durationMs)}`}
         {r.rssMb !== null && ` · ${r.rssMb} MB de memória`}
       </p>
-      {failed && r.error && <p className="break-words font-mono text-[11px] text-error">{r.error}</p>}
+      {failed && r.error && <p className={`break-words font-mono text-[11px] ${empty ? "text-base-content/65" : "text-error"}`}>{r.error}</p>}
     </li>
   );
 }
