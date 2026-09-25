@@ -174,8 +174,33 @@ model Connection {
   createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamp(3)
   updatedAt            DateTime  @updatedAt @map("updated_at") @db.Timestamp(3)
   sources              DatasetSource[]
+  materialization      ConnectionMaterialization?
 
   @@map("cw_connections")
+}
+
+/// Estado de "conexões baseadas em arquivo remoto" (hoje só firebird-ftp): o arquivo de origem precisa ser
+/// baixado e materializado (restaurado) antes de virar algo consultável, e isso é caro (rede + gbak), então
+/// roda no máximo uma vez por conexão, com um TTL curto, em vez de uma vez por DatasetSource/refreshCron.
+/// Ver docs/firebird-ftp-provider.md secao 2.1. Postgres/MSSQL nunca preenchem isso.
+model ConnectionMaterialization {
+  connectionId    String     @id @map("connection_id") @db.Uuid
+  connection      Connection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  /// "<tamanho>:<mtime ISO>" do arquivo remoto na última materialização OK; usado para pular o download quando nada mudou.
+  remoteSignature String?    @map("remote_signature") @db.VarChar(200)
+  materializedAt  DateTime?  @map("materialized_at") @db.Timestamp(3)
+  /// janela em que outra fonte da mesma conexão reaproveita o Firebird já restaurado sem refazer o trabalho.
+  expiresAt       DateTime?  @map("expires_at") @db.Timestamp(3)
+  /// idle | materializing | ready | failed — 'materializing' funciona como trava (ver withAdvisoryLock no job).
+  status          String     @default("idle") @db.VarChar(20)
+  firebirdHost    String?    @map("firebird_host") @db.VarChar(255)
+  firebirdPort    Int?       @map("firebird_port")
+  /// caminho do .fdb restaurado neste worker, para DROP DATABASE/limpeza ao expirar.
+  firebirdPath    String?    @map("firebird_path") @db.VarChar(500)
+  lastError       String?    @map("last_error") @db.Text
+  updatedAt       DateTime   @updatedAt @map("updated_at") @db.Timestamp(3)
+
+  @@map("cw_connection_materializations")
 }
 
 model DatasetSource {

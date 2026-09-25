@@ -4,8 +4,9 @@ import { prisma } from "@/server/db";
 import { resolveActor, requireRole } from "@/server/auth/actor";
 import { encryptSecret, decryptSecret } from "@/server/security/crypto";
 import { handleApiError, ok } from "@/server/http";
+import { parseFirebirdFtpConfig } from "@/server/connections/sources";
 
-const visible = { id: true, name: true, provider: true, environment: true, server: true, port: true, databaseName: true, sslMode: true, username: true, active: true, sshTunnelEnabled: true, sshHost: true, sshPort: true, sshUsername: true, sshAuthMethod: true, lastStatus: true, lastLatencyMs: true, lastCheckedAt: true, createdAt: true, updatedAt: true } as const;
+const visible = { id: true, name: true, provider: true, environment: true, server: true, port: true, databaseName: true, sslMode: true, username: true, active: true, sshTunnelEnabled: true, sshHost: true, sshPort: true, sshUsername: true, sshAuthMethod: true, metadataJson: true, lastStatus: true, lastLatencyMs: true, lastCheckedAt: true, createdAt: true, updatedAt: true } as const;
 
 export async function PATCH(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -32,8 +33,14 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       sshPassword: z.string().optional(),
       sshPrivateKey: z.string().optional(),
       sshPassphrase: z.string().optional(),
+      // firebird-ftp: nao tem databaseName/sslMode reais (ver POST) — so o caminho/padrao do FTP e do backup
+      // dentro do ZIP, guardados em metadataJson.
+      remotePath: z.string().min(1).optional(),
+      filePattern: z.string().min(1).optional(),
+      innerFilePattern: z.string().min(1).optional(),
+      charset: z.string().min(1).optional(),
     }).parse(await request.json());
-    const { password, encrypt, trustServerCert, sshTunnelEnabled, sshHost, sshPort, sshUsername, sshAuthMethod, sshPassword, sshPrivateKey, sshPassphrase, ...data } = input;
+    const { password, encrypt, trustServerCert, sshTunnelEnabled, sshHost, sshPort, sshUsername, sshAuthMethod, sshPassword, sshPrivateKey, sshPassphrase, remotePath, filePattern, innerFilePattern, charset, ...data } = input;
     let credentialsUpdate: { encryptedCredentials?: string } = {};
     if (password || encrypt !== undefined || trustServerCert !== undefined) {
       const existing = await prisma.connection.findUniqueOrThrow({ where: { id }, select: { encryptedCredentials: true } });
@@ -42,6 +49,27 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       if (encrypt !== undefined) current.encrypt = encrypt;
       if (trustServerCert !== undefined) current.trustServerCert = trustServerCert;
       credentialsUpdate = { encryptedCredentials: encryptSecret(JSON.stringify(current)) };
+    }
+    let metadataUpdate: { metadataJson?: string } = {};
+    if (remotePath !== undefined || filePattern !== undefined || innerFilePattern !== undefined || charset !== undefined) {
+      const existing = await prisma.connection.findUniqueOrThrow({ where: { id }, select: { metadataJson: true, server: true, port: true } });
+      const current = existing.metadataJson ? parseFirebirdFtpConfig(existing.metadataJson) : undefined;
+      const nextInnerFilePattern = innerFilePattern ?? current?.firebird?.innerFilePattern;
+      const nextCharset = charset ?? current?.firebird?.charset;
+      metadataUpdate = {
+        metadataJson: JSON.stringify(parseFirebirdFtpConfig(JSON.stringify({
+          ftp: {
+            host: data.server ?? existing.server,
+            port: data.port ?? existing.port ?? undefined,
+            remotePath: remotePath ?? current?.ftp.remotePath,
+            filePattern: filePattern ?? current?.ftp.filePattern,
+          },
+          firebird: (nextInnerFilePattern || nextCharset) ? { innerFilePattern: nextInnerFilePattern, charset: nextCharset } : undefined,
+        }))),
+      };
+      // Connection.databaseName exige valor e dobra de rotulo pra firebird-ftp (POST usa remotePath — ver
+      // route.ts); sem isto, editar o caminho remoto deixaria o card mostrando o caminho antigo.
+      if (remotePath !== undefined) data.databaseName = remotePath;
     }
     let sshUpdate: Record<string, unknown> = {};
     if (sshTunnelEnabled === false) {
@@ -57,7 +85,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     }
     return ok(await prisma.connection.update({
       where: { id },
-      data: { ...data, ...credentialsUpdate, ...sshUpdate },
+      data: { ...data, ...credentialsUpdate, ...metadataUpdate, ...sshUpdate },
       select: visible,
     }));
   } catch (e) {

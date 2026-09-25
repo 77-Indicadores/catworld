@@ -5,15 +5,37 @@ import { EmptyState, PageHeader, Panel, StatusBadge } from "@/components/ui/prim
 import { useApiAction, useFeedback } from "@/components/ui/feedback";
 import { apiRequest, errorMessage } from "@/lib/api-client";
 
-type Connection = { id: string; name: string; provider: string; environment: string; server: string; port: number | null; databaseName: string; sslMode: string; username: string; active: boolean; lastStatus: string | null; lastLatencyMs: number | null; lastCheckedAt: string | null; sshTunnelEnabled?: boolean; sshHost?: string | null; sshPort?: number | null; sshUsername?: string | null; sshAuthMethod?: string | null };
+type Connection = { id: string; name: string; provider: string; environment: string; server: string; port: number | null; databaseName: string; sslMode: string; username: string; active: boolean; lastStatus: string | null; lastLatencyMs: number | null; lastCheckedAt: string | null; sshTunnelEnabled?: boolean; sshHost?: string | null; sshPort?: number | null; sshUsername?: string | null; sshAuthMethod?: string | null; metadataJson?: string | null };
 type TestState = null | { ok: true; latencyMs: number; database?: string } | { ok: false; message: string };
+type Provider = "postgres" | "mssql" | "firebird-ftp";
 
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return <label className="form-control w-full"><span className="label-text font-medium">{label}</span><div className="mt-1">{children}</div>{hint && <span className="label-text-alt mt-1 text-base-content/65">{hint}</span>}</label>;
 }
 
 function providerLabel(provider: string) {
-  return provider === "mssql" ? "SQL Server" : "PostgreSQL";
+  if (provider === "mssql") return "SQL Server";
+  if (provider === "firebird-ftp") return "Firebird (via FTP)";
+  return "PostgreSQL";
+}
+
+const DEFAULT_PORT: Record<Provider, number> = { postgres: 5432, mssql: 1433, "firebird-ftp": 21 };
+
+/** `Connection.metadataJson` de uma conexao firebird-ftp: só o caminho/padrão do FTP e do backup (sem segredo) — ver parseFirebirdFtpConfig em sources.ts. */
+function firebirdMeta(c: Connection | null): { remotePath: string; filePattern: string; innerFilePattern: string; charset: string } {
+  const empty = { remotePath: "", filePattern: "", innerFilePattern: "", charset: "" };
+  if (!c?.metadataJson) return empty;
+  try {
+    const parsed = JSON.parse(c.metadataJson) as { ftp?: { remotePath?: string; filePattern?: string }; firebird?: { innerFilePattern?: string; charset?: string } };
+    return {
+      remotePath: parsed.ftp?.remotePath ?? "",
+      filePattern: parsed.ftp?.filePattern ?? "",
+      innerFilePattern: parsed.firebird?.innerFilePattern ?? "",
+      charset: parsed.firebird?.charset ?? "",
+    };
+  } catch {
+    return empty;
+  }
 }
 
 function mssqlSslLabel(sslMode: string) {
@@ -34,7 +56,7 @@ export default function ConnectionsPage() {
   const [formTest, setFormTest] = useState<TestState>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [provider, setProvider] = useState<"postgres" | "mssql">("postgres");
+  const [provider, setProvider] = useState<Provider>("postgres");
   const [sshEnabled, setSshEnabled] = useState(false);
   const [sshAuthMethod, setSshAuthMethod] = useState<"password" | "privateKey">("password");
   const dialog = useRef<HTMLDialogElement>(null);
@@ -59,7 +81,7 @@ export default function ConnectionsPage() {
   }, []);
 
   function openCreate() { setEditing(null); setProvider("postgres"); setSshEnabled(false); setSshAuthMethod("password"); setError(""); setNotice(""); setFormTest(null); dialog.current?.showModal(); }
-  function openEdit(c: Connection) { setEditing(c); setProvider(c.provider === "mssql" ? "mssql" : "postgres"); setSshEnabled(!!c.sshTunnelEnabled); setSshAuthMethod(c.sshAuthMethod === "privateKey" ? "privateKey" : "password"); setError(""); setNotice(""); setFormTest(null); dialog.current?.showModal(); }
+  function openEdit(c: Connection) { setEditing(c); setProvider(c.provider === "mssql" ? "mssql" : c.provider === "firebird-ftp" ? "firebird-ftp" : "postgres"); setSshEnabled(!!c.sshTunnelEnabled); setSshAuthMethod(c.sshAuthMethod === "privateKey" ? "privateKey" : "password"); setError(""); setNotice(""); setFormTest(null); dialog.current?.showModal(); }
 
   function formPayload(form: HTMLFormElement) {
     const f = new FormData(form);
@@ -70,7 +92,18 @@ export default function ConnectionsPage() {
       payload.trustServerCert = f.get("trustServerCert") === "on";
       delete payload.sslMode;
     }
-    payload.sshTunnelEnabled = f.get("sshTunnelEnabled") === "on";
+    if (provider === "firebird-ftp") {
+      // Sem tunel SSH nem databaseName/SSL de verdade para este provider (ver POST /api/v1/connections).
+      delete payload.sslMode; delete payload.databaseName;
+      payload.sshTunnelEnabled = false;
+      // innerFilePattern/charset sao opcionais (z.string().min(1).optional()): um <input> vazio manda "" via
+      // FormData, e "" reprova o min(1) mesmo sendo optional (optional só pula quando o valor é undefined) —
+      // sem isto, salvar com esses campos em branco (o caso comum) falharia na validacao.
+      if (!String(payload.innerFilePattern ?? "").trim()) delete payload.innerFilePattern;
+      if (!String(payload.charset ?? "").trim()) delete payload.charset;
+    } else {
+      payload.sshTunnelEnabled = f.get("sshTunnelEnabled") === "on";
+    }
     if (!payload.sshTunnelEnabled) {
       delete payload.sshHost; delete payload.sshPort; delete payload.sshUsername; delete payload.sshAuthMethod;
       delete payload.sshPassword; delete payload.sshPrivateKey; delete payload.sshPassphrase;
@@ -81,10 +114,12 @@ export default function ConnectionsPage() {
   async function testForm() {
     if (!formRef.current) return;
     const payload = formPayload(formRef.current);
-    const missing = (["server", "databaseName", "username"] as const).filter(k => !String(payload[k] ?? "").trim());
+    const requiredFields = provider === "firebird-ftp" ? (["server", "username", "remotePath", "filePattern"] as const) : (["server", "databaseName", "username"] as const);
+    const missing = requiredFields.filter(k => !String(payload[k] ?? "").trim());
     const needsPassword = !editing && !String(payload.password ?? "").trim();
     if (missing.length || needsPassword) {
-      setFormTest({ ok: false, message: "Preencha servidor, banco e credenciais antes de testar." });
+      const what = provider === "firebird-ftp" ? "servidor FTP, caminho remoto/padrão do arquivo e credenciais" : "servidor, banco e credenciais";
+      setFormTest({ ok: false, message: `Preencha ${what} antes de testar.` });
       return;
     }
     setFormTesting(true); setFormTest(null);
@@ -137,6 +172,8 @@ export default function ConnectionsPage() {
   }
   const active = rows.filter(c => c.active);
   const isMssqlEdit = editing?.provider === "mssql";
+  const isFirebirdFtp = provider === "firebird-ftp" || editing?.provider === "firebird-ftp";
+  const firebirdDefaults = firebirdMeta(editing);
 
   return (
     <div className="space-y-6">
@@ -168,10 +205,14 @@ export default function ConnectionsPage() {
                   </div>
                 </div>
                 <dl className="mt-5 grid gap-4 rounded-xl bg-base-200 p-4 text-sm sm:grid-cols-2">
-                  <div><dt>Host</dt><dd className="font-mono text-xs">{c.server}:{c.port ?? (c.provider === "mssql" ? 1433 : 5432)}</dd></div>
-                  <div><dt>Banco</dt><dd>{c.databaseName}</dd></div>
-                  <div><dt>Usuário</dt><dd>{c.username}</dd></div>
-                  <div><dt>{c.provider === "mssql" ? "TLS" : "SSL"}</dt><dd>{c.provider === "mssql" ? mssqlSslLabel(c.sslMode) : c.sslMode}</dd></div>
+                  <div><dt>{c.provider === "firebird-ftp" ? "Host do FTP" : "Host"}</dt><dd className="font-mono text-xs">{c.server}:{c.port ?? DEFAULT_PORT[c.provider === "mssql" ? "mssql" : c.provider === "firebird-ftp" ? "firebird-ftp" : "postgres"]}</dd></div>
+                  <div><dt>{c.provider === "firebird-ftp" ? "Caminho remoto" : "Banco"}</dt><dd className={c.provider === "firebird-ftp" ? "font-mono text-xs" : ""}>{c.databaseName}</dd></div>
+                  <div><dt>{c.provider === "firebird-ftp" ? "Usuário FTP" : "Usuário"}</dt><dd>{c.username}</dd></div>
+                  {c.provider === "firebird-ftp" ? (
+                    <div><dt>Padrão do arquivo</dt><dd className="font-mono text-xs">{firebirdMeta(c).filePattern || "—"}</dd></div>
+                  ) : (
+                    <div><dt>{c.provider === "mssql" ? "TLS" : "SSL"}</dt><dd>{c.provider === "mssql" ? mssqlSslLabel(c.sslMode) : c.sslMode}</dd></div>
+                  )}
                   <div><dt>Último teste</dt><dd>{c.lastLatencyMs ? `${c.lastLatencyMs} ms` : "Não testada"}</dd></div>
                 </dl>
                 <div className="mt-4 text-right">
@@ -201,58 +242,79 @@ export default function ConnectionsPage() {
               {!editing && (
                 <div className="mt-4">
                   <Field label="Tipo de banco">
-                    <select className="select w-full" value={provider} onChange={e => { setProvider(e.target.value as "postgres" | "mssql"); setFormTest(null); }}>
+                    <select className="select w-full" value={provider} onChange={e => { setProvider(e.target.value as Provider); setFormTest(null); }}>
                       <option value="postgres">PostgreSQL</option>
                       <option value="mssql">SQL Server (MSSQL)</option>
+                      <option value="firebird-ftp">Firebird via FTP (backup .fdb)</option>
                     </select>
                   </Field>
                 </div>
               )}
             </section>
             <section>
-              <h4 className="text-sm font-semibold">Servidor</h4>
+              <h4 className="text-sm font-semibold">{isFirebirdFtp ? "Servidor FTP" : "Servidor"}</h4>
               <div className="mt-3 grid gap-4 sm:grid-cols-2">
-                <Field label={provider === "mssql" ? "Servidor" : "Host"} hint={provider === "mssql" ? "Endereço do SQL Server (ex: servidor\\instancia)." : "Endereço do servidor Postgres."}>
+                <Field label={isFirebirdFtp ? "Host do FTP" : provider === "mssql" ? "Servidor" : "Host"} hint={isFirebirdFtp ? "Endereço do servidor FTP que recebe o backup." : provider === "mssql" ? "Endereço do SQL Server (ex: servidor\\instancia)." : "Endereço do servidor Postgres."}>
                   <input required name="server" defaultValue={editing?.server} className="input w-full" onChange={() => setFormTest(null)} />
                 </Field>
                 <Field label="Porta">
-                  <input required name="port" defaultValue={editing?.port ?? (provider === "mssql" ? 1433 : 5432)} className="input w-full" inputMode="numeric" onChange={() => setFormTest(null)} />
+                  <input required name="port" defaultValue={editing?.port ?? DEFAULT_PORT[provider]} className="input w-full" inputMode="numeric" onChange={() => setFormTest(null)} />
                 </Field>
-                <Field label="Banco de dados">
-                  <input required name="databaseName" defaultValue={editing?.databaseName} className="input w-full" onChange={() => setFormTest(null)} />
-                </Field>
-                {(provider === "mssql" || isMssqlEdit) ? (
-                  <div className="flex flex-col gap-3 pt-1">
-                    <label className="flex cursor-pointer items-center gap-2">
-                      <input type="checkbox" name="encrypt" className="checkbox checkbox-sm" defaultChecked={!editing || editing.sslMode.startsWith("encrypt")} onChange={() => setFormTest(null)} />
-                      <span className="text-sm">Criptografar conexão (Encrypt)</span>
-                    </label>
-                    <label className="flex cursor-pointer items-center gap-2">
-                      <input type="checkbox" name="trustServerCert" className="checkbox checkbox-sm" defaultChecked={!!editing && editing.sslMode.includes("trust")} onChange={() => setFormTest(null)} />
-                      <span className="text-sm">Confiar no certificado do servidor</span>
-                    </label>
-                  </div>
+                {isFirebirdFtp ? (
+                  <>
+                    <Field label="Caminho remoto" hint="Pasta no FTP onde o backup é depositado (ex: /backup).">
+                      <input required name="remotePath" defaultValue={firebirdDefaults.remotePath} className="input w-full font-mono text-sm" onChange={() => setFormTest(null)} />
+                    </Field>
+                    <Field label="Padrão do arquivo" hint="Glob do arquivo mais recente (ex: *.zip).">
+                      <input required name="filePattern" defaultValue={firebirdDefaults.filePattern} className="input w-full font-mono text-sm" onChange={() => setFormTest(null)} />
+                    </Field>
+                    <Field label="Padrão do arquivo dentro do ZIP (opcional)" hint="Deixe em branco para usar o único arquivo do ZIP.">
+                      <input name="innerFilePattern" defaultValue={firebirdDefaults.innerFilePattern} className="input w-full font-mono text-sm" onChange={() => setFormTest(null)} />
+                    </Field>
+                    <Field label="Charset do backup (opcional)" hint="Ex: WIN1252 para ERPs Firebird antigos. Padrão: UTF8.">
+                      <input name="charset" defaultValue={firebirdDefaults.charset} className="input w-full font-mono text-sm" onChange={() => setFormTest(null)} />
+                    </Field>
+                  </>
                 ) : (
-                  <Field label="Modo SSL" hint="Use require para bancos hospedados em nuvem.">
-                    <select name="sslMode" defaultValue={editing?.sslMode ?? "require"} className="select w-full" onChange={() => setFormTest(null)}>
-                      <option value="require">require</option>
-                      <option value="disable">disable</option>
-                      <option value="verify-full">verify-full</option>
-                    </select>
-                  </Field>
+                  <>
+                    <Field label="Banco de dados">
+                      <input required name="databaseName" defaultValue={editing?.databaseName} className="input w-full" onChange={() => setFormTest(null)} />
+                    </Field>
+                    {(provider === "mssql" || isMssqlEdit) ? (
+                      <div className="flex flex-col gap-3 pt-1">
+                        <label className="flex cursor-pointer items-center gap-2">
+                          <input type="checkbox" name="encrypt" className="checkbox checkbox-sm" defaultChecked={!editing || editing.sslMode.startsWith("encrypt")} onChange={() => setFormTest(null)} />
+                          <span className="text-sm">Criptografar conexão (Encrypt)</span>
+                        </label>
+                        <label className="flex cursor-pointer items-center gap-2">
+                          <input type="checkbox" name="trustServerCert" className="checkbox checkbox-sm" defaultChecked={!!editing && editing.sslMode.includes("trust")} onChange={() => setFormTest(null)} />
+                          <span className="text-sm">Confiar no certificado do servidor</span>
+                        </label>
+                      </div>
+                    ) : (
+                      <Field label="Modo SSL" hint="Use require para bancos hospedados em nuvem.">
+                        <select name="sslMode" defaultValue={editing?.sslMode ?? "require"} className="select w-full" onChange={() => setFormTest(null)}>
+                          <option value="require">require</option>
+                          <option value="disable">disable</option>
+                          <option value="verify-full">verify-full</option>
+                        </select>
+                      </Field>
+                    )}
+                  </>
                 )}
               </div>
             </section>
             <section>
               <h4 className="text-sm font-semibold">Credenciais</h4>
               <div className="mt-3 grid gap-4 sm:grid-cols-2">
-                <Field label="Usuário"><input required name="username" defaultValue={editing?.username} className="input w-full" onChange={() => setFormTest(null)} /></Field>
-                <Field label={editing ? "Nova senha" : "Senha"} hint={editing ? "Deixe em branco para manter a senha atual." : undefined}>
+                <Field label={isFirebirdFtp ? "Usuário FTP" : "Usuário"}><input required name="username" defaultValue={editing?.username} className="input w-full" onChange={() => setFormTest(null)} /></Field>
+                <Field label={editing ? (isFirebirdFtp ? "Nova senha FTP" : "Nova senha") : (isFirebirdFtp ? "Senha FTP" : "Senha")} hint={editing ? "Deixe em branco para manter a senha atual." : undefined}>
                   <input required={!editing} type="password" name="password" className="input w-full" onChange={() => setFormTest(null)} />
                 </Field>
               </div>
             </section>
 
+            {!isFirebirdFtp && (
             <section>
               <label className="flex cursor-pointer items-center gap-2">
                 <input type="checkbox" name="sshTunnelEnabled" className="checkbox checkbox-sm" checked={sshEnabled} onChange={(e) => { setSshEnabled(e.target.checked); setFormTest(null); }} />
@@ -292,6 +354,7 @@ export default function ConnectionsPage() {
                 </div>
               )}
             </section>
+            )}
 
             {/* Test result inline */}
             <section>

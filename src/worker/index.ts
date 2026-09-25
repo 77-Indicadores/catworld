@@ -5,6 +5,7 @@ import { getUploadFilesDays, purgeExpiredUploadFiles } from "@/server/uploads/fi
 import { releaseAllImportLocks } from "@/server/db/import-lock";
 import { deleteInBatches } from "@/server/db/batched-delete";
 import { purgeLedger } from "@/server/integrity/ledger";
+import { purgeExpiredMaterializations } from "@/server/connections/firebird-materialize";
 import { JobCancelledError, runWithCancelToken, watchJobStatus } from "@/server/db/job-cancel";
 import { createWriteStream } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -147,6 +148,10 @@ async function runMetadataCleanup() {
     const deletedJobs = await deleteInBatches("cw_jobs", `status IN ('COMPLETED','FAILED') AND created_at < NOW() - ($1 || ' days')::INTERVAL`, [String(jobsDays)]);
     const deletedAudit = await deleteInBatches("cw_audit_events", `created_at < NOW() - ($1 || ' days')::INTERVAL`, [String(auditDays)]);
     await purgeLedger().catch((e) => console.error("[cleanup] purgeLedger falhou:", e instanceof Error ? e.message : e)); // livro de cargas: 90 dias
+    // .fdb de conexoes firebird-ftp vencidos ha tempo (TTL + margem, sem renovacao — ninguem esta lendo mais):
+    // apaga do disco e do servidor Firebird efemero. Nao existe job dedicado (materializacao roda inline dentro
+    // de refreshDatasetSource via ensureMaterialized); so a limpeza periodica precisa de um gatilho proprio.
+    await purgeExpiredMaterializations().catch((e) => console.error("[cleanup] purgeExpiredMaterializations falhou:", e instanceof Error ? e.message : e));
 
     // Fetch blobNames before deleting so we can clean up the files on disk.
     const expiredUploads = await prisma.$queryRawUnsafe<{ blob_name: string }[]>(

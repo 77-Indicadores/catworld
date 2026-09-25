@@ -14,7 +14,7 @@
 import { formatTimestamp, parseTemporal } from "./source-values";
 
 export type DeltaKind = "temporal" | "integer" | "decimal" | "text";
-export type Dialect = "postgres" | "mssql";
+export type Dialect = "postgres" | "mssql" | "firebird";
 
 export const DEFAULT_LOOKBACK_MINUTES = 10;
 export const DEFAULT_FUTURE_TOLERANCE_HOURS = 24;
@@ -108,7 +108,8 @@ export function buildDeltaPredicate(o: { kind: DeltaKind; quotedColumn: string; 
   let lit: string;
   if (kind === "temporal") {
     const iso = lb.replace(" ", "T");
-    lit = dialect === "mssql" ? `CAST('${iso}' AS DATETIME2(7))` : `'${lb}'::timestamp`;
+    // Firebird nao tem o cast `::timestamp` do Postgres; usa CAST(... AS TIMESTAMP) como o MSSQL, so sem o tamanho de fracao.
+    lit = dialect === "mssql" ? `CAST('${iso}' AS DATETIME2(7))` : dialect === "firebird" ? `CAST('${lb}' AS TIMESTAMP)` : `'${lb}'::timestamp`;
   } else if (kind === "integer" || kind === "decimal") {
     lit = watermark;
   } else {
