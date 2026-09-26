@@ -229,8 +229,15 @@ export async function ensureMaterialized(connectionId: string, creds: FtpCredent
     await markReady(connectionId, signature, endpoint);
     await rm(zipPath, { force: true }); // so o zip; o .fdb extraido fica (e agora o "database" apontado por ready)
     if (prevPath && prevPath !== fdbPath) {
-      await dropFirebirdFile(server, prevPath).catch((e) => console.warn(`[firebird-materialize] falha ao derrubar materializacao anterior de ${connectionId}:`, e instanceof Error ? e.message : e));
-      await rm(join(prevPath, ".."), { recursive: true, force: true }).catch(() => undefined);
+      // Só remover o arquivo/diretório antigo do disco — SEM `Firebird.dropAsync` (DROP DATABASE de verdade)
+      // antes disso: já detachamos logo após a prova de vida acima (nada segue anexado nesse arquivo), então
+      // o DROP não protege nada aqui, e um DROP DATABASE contra o motor único e compartilhado (docs/
+      // firebird-ftp-provider.md secao 1) é caro/exclusivo o bastante para arriscar travar/derrubar o motor
+      // para TODAS as conexões — suspeito (não confirmado por log de servidor, sem acesso a ele) de ter
+      // deixado o motor inacessível em produção, 2026-09-25, logo após o primeiro DROP de um arquivo real
+      // (os anteriores, testados nesta sessão, eram sempre contra referencias já mortas pelo bug do commit
+      // anterior). rm() recursivo do diretório já apaga o .fdb e qualquer arquivo auxiliar dele.
+      await rm(join(prevPath, ".."), { recursive: true, force: true }).catch((e) => console.warn(`[firebird-materialize] falha ao limpar materializacao anterior de ${connectionId}:`, e instanceof Error ? e.message : e));
     }
 
     return { endpoint, expiresAt: new Date(Date.now() + MATERIALIZATION_TTL_MS) };
@@ -240,10 +247,6 @@ export async function ensureMaterialized(connectionId: string, creds: FtpCredent
     await rm(attemptDir, { recursive: true, force: true }).catch(() => undefined);
     throw e;
   }
-}
-
-async function dropFirebirdFile(server: { host: string; port: number; user: string; password: string }, database: string): Promise<void> {
-  await Firebird.dropAsync({ host: server.host, port: server.port, database, user: server.user, password: server.password });
 }
 
 /** Chamado pela limpeza periódica (mesmo espírito de purgeExpiredUploadFiles/purgeLedger): materializações vencidas há tempo e sem fonte usando (nenhum renewMaterialization recente) têm o .fdb apagado do disco. */
@@ -256,10 +259,11 @@ export async function purgeExpiredMaterializations(graceMs = 10 * 60_000): Promi
   let n = 0;
   for (const row of rows) {
     try {
-      const server = firebirdServer();
-      await dropFirebirdFile(server, row.firebird_path);
-      await prisma.$executeRawUnsafe(`UPDATE cw_connection_materializations SET status = 'idle', firebird_path = NULL, updated_at = now() WHERE connection_id = $1::uuid`, row.connection_id);
+      // Só apaga o diretório do disco — ver nota em ensureMaterialized sobre por que NÃO usar
+      // Firebird.dropAsync (DROP DATABASE) aqui: nada segue anexado a um arquivo vencido, e um DROP DATABASE
+      // contra o motor único e compartilhado é caro/exclusivo o bastante para arriscar travá-lo pra todo mundo.
       await rm(workDirFor(row.connection_id), { recursive: true, force: true }).catch(() => undefined);
+      await prisma.$executeRawUnsafe(`UPDATE cw_connection_materializations SET status = 'idle', firebird_path = NULL, updated_at = now() WHERE connection_id = $1::uuid`, row.connection_id);
       n++;
     } catch (e) {
       console.error(`[firebird-materialize] falha ao limpar ${row.connection_id}:`, e instanceof Error ? e.message : e);
