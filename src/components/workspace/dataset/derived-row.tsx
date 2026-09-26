@@ -47,7 +47,7 @@ export function DerivedRow({ dt, schemaName, onSelectTable, onChanged }: {
             {fmtRows(rowCount) && <span> · {fmtRows(rowCount)} linhas</span>}
             {dt.refreshCron ? <span> · {dt.refreshCron}</span> : <span> · Manual</span>}
             {dt.nextRefreshAt && dt.refreshCron && (
-              new Date(dt.nextRefreshAt) < new Date()
+              fresh.kind === "stale"
                 ? <span className="text-warning"> · próx. sync atrasado</span>
                 : <span> · próx. <Time iso={dt.nextRefreshAt} /></span>
             )}

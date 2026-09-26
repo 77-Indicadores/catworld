@@ -204,15 +204,27 @@ export function safeStatementFirebird(query: string): string {
 
 export async function queryColumnsFirebird(endpoint: FirebirdEndpoint, query: string): Promise<SourceColumn[]> {
   const statement = safeStatementFirebird(query);
-  return withFirebird(endpoint, async (db) => {
-    // Sem TOP 0 nativo: FIRST 0 é o equivalente Firebird (dialeto 3) para sondar forma sem ler linhas.
-    const result = await db.queryAsync<Record<string, unknown>>(`SELECT FIRST 0 * FROM (${statement}) cw_source_probe`, [], { withMeta: true });
-    return result.fields.map((col) => {
-      const name = col.field ?? col.alias ?? "?";
-      const m = mapFirebirdWireType({ type: col.type, subType: col.subType ?? null, length: col.length ?? null, scale: col.scale ?? 0 });
-      return { originalName: name, sqlName: sqlIdentifier(name), sqlType: m.sqlType, nullable: col.nullable !== false, ...(m.lossyNumeric ? { lossyNumeric: true } : {}) };
+  try {
+    return await withFirebird(endpoint, async (db) => {
+      // Sem TOP 0 nativo: FIRST 0 é o equivalente Firebird (dialeto 3) para sondar forma sem ler linhas.
+      const result = await db.queryAsync<Record<string, unknown>>(`SELECT FIRST 0 * FROM (${statement}) cw_source_probe`, [], { withMeta: true });
+      return result.fields.map((col) => {
+        const name = col.field ?? col.alias ?? "?";
+        const m = mapFirebirdWireType({ type: col.type, subType: col.subType ?? null, length: col.length ?? null, scale: col.scale ?? 0 });
+        return { originalName: name, sqlName: sqlIdentifier(name), sqlType: m.sqlType, nullable: col.nullable !== false, ...(m.lossyNumeric ? { lossyNumeric: true } : {}) };
+      });
     });
-  });
+  } catch (e) {
+    if (e instanceof ApiError) throw e;
+    // Sem isto, qualquer erro do driver/engine Firebird (procedimento inexistente, tipo de parâmetro
+    // incompatível, erro de lógica dentro do procedimento) virava um "Erro interno do servidor" genérico
+    // (500, so com um errorId) — o unico jeito de saber o que aconteceu era olhar o Sentry. Este endpoint
+    // já exige ADMIN, e o erro do Firebird é sobre a CONSULTA do usuário, não sobre infra (host/senha),
+    // então é seguro mostrar de volta, igual já se faz para Postgres/MSSQL (que também nunca traduziam,
+    // só nunca lançavam esse tipo de erro para uma probe de SELECT simples).
+    const message = e instanceof Error ? e.message : String(e);
+    throw new ApiError(400, "FIREBIRD_QUERY_ERROR", message);
+  }
 }
 
 export async function executeFirebirdReadOnly(endpoint: FirebirdEndpoint, query: string, _timeout = 30, limit = 10000, offset = 0, normalize = false) {

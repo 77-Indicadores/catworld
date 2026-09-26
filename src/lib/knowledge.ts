@@ -434,14 +434,14 @@ export const articles: Article[] = [
   },
   {
     slug: "fontes-conectadas",
-    title: "Fontes conectadas (Postgres)",
-    description: "Como sincronizar tabelas de um banco Postgres externo para o Catworld.",
+    title: "Fontes conectadas",
+    description: "Como sincronizar tabelas de um banco externo (Postgres, SQL Server ou Firebird via FTP) para o Catworld.",
     category: "dados",
     icon: "DatabaseZap",
     sections: [
       {
         kind: "text",
-        text: "Fontes conectadas permitem que o Catworld extraia dados de bancos Postgres externos (produção, homologação ou staging) e os mantenha atualizados no data lake. Existem dois modos de operação: cópia (extração) e consulta ao vivo.",
+        text: "Fontes conectadas permitem que o Catworld extraia dados de bancos externos (Postgres, SQL Server ou Firebird via FTP) e os mantenha atualizados no data lake. Existem dois modos de operação: cópia (extração) e consulta ao vivo — este último não é oferecido para conexões firebird-ftp, que só suportam cópia.",
       },
       { kind: "heading", text: "Modos de operação" },
       {
@@ -449,29 +449,28 @@ export const articles: Article[] = [
         headers: ["Modo", "Como funciona", "Quando usar"],
         rows: [
           ["Cópia (Extract)", "Copia os dados para o Catworld periodicamente", "Relatórios, snapshots, dados históricos"],
-          ["Consulta ao vivo (Live)", "Consulta diretamente o banco de origem a cada query", "Dados que precisam ser sempre do momento atual"],
+          ["Consulta ao vivo (Live)", "Consulta diretamente o banco de origem a cada query (Postgres/SQL Server apenas)", "Dados que precisam ser sempre do momento atual"],
         ],
       },
       { kind: "heading", text: "Configurando uma conexão" },
       {
         kind: "steps",
         items: [
-          "Acesse Configurações → Conexões e adicione as credenciais do banco Postgres",
+          "Acesse Configurações → Conexões e adicione as credenciais do banco (ou do FTP, para firebird-ftp)",
           "Teste a conexão para confirmar que está acessível",
           "Abra um dataset e clique em Adicionar fonte",
           "Selecione a conexão, o schema e a tabela de origem (ou escreva uma consulta SQL)",
-          "Escolha o modo (cópia ou ao vivo) e a política de atualização",
+          "Escolha o modo (cópia ou ao vivo) e a agenda de atualização",
           "Salve — a primeira extração será iniciada automaticamente no modo cópia",
         ],
       },
-      { kind: "heading", text: "Políticas de atualização (modo cópia)" },
+      { kind: "heading", text: "Agenda de atualização (modo cópia)" },
       {
         kind: "list",
         items: [
-          'Manual — atualiza apenas quando você clicar em "Atualizar agora"',
-          "Horária — extrai a cada hora",
-          "Diária — extrai uma vez por dia",
-          "Semanal — extrai uma vez por semana",
+          'Sem cron (Postgres/SQL Server) — atualiza apenas quando você clicar em "Atualizar agora"',
+          "Cron (qualquer provider) — expressão cron em UTC, ex: a cada hora, uma vez por dia, uma vez por semana",
+          "Firebird via FTP — não precisa de cron por tabela: a conexão verifica periodicamente (intervalo configurável nela) se chegou um arquivo novo no FTP e, se sim, atualiza sozinha todas as fontes dessa conexão. O cron continua disponível como agenda extra/rede de segurança.",
         ],
       },
       {

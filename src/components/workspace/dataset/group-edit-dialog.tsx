@@ -88,6 +88,7 @@ export function GroupEditDialog({ groupId, datasetId, connectionId, connectionNa
   }
 
   const subtitle = connectionName + (sourceSchema ? " · " + sourceSchema : "");
+  const isFirebirdFtp = sources[0]?.connection.provider === "firebird-ftp";
 
   return (
     <>
@@ -105,7 +106,7 @@ export function GroupEditDialog({ groupId, datasetId, connectionId, connectionNa
               <span className="label-text font-medium">Modo</span>
               <select className="select mt-1 w-full" value={mode} onChange={e => setMode(e.target.value)}>
                 <option value="extract">Copiar para o Catworld</option>
-                <option value="live">Consultar direto na origem</option>
+                {!isFirebirdFtp && <option value="live">Consultar direto na origem</option>}
               </select>
             </label>
             <label className="form-control w-full">
@@ -119,7 +120,11 @@ export function GroupEditDialog({ groupId, datasetId, connectionId, connectionNa
               />
               {mode !== "live" && refreshCron.trim() && <CronPreview cron={refreshCron} onPick={setRefreshCron} />}
               {mode !== "live" && !refreshCron.trim() && (
-                <span className="label-text-alt mt-1 text-base-content/65">Vazio = sem agendamento automático</span>
+                <span className="label-text-alt mt-1 text-base-content/65">
+                  {isFirebirdFtp
+                    ? "Vazio = sem cron próprio; estas fontes ainda atualizam sozinhas quando a conexão detecta um arquivo novo no FTP."
+                    : "Vazio = sem agendamento automático"}
+                </span>
               )}
               {mode === "live" && <span className="label-text-alt mt-1 text-base-content/65">Fontes ao vivo sempre consultam a origem na hora.</span>}
             </label>

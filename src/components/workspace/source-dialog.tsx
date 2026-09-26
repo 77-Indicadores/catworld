@@ -210,7 +210,8 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
   }
 
   const activeConnection = connections.find((c) => c.id === connectionId);
-  const providerLabel = activeConnection?.provider === "mssql" ? "SQL Server" : "Postgres";
+  const providerLabel = activeConnection?.provider === "mssql" ? "SQL Server" : activeConnection?.provider === "firebird-ftp" ? "Firebird" : "Postgres";
+  const isFirebirdFtp = activeConnection?.provider === "firebird-ftp";
   const queryIsReady = queryName.trim() && sourceSql.trim() && queryStatus === "ok" && queryTestedSql === sourceSql;
   const canChooseOrigin = connectionId && (sourceKind === "table" ? selectedTables.length > 0 : queryIsReady);
   const modeLabel = mode === "extract" ? "Copiar para o Catworld" : `Consultar direto no ${providerLabel}`;
@@ -236,7 +237,12 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
                 <button type="button" className={`btn join-item btn-sm ${sourceKind === "query" ? "btn-primary" : "btn-outline"}`} onClick={() => setSourceKind("query")}><Play size={14} />Usar consulta</button>
               </div>
               <div className="grid gap-4 lg:grid-cols-2">
-                <Field label="Conexao"><select className="select w-full" value={connectionId} onChange={(e) => setConnectionId(e.target.value)}>{connections.map((c) => <option key={c.id} value={c.id}>{c.name} ({c.provider === "mssql" ? "SQL Server" : "Postgres"}) - {c.databaseName}</option>)}</select></Field>
+                <Field label="Conexao"><select className="select w-full" value={connectionId} onChange={(e) => {
+                  setConnectionId(e.target.value);
+                  // Fontes live nao sao suportadas para firebird-ftp (rejeitado pelo backend) — nao deixar o
+                  // modo "ao vivo" selecionado de uma conexao anterior sobreviver a troca para esta.
+                  if (connections.find((c) => c.id === e.target.value)?.provider === "firebird-ftp") setMode("extract");
+                }}>{connections.map((c) => <option key={c.id} value={c.id}>{c.name} ({c.provider === "mssql" ? "SQL Server" : c.provider === "firebird-ftp" ? "Firebird" : "Postgres"}) - {c.databaseName}</option>)}</select></Field>
                 {sourceKind === "table" ? (
                   <>
                     <Field label="Schema"><select className="select w-full" value={schema} onChange={(e) => setSchema(e.target.value)}>{schemas.map((s) => <option key={s.schema}>{s.schema}</option>)}</select></Field>
@@ -282,7 +288,7 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
                 ) : (
                   <>
                     <Field label="Nome da tabela no Catworld" hint="Obrigatorio para fontes criadas por consulta."><input className="input w-full" value={queryName} onChange={(e) => setQueryName(e.target.value)} /></Field>
-                    <Field label="Consulta SQL" hint={`Somente SELECT ou WITH. A consulta roda no ${providerLabel} da conexao escolhida.`} wide><textarea className="textarea h-44 w-full font-mono text-sm" value={sourceSql} onChange={(e) => { setSourceSql(e.target.value); setQueryStatus("idle"); }} /></Field>
+                    <Field label="Consulta SQL" hint={isFirebirdFtp ? "Somente SELECT ou WITH. A consulta roda contra o banco Firebird materializado a partir do backup baixado do FTP (dialeto SQL do Firebird, nao Postgres)." : `Somente SELECT ou WITH. A consulta roda no ${providerLabel} da conexao escolhida.`} wide><textarea className="textarea h-44 w-full font-mono text-sm" value={sourceSql} onChange={(e) => { setSourceSql(e.target.value); setQueryStatus("idle"); }} /></Field>
                     <div className="lg:col-span-2">
                       <div className="flex flex-wrap items-center gap-2">
                         <button type="button" className="btn btn-outline btn-sm" onClick={testQuery} disabled={loading || !connectionId || !sourceSql.trim()}><Play size={14} />{loading ? "Testando..." : "Testar consulta"}</button>
@@ -299,8 +305,10 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
           {step === "mode" && (
             <div className="mt-5 grid gap-4 lg:grid-cols-2">
               <button type="button" onClick={() => setMode("extract")} className={`rounded-box border p-4 text-left ${mode === "extract" ? "border-primary bg-primary/10" : "border-base-300 bg-base-100"}`}><DatabaseZap className="text-primary" size={22} /><h4 className="mt-3 font-semibold">Copiar para o Catworld</h4><p className="mt-1 text-sm text-base-content/65">Cria tabela(s) fisicas no dataset com o mesmo nome das tabelas selecionadas.</p></button>
-              <button type="button" onClick={() => setMode("live")} className={`rounded-box border p-4 text-left ${mode === "live" ? "border-primary bg-primary/10" : "border-base-300 bg-base-100"}`}><Cable className="text-primary" size={22} /><h4 className="mt-3 font-semibold">Consultar direto no {providerLabel}</h4><p className="mt-1 text-sm text-base-content/65">Nao copia dados. Cada visualizacao consulta a origem.</p></button>
-              <Field label="Agendamento (cron UTC)" hint={mode === "live" ? "Fontes ao vivo sempre consultam a origem na hora." : "Vazio = manual. Ex: 0 7-19/2 * * * (a cada 2h das 7-19h)"} wide>
+              {!isFirebirdFtp && (
+                <button type="button" onClick={() => setMode("live")} className={`rounded-box border p-4 text-left ${mode === "live" ? "border-primary bg-primary/10" : "border-base-300 bg-base-100"}`}><Cable className="text-primary" size={22} /><h4 className="mt-3 font-semibold">Consultar direto no {providerLabel}</h4><p className="mt-1 text-sm text-base-content/65">Nao copia dados. Cada visualizacao consulta a origem.</p></button>
+              )}
+              <Field label="Agendamento (cron UTC)" hint={mode === "live" ? "Fontes ao vivo sempre consultam a origem na hora." : isFirebirdFtp ? "Vazio = sem cron proprio; a fonte ainda atualiza sozinha quando a conexao detecta um arquivo novo no FTP (ver pollMinutes da conexao). Preencha so se quiser tambem uma agenda fixa." : "Vazio = manual. Ex: 0 7-19/2 * * * (a cada 2h das 7-19h)"} wide>
                 <input
                   disabled={mode === "live"}
                   className="input w-full font-mono text-sm"

@@ -178,7 +178,7 @@ export default function WorkerPage() {
 
       {saved && (
         <div className="alert alert-success alert-soft">
-          <CheckCircle2 size={18} /> Configurações salvas. O worker vai aplicar em até 10 segundos.
+          <CheckCircle2 size={18} /> Configurações salvas. Cada worker aplica no seu próximo ciclo de verificação (intervalo configurável por perfil, alguns segundos por padrão).
         </div>
       )}
       {error && <div className="alert alert-error alert-soft">{error}</div>}
@@ -286,7 +286,7 @@ export default function WorkerPage() {
         <div className="p-5 space-y-2">
           <h2 className="font-semibold text-sm text-base-content/70 uppercase tracking-wide">Como funciona</h2>
           <ul className="text-sm text-base-content/65 space-y-1 list-disc list-inside">
-            <li><strong>Slots</strong> (tabela de workers): quantos jobs cada worker roda ao mesmo tempo. Só valem depois de reiniciar o worker. Os tetos abaixo valem em até 10 s, sem reiniciar.</li>
+            <li><strong>Slots</strong> (tabela de workers): quantos jobs cada worker roda ao mesmo tempo. Só valem depois de reiniciar o worker. Os tetos abaixo valem sem reiniciar, no próximo ciclo de verificação de cada worker (o intervalo é configurável por perfil — normalmente alguns segundos, mas pode ser maior).</li>
             <li>O paralelismo real é o <strong>menor</strong> entre os slots e os tetos: um teto acima dos slots não tem efeito.</li>
             <li><strong>Reiniciar com segurança</strong> espera os jobs em andamento terminarem; <strong>reiniciar agora</strong> interrompe e os jobs recomeçam.</li>
             <li><strong>Teto de jobs pesados</strong>: imports e syncs completos pesam 2; o worker não inicia um novo se o teto for atingido.</li>

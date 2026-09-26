@@ -24,6 +24,15 @@ export const JOB_TYPE_LABEL: Record<string, { label: string; hint: string }> = {
   MIGRATE_STORAGE_DATASET: { label: "Migração de dataset (storage)", hint: "Copia um dataset para outro servidor de armazenamento" },
 };
 
+/** Como um upload gravou os dados na tabela. Fonte única: origin-block e history-block reimplementavam
+ * este dicionário separadamente com textos diferentes, e um modo novo só atualizado num dos dois cairia
+ * silenciosamente no fallback cru (`up.mode`) em apenas um dos blocos. */
+export const UPLOAD_MODE_LABEL: Record<string, string> = {
+  replace: "Substituiu os dados",
+  append: "Acrescentou linhas",
+  upsert: "Atualizou por chave",
+};
+
 export const COMMAND_ACTION_LABEL: Record<string, string> = {
   RESTART_PROFILE: "Reiniciar worker",
   STOP_PROFILE: "Parar worker",

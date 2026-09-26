@@ -4,12 +4,7 @@ import { fmtBytes } from "@/lib/fmt";
 import { formatInt } from "@/lib/present/count";
 import { sourceOriginLabel } from "@/lib/workspace/present";
 import type { WorkspaceDerived, WorkspaceTable } from "@/lib/workspace/types";
-
-const UPLOAD_MODE: Record<string, string> = {
-  replace: "Substituiu os dados",
-  append: "Acrescentou linhas",
-  upsert: "Atualizou por chave",
-};
+import { UPLOAD_MODE_LABEL } from "@/lib/labels";
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -39,7 +34,9 @@ export function OriginBlock({ table, datasetName, derived }: { table: WorkspaceT
             </Row>
             {s.mode === "extract" && (
               <>
-                <Row label="Agenda">{s.refreshCron ? <span className="font-mono">{s.refreshCron} <span className="font-sans text-base-content/70">(UTC)</span></span> : "Manual"}</Row>
+                <Row label="Agenda">{s.refreshCron
+                  ? <span className="font-mono">{s.refreshCron} <span className="font-sans text-base-content/70">(UTC)</span></span>
+                  : s.connection.provider === "firebird-ftp" ? "Automática (sem cron: atualiza ao detectar arquivo novo na origem)" : "Manual"}</Row>
                 <Row label="Chave">{s.keyColumn ?? <span className="font-normal text-base-content/70">não definida (sem exclusões)</span>}</Row>
                 <Row label="Coluna de mudança">{s.deltaColumn ?? <span className="font-normal text-base-content/70">nenhuma (recarrega tudo)</span>}</Row>
               </>
@@ -56,7 +53,7 @@ export function OriginBlock({ table, datasetName, derived }: { table: WorkspaceT
           <>
             <Row label="Tipo">Arquivo enviado</Row>
             <Row label="Arquivo"><span className="font-mono">{up.filename}</span></Row>
-            <Row label="Como entrou">{UPLOAD_MODE[up.mode] ?? up.mode}</Row>
+            <Row label="Como entrou">{UPLOAD_MODE_LABEL[up.mode] ?? up.mode}</Row>
             <Row label="Tamanho do arquivo">{fmtBytes(Number(up.sizeBytes))}</Row>
             <Row label="Enviado em"><Time iso={up.createdAt} relative /></Row>
             {up.createdBy && <Row label="Enviado por">{up.createdBy}</Row>}

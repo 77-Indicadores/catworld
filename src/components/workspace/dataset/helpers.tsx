@@ -39,8 +39,8 @@ export function sourceBadge(source: Source) {
   return { status: f.tone, label: f.label };
 }
 
-export function refreshText(cron: string | null) {
-  return cron ?? "Manual";
+export function refreshText(cron: string | null, autoWatch?: boolean) {
+  return cron ?? (autoWatch ? "Automática (sem cron)" : "Manual");
 }
 
 export function fmtRows(n: string | null) {

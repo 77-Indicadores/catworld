@@ -27,6 +27,7 @@ const visible = {
   metadataJson: true,
   lastStatus: true,
   lastLatencyMs: true,
+  lastError: true,
   lastCheckedAt: true,
   createdAt: true,
   updatedAt: true,

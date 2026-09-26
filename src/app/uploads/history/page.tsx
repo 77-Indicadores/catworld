@@ -19,7 +19,9 @@ const UPLOAD_STATUS_GROUPS: Record<string, string[]> = {
   pending: ["PENDING_UPLOAD", "QUEUED_PREVIEW", "AWAITING_CONFIRMATION", "QUEUED_IMPORT"],
   active: ["PREVIEWING", "IMPORTING", "RETRYING"],
   completed: ["COMPLETED"],
-  failed: ["FAILED", "CANCELLED"],
+  // Upload.status nunca grava o literal "CANCELLED" — cancelamento grava FAILED com
+  // errorMessage "Cancelado pelo usuário" (ver isCancelledOutcome em lib/present/status.ts).
+  failed: ["FAILED"],
 };
 
 const JOB_STATUS_GROUPS: Record<string, string[]> = {

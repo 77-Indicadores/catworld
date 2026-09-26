@@ -52,11 +52,13 @@ export function MetadataPanel({ table, dataset, projectSlug, publicOrigin, onCha
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
 
+  const derived = dataset.derivedTables.find(d => d.targetTable?.id === table.id) ?? null;
+
   async function refreshSource() {
-    if (!table.source) return;
+    if (!table.source && !derived) return;
     setRefreshing(true); setError(""); setNotice("");
     try {
-      await apiRequest(`/api/v1/dataset-sources/${table.source.id}/refresh`, { method: "POST" });
+      await apiRequest(table.source ? `/api/v1/dataset-sources/${table.source.id}/refresh` : `/api/v1/derived-tables/${derived!.id}/refresh`, { method: "POST" });
     } catch (err) {
       setRefreshing(false);
       setError(errorMessage(err));
@@ -65,8 +67,6 @@ export function MetadataPanel({ table, dataset, projectSlug, publicOrigin, onCha
     setRefreshing(false);
     setNotice("Atualização enfileirada."); onChanged();
   }
-
-  const derived = dataset.derivedTables.find(d => d.targetTable?.id === table.id) ?? null;
 
   return (
     <div className="flex h-full flex-col overflow-y-auto text-sm">
@@ -114,8 +114,12 @@ export function MetadataPanel({ table, dataset, projectSlug, publicOrigin, onCha
       <div className="p-4 space-y-2">
         {notice && <div className="alert alert-success alert-soft text-xs p-2">{notice}</div>}
         {error && <div className="alert alert-error alert-soft text-xs p-2">{error}</div>}
-        {table.source?.mode === "extract" && (
-          <button onClick={refreshSource} disabled={refreshing} className="btn btn-outline btn-sm w-full">
+        {(table.source?.mode === "extract" || (!table.source && derived)) && (
+          <button
+            onClick={refreshSource}
+            disabled={refreshing || (!table.source && (derived?.lastStatus === "running" || derived?.lastStatus === "queued"))}
+            className="btn btn-outline btn-sm w-full"
+          >
             <RefreshCw size={13} className={refreshing ? "animate-spin" : ""} />
             {refreshing ? "Enfileirando..." : "Atualizar agora"}
           </button>

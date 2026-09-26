@@ -170,6 +170,9 @@ model Connection {
   active               Boolean   @default(true)
   lastStatus           String?   @map("last_status") @db.VarChar(32)
   lastLatencyMs        Int?      @map("last_latency_ms")
+  /// Mensagem do teste de conexão mais recente, só preenchida quando lastStatus = "error". Antes disto, uma
+  /// falha de teste não gravava nada e a UI mostrava "Inativo"/"Não testada" — indistinguível de nunca ter testado.
+  lastError            String?   @map("last_error") @db.Text
   lastCheckedAt        DateTime? @map("last_checked_at") @db.Timestamp(3)
   createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamp(3)
   updatedAt            DateTime  @updatedAt @map("updated_at") @db.Timestamp(3)

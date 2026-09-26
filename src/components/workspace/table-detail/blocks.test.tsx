@@ -12,7 +12,7 @@ const source = (over: Partial<WorkspaceSource> = {}): WorkspaceSource => ({
   id: "s1", name: "vendas", mode: "extract", sourceKind: "table", sourceGroupId: null, sourceSchema: "dbo", sourceTable: "vendas", sourceSql: null,
   refreshCron: "0 * * * *", keyColumn: "id", deltaColumn: "atualizado_em", reconciliationCron: null, sourceSqlReconciliation: null, detectDeletions: false, keysSql: null, keysMinIntervalMinutes: null, lastKeysCheckAt: null, lastRemovedCount: null, active: true,
   lastStatus: "completed", lastRowCount: "1487197", lastError: null, lastRefreshedAt: NOW, nextRefreshAt: HOUR_AHEAD,
-  connection: { id: "c1", name: "dev-live" }, ...over,
+  connection: { id: "c1", name: "dev-live", provider: "postgres" }, ...over,
 });
 const upload: WorkspaceUpload = { id: "u1", filename: "vendas_2026.csv", mode: "replace", sizeBytes: "52428800", createdAt: NOW, createdBy: "ana@empresa.com" };
 const table = (over: Partial<WorkspaceTable> = {}): WorkspaceTable => ({
@@ -54,6 +54,13 @@ describe("FreshnessBlock", () => {
   it("derivada usa o estado da própria derivada", () => {
     render(<FreshnessBlock table={table({ lastUpload: null })} derived={derived} />);
     expect(screen.getByText("Manual")).toBeInTheDocument();
+  });
+  it("fonte firebird-ftp sem cron NÃO diz 'Manual' nem 'atualiza só quando você pedir' (bug: watch de FTP a substitui)", () => {
+    const s = source({ refreshCron: null, nextRefreshAt: null, connection: { id: "c1", name: "jacy-ftp", provider: "firebird-ftp" } });
+    render(<FreshnessBlock table={table({ source: s })} derived={null} />);
+    expect(screen.queryByText("Manual")).toBeNull();
+    expect(screen.queryByText(/atualiza só quando você pedir/)).toBeNull();
+    expect(screen.getByText("Automática")).toBeInTheDocument();
   });
 });
 

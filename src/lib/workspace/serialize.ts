@@ -99,7 +99,7 @@ export function serializeWorkspaceProject(p: WorkspaceProjectRow, lastUploads: M
               lastRefreshedAt: iso(t.source.lastRefreshedAt),
               nextRefreshAt: iso(t.source.nextRefreshAt),
               updatedAt: iso(t.source.updatedAt),
-              connection: { id: t.source.connection.id, name: t.source.connection.name },
+              connection: { id: t.source.connection.id, name: t.source.connection.name, provider: t.source.connection.provider },
             }
           : null,
         columns: t.columns.map((c) => ({ id: c.id, sqlName: c.sqlName, originalName: c.originalName, sqlType: c.sqlType, nullable: c.nullable })),

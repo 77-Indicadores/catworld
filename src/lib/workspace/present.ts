@@ -6,6 +6,7 @@ export function sourceRefreshInput(s: WorkspaceSource): RefreshInput {
   return {
     mode: s.mode, active: s.active, lastStatus: s.lastStatus, lastError: s.lastError,
     refreshCron: s.refreshCron, nextRefreshAt: s.nextRefreshAt, lastRefreshedAt: s.lastRefreshedAt, updatedAt: s.updatedAt ?? null,
+    autoWatch: s.connection.provider === "firebird-ftp",
   };
 }
 

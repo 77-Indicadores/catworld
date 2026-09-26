@@ -4,8 +4,9 @@ import { CheckCircle2, CloudCog, DatabaseZap, Pencil, Plus, RefreshCw, Server, T
 import { EmptyState, PageHeader, Panel, StatusBadge } from "@/components/ui/primitives";
 import { useApiAction, useFeedback } from "@/components/ui/feedback";
 import { apiRequest, errorMessage } from "@/lib/api-client";
+import { Time } from "@/components/ui/time";
 
-type Connection = { id: string; name: string; provider: string; environment: string; server: string; port: number | null; databaseName: string; sslMode: string; username: string; active: boolean; lastStatus: string | null; lastLatencyMs: number | null; lastCheckedAt: string | null; sshTunnelEnabled?: boolean; sshHost?: string | null; sshPort?: number | null; sshUsername?: string | null; sshAuthMethod?: string | null; metadataJson?: string | null };
+type Connection = { id: string; name: string; provider: string; environment: string; server: string; port: number | null; databaseName: string; sslMode: string; username: string; active: boolean; lastStatus: string | null; lastLatencyMs: number | null; lastError: string | null; lastCheckedAt: string | null; sshTunnelEnabled?: boolean; sshHost?: string | null; sshPort?: number | null; sshUsername?: string | null; sshAuthMethod?: string | null; metadataJson?: string | null };
 type TestState = null | { ok: true; latencyMs: number; database?: string } | { ok: false; message: string };
 type Provider = "postgres" | "mssql" | "firebird-ftp";
 
@@ -200,7 +201,7 @@ export default function ConnectionsPage() {
                     <div>
                       <div className="flex items-center gap-2">
                         <h2 className="font-semibold">{c.name}</h2>
-                        <StatusBadge status={c.lastStatus === "healthy" ? "healthy" : c.lastStatus ? "warning" : "inactive"} />
+                        <StatusBadge status={c.lastStatus === "healthy" ? "healthy" : c.lastStatus === "error" ? "error" : "inactive"} label={c.lastStatus === "healthy" ? "Saudável" : c.lastStatus === "error" ? "Falhou" : "Não testada"} />
                       </div>
                       <p className="text-xs text-base-content/65">{c.environment} · {providerLabel(c.provider)}{c.sshTunnelEnabled ? " · Túnel SSH" : ""}</p>
                     </div>
@@ -222,8 +223,18 @@ export default function ConnectionsPage() {
                   ) : (
                     <div><dt>{c.provider === "mssql" ? "TLS" : "SSL"}</dt><dd>{c.provider === "mssql" ? mssqlSslLabel(c.sslMode) : c.sslMode}</dd></div>
                   )}
-                  <div><dt>Último teste</dt><dd>{c.lastLatencyMs ? `${c.lastLatencyMs} ms` : "Não testada"}</dd></div>
+                  <div>
+                    <dt>Último teste</dt>
+                    <dd>
+                      {c.lastCheckedAt
+                        ? <>{c.lastStatus === "healthy" ? `${c.lastLatencyMs} ms` : "Falhou"} · <Time iso={c.lastCheckedAt} relative /></>
+                        : "Não testada"}
+                    </dd>
+                  </div>
                 </dl>
+                {c.lastStatus === "error" && c.lastError && (
+                  <p className="mt-2 rounded bg-error/8 px-2 py-1 font-mono text-[11px] text-error">{c.lastError}</p>
+                )}
                 <div className="mt-4 text-right">
                   <button disabled={testing === c.id} onClick={() => test(c.id)} className="btn btn-outline btn-sm">
                     <RefreshCw size={14} className={testing === c.id ? "animate-spin" : ""} />{testing === c.id ? "Testando..." : "Testar conexão"}

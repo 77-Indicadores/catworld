@@ -320,7 +320,7 @@ export default function RetentionPage() {
         <div className="p-5 space-y-2">
           <h2 className="font-semibold text-sm text-base-content/70 uppercase tracking-wide">Como funciona</h2>
           <ul className="text-sm text-base-content/65 space-y-1 list-disc list-inside">
-            <li>O worker executa a limpeza automaticamente a cada 24 horas via job <code className="font-mono text-xs">METADATA_CLEANUP</code>.</li>
+            <li>Um worker cujo perfil processa o tipo <code className="font-mono text-xs">METADATA_CLEANUP</code> executa a limpeza automaticamente a cada 24 horas — se nenhum worker ativo cobrir esse tipo, a limpeza não roda sozinha (veja Configurações → Worker); o histórico abaixo é o jeito de confirmar que está rodando.</li>
             <li>Use &quot;Purgar agora&quot; para forçar a limpeza imediatamente (enfileira um job).</li>
             <li>Dados de datasets (tabelas SQL Server) nunca são afetados — apenas metadados internos.</li>
             <li>A janela de retenção conta a partir de <code className="font-mono text-xs">created_at</code> de cada registro.</li>
@@ -334,7 +334,9 @@ export default function RetentionPage() {
           <h3 className="text-lg font-bold">Purgar agora</h3>
           <p className="mt-2 text-sm text-base-content/65">
             Apaga já os jobs, eventos de auditoria, uploads e versões de dados mais antigos que os
-            períodos salvos nesta tela. Eventos de auditoria apagados não podem ser recuperados.
+            períodos salvos (clique em &quot;Salvar configurações&quot; primeiro se você alterou os campos
+            acima e ainda não salvou — o purge usa o que já está gravado, não o que está só digitado na tela).
+            Eventos de auditoria apagados não podem ser recuperados.
           </p>
           <DangerZone
             description="Esta ação é imediata e não pode ser desfeita — mesmo dados que ainda seriam úteis para auditoria/conformidade serão removidos se estiverem fora da janela configurada."

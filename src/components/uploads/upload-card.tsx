@@ -6,7 +6,7 @@ import { CheckCircle2, CircleAlert, CircleDashed, CircleX, Clock3, Loader2, Refr
 import type { Upload, Dataset, Project } from "@prisma/client";
 import { fmtBytes, fmtRelative, fmtDuration } from "@/lib/fmt";
 import { useApiAction, useFeedback } from "@/components/ui/feedback";
-import { formatInt, isEmptyOutcome } from "@/lib/present";
+import { formatInt, isEmptyOutcome, isCancelledOutcome } from "@/lib/present";
 
 type JobSummary = { lockedBy: string | null; status: string; weight: number; attempts: number; maxAttempts: number };
 type UploadWithDataset = Upload & { dataset: (Dataset & { project: Project }) | null; jobs: JobSummary[] };
@@ -60,13 +60,16 @@ export function UploadCard({ upload, importSummary }: { upload: UploadWithDatase
   const [retrying, setRetrying] = useState(false);
 
   const isEmpty = upload.status === "FAILED" && isEmptyOutcome(upload.errorMessage);
-  const cfg = isEmpty
+  const isCancelled = upload.status === "FAILED" && isCancelledOutcome(upload.errorMessage);
+  const cfg = isCancelled
+    ? { cls: "badge-ghost", icon: CircleDashed, label: "Cancelado" }
+    : isEmpty
     ? { cls: "badge-ghost", icon: CircleDashed, label: "Vazio" }
     : STATUS_CONFIG[upload.status] ?? { cls: "badge-ghost", icon: Clock3, label: upload.status };
   const Icon = cfg.icon;
   const isInProgress = ["QUEUED_PREVIEW", "QUEUED_IMPORT", "IMPORTING", "RETRYING"].includes(upload.status);
   const canCancel = CANCELLABLE.has(upload.status);
-  const canRetry = upload.status === "FAILED";
+  const canRetry = upload.status === "FAILED" && !isCancelled;
 
   const handleCancel = async () => {
     if (!await askConfirm({ title: "Cancelar upload", message: `Cancelar o upload de "${upload.originalFilename}"?`, confirmLabel: "Cancelar upload", cancelLabel: "Manter", danger: true })) return;
@@ -88,9 +91,8 @@ export function UploadCard({ upload, importSummary }: { upload: UploadWithDatase
   };
 
   const job = upload.jobs[0] ?? null;
-  const workerSlot = job?.lockedBy
-    ? (job.lockedBy.match(/-(\d+)(?:@\S+)?$/) ?? [])[1] ? `slot ${(job.lockedBy.match(/-(\d+)(?:@\S+)?$/) ?? [])[1]}` : job.lockedBy
-    : null;
+  const workerSlotMatch = job?.lockedBy?.match(/-(\d+)(?:@\S+)?$/) ?? null;
+  const workerSlot = workerSlotMatch ? `slot ${workerSlotMatch[1]}` : null;
   const ds = upload.dataset;
   const destination = ds
     ? ds.project?.name
@@ -159,7 +161,7 @@ export function UploadCard({ upload, importSummary }: { upload: UploadWithDatase
           {(upload.status === "COMPLETED" || upload.status === "FAILED") && (
             <>
               <span>·</span>
-              <span title="Duração total">⏱ {fmtDuration(upload.updatedAt.getTime() - upload.createdAt.getTime())}</span>
+              <span title="Duração total, incluindo o tempo na fila antes de começar">⏱ {fmtDuration(upload.updatedAt.getTime() - upload.createdAt.getTime())}</span>
             </>
           )}
           {importSummary?.importMethod && (
@@ -175,7 +177,7 @@ export function UploadCard({ upload, importSummary }: { upload: UploadWithDatase
           )}
         </div>
 
-        {upload.status === "FAILED" && upload.errorMessage && (
+        {upload.status === "FAILED" && upload.errorMessage && !isCancelled && (
           <p className={`mt-2 rounded-lg px-3 py-2 text-xs ${isEmpty ? "bg-base-200 text-base-content/65" : "bg-error/10 text-error"}`}>
             {upload.errorMessage}
           </p>

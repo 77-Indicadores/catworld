@@ -49,7 +49,13 @@ describe("serializeWorkspaceProject", () => {
     const d = serializeWorkspaceProject(row()).datasets[0]!;
     expect(d.schemaName).toBe("ds_test");
     const s = d.tables[0]!.source!;
-    expect(s).toMatchObject({ keyColumn: "id", deltaColumn: "atualizado_em", connection: { id: "c1", name: "dev-live" }, sourceSchema: "dbo", sourceTable: "vendas" });
+    expect(s).toMatchObject({ keyColumn: "id", deltaColumn: "atualizado_em", connection: { id: "c1", name: "dev-live", provider: "postgres" }, sourceSchema: "dbo", sourceTable: "vendas" });
+  });
+  it("expõe o provider da conexão (a UI precisa saber se é firebird-ftp para não chamar auto-watch de 'Manual')", () => {
+    const p = row();
+    p.datasets[0]!.tables[0]!.source!.connection.provider = "firebird-ftp";
+    const s = serializeWorkspaceProject(p).datasets[0]!.tables[0]!.source!;
+    expect(s.connection.provider).toBe("firebird-ftp");
   });
   it("tabela sem fonte (upload) e sem upload conhecido: source e lastUpload nulos", () => {
     const t = serializeWorkspaceProject(row({ source: false })).datasets[0]!.tables[0]!;

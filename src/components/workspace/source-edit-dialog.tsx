@@ -20,7 +20,7 @@ type Source = {
   keysMinIntervalMinutes?: number | null;
   sourceKind: string;
   sourceSql?: string | null;
-  connection: { id: string; name: string };
+  connection: { id: string; name: string; provider?: string };
 };
 
 export function SourceEditDialog({ source, onComplete }: { source: Source; onComplete: () => void }) {
@@ -173,7 +173,7 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
               <span className="label-text font-medium">Modo</span>
               <select className="select mt-1 w-full" value={mode} onChange={(e) => setMode(e.target.value)}>
                 <option value="extract">Copiar para o Catworld</option>
-                <option value="live">Consultar direto na origem</option>
+                {source.connection.provider !== "firebird-ftp" && <option value="live">Consultar direto na origem</option>}
               </select>
             </label>
 
@@ -188,7 +188,11 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
               />
               {mode !== "live" && refreshCron.trim() && <CronPreview cron={refreshCron} onPick={setRefreshCron} />}
               {mode !== "live" && !refreshCron.trim() && (
-                <span className="label-text-alt mt-1 text-base-content/65">Vazio = sem agendamento automático</span>
+                <span className="label-text-alt mt-1 text-base-content/65">
+                  {source.connection.provider === "firebird-ftp"
+                    ? "Vazio = sem cron próprio; a fonte ainda atualiza sozinha quando a conexão detecta um arquivo novo no FTP."
+                    : "Vazio = sem agendamento automático"}
+                </span>
               )}
               {mode === "live" && <span className="label-text-alt mt-1 text-base-content/65">Fontes ao vivo sempre consultam a origem na hora.</span>}
             </label>

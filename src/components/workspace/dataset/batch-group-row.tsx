@@ -76,7 +76,7 @@ export function BatchGroupRow({ groupId, datasetId, sources, tables, onSelectTab
           </div>
           <p className="text-xs text-base-content/65">
             {tables.length} tabela{tables.length !== 1 ? "s" : ""}
-            {" · " + (rep.mode === "extract" ? refreshText(rep.refreshCron) : "Ao vivo")}
+            {" · " + (rep.mode === "extract" ? refreshText(rep.refreshCron, rep.connection.provider === "firebird-ftp") : "Ao vivo")}
             {rep.nextRefreshAt && rep.mode === "extract" && rep.refreshCron && (
               groupFresh?.kind === "stale"
                 ? <span className="text-warning"> · próx. sync atrasado</span>

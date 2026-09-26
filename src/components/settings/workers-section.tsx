@@ -24,10 +24,18 @@ type Data = {
 const OPEN = new Set(["PENDING", "ACCEPTED", "DRAINING", "APPLYING"]);
 const JOB_TYPES = Object.keys(JOB_TYPE_LABEL);
 
-function stateBadge(p: Profile): { status: Status; label: string } {
+function stateBadge(p: Profile, supervised: boolean): { status: Status; label: string } {
   if (!p.enabled) return { status: "inactive", label: "Desabilitado" };
   const s = p.runtime?.state;
-  if (!s) return { status: "warning", label: "Sem supervisor" };
+  if (!s) {
+    // Distingue "o supervisor global está fora do ar" (já avisado pelo banner acima, redundante repetir
+    // aqui) de "o supervisor está de pé, mas este worker específico nunca conseguiu subir um processo
+    // filho" (binário ausente, erro de spawn na inicialização) — sem isso os dois casos pareciam o mesmo
+    // problema geral, quando o segundo é só deste worker.
+    return supervised
+      ? { status: "error", label: "Nunca iniciou" }
+      : { status: "warning", label: "Sem supervisor" };
+  }
   const label = WORKER_STATE_LABEL[s] ?? s;
   if (s === "RUNNING") return { status: "healthy", label };
   if (s === "CRASH_LOOP") return { status: "error", label };
@@ -139,7 +147,7 @@ export function WorkersSection() {
             </thead>
             <tbody>
               {data.profiles.map((p) => {
-                const badge = stateBadge(p);
+                const badge = stateBadge(p, supervised);
                 return (
                   <tr key={p.id}>
                     <td data-label="Worker">
@@ -215,9 +223,11 @@ export function WorkersSection() {
 
 function safeError(json: string): string {
   try {
-    return String((JSON.parse(json) as { error?: string }).error ?? "");
+    return String((JSON.parse(json) as { error?: string }).error ?? json);
   } catch {
-    return "";
+    // Sem isto, um resultJson que nao e o JSON esperado {error} vira string vazia e a linha mostra
+    // so "Falhou" — perdendo silenciosamente o unico detalhe disponivel sobre a causa.
+    return json;
   }
 }
 

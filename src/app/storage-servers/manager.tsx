@@ -63,11 +63,23 @@ function DatasetsCell({ server }: { server: Server }) {
   );
 }
 
+function checkedAgoLabel(iso: Date | string | null): string {
+  if (!iso) return "nunca testado";
+  const ms = Date.now() - new Date(iso).getTime();
+  const min = Math.round(ms / 60_000);
+  if (min < 1) return "testado agora";
+  if (min < 60) return `testado há ${min} min`;
+  const h = Math.round(min / 60);
+  if (h < 24) return `testado há ${h}h`;
+  return `testado há ${Math.round(h / 24)}d`;
+}
+
 function statusBadge(s: Server) {
-  if (!s.active) return <span className="badge badge-sm badge-ghost gap-1"><Clock3 size={11} />Inativo</span>;
-  if (s.lastStatus === "healthy") return <span className="badge badge-sm badge-success gap-1"><CheckCircle2 size={11} />{s.lastLatencyMs}ms</span>;
-  if (s.lastStatus === "error") return <span className="badge badge-sm badge-error gap-1"><CircleX size={11} />Erro</span>;
-  return <span className="badge badge-sm badge-ghost gap-1"><Clock3 size={11} />Não testado</span>;
+  const title = checkedAgoLabel(s.lastCheckedAt);
+  if (!s.active) return <span className="badge badge-sm badge-ghost gap-1" title={title}><Clock3 size={11} />Inativo</span>;
+  if (s.lastStatus === "healthy") return <span className="badge badge-sm badge-success gap-1" title={title}><CheckCircle2 size={11} />{s.lastLatencyMs}ms</span>;
+  if (s.lastStatus === "error") return <span className="badge badge-sm badge-error gap-1" title={title}><CircleX size={11} />Erro</span>;
+  return <span className="badge badge-sm badge-ghost gap-1" title={title}><Clock3 size={11} />Não testado</span>;
 }
 
 function maskedUrl(url: string | null) {
@@ -234,14 +246,17 @@ export function StorageServerManager({ initialServers }: { initialServers: Serve
                           </span>
                         </div>
                       </td>
-                      <td data-label="URL" className="max-w-xs truncate font-mono text-xs text-base-content/65">{maskedUrl(s.url)}</td>
+                      <td data-label="URL" className="max-w-xs truncate font-mono text-xs text-base-content/65" title={maskedUrl(s.url) ?? undefined}>{maskedUrl(s.url)}</td>
                       <td data-label="Datasets" className="text-center text-sm"><DatasetsCell server={s} /></td>
                       <td data-label="Status" className="text-center">
                         {tr && "error" in tr
                           ? <span className="badge badge-sm badge-error gap-1"><CircleX size={11} />{tr.error}</span>
                           : tr && "healthy" in tr
                           ? <span className="badge badge-sm badge-success gap-1"><CheckCircle2 size={11} />{tr.latencyMs}ms · {tr.database}</span>
-                          : statusBadge(s)}
+                          : <div className="flex flex-col items-center gap-0.5">
+                              {statusBadge(s)}
+                              <span className="text-[10px] text-base-content/65">{checkedAgoLabel(s.lastCheckedAt)}</span>
+                            </div>}
                       </td>
                       <td data-label="Ações">
                         <div className="flex items-center justify-end gap-1">

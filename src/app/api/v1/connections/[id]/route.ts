@@ -6,7 +6,7 @@ import { encryptSecret, decryptSecret } from "@/server/security/crypto";
 import { handleApiError, ok } from "@/server/http";
 import { parseFirebirdFtpConfig } from "@/server/connections/sources";
 
-const visible = { id: true, name: true, provider: true, environment: true, server: true, port: true, databaseName: true, sslMode: true, username: true, active: true, sshTunnelEnabled: true, sshHost: true, sshPort: true, sshUsername: true, sshAuthMethod: true, metadataJson: true, lastStatus: true, lastLatencyMs: true, lastCheckedAt: true, createdAt: true, updatedAt: true } as const;
+const visible = { id: true, name: true, provider: true, environment: true, server: true, port: true, databaseName: true, sslMode: true, username: true, active: true, sshTunnelEnabled: true, sshHost: true, sshPort: true, sshUsername: true, sshAuthMethod: true, metadataJson: true, lastStatus: true, lastLatencyMs: true, lastError: true, lastCheckedAt: true, createdAt: true, updatedAt: true } as const;
 
 export async function PATCH(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {

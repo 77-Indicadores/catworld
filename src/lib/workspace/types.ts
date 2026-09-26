@@ -32,7 +32,7 @@ export type WorkspaceSource = {
   nextRefreshAt: string | null;
   /** batimento da rodada em andamento (M2) */
   updatedAt?: string | null;
-  connection: { id: string; name: string };
+  connection: { id: string; name: string; provider: string };
 };
 
 /** Último upload que alimentou a tabela (origem "arquivo"). `createdBy` só existe para uploads novos. */

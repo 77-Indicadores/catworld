@@ -48,7 +48,7 @@ export function SingleSourceRow({ source: s, table: t, onSelectTable, onChanged 
           </div>
           <p className="truncate text-xs text-base-content/65">
             {s.connection.name} · {sourceOriginLabel(s)}
-            {s.mode === "extract" && " · " + refreshText(s.refreshCron)}
+            {s.mode === "extract" && " · " + refreshText(s.refreshCron, s.connection.provider === "firebird-ftp")}
             {fmtRows(s.lastRowCount) && " · " + fmtRows(s.lastRowCount) + " linhas"}
             {s.lastRefreshedAt && <> · atualizada <Time iso={s.lastRefreshedAt} relative /></>}
           </p>

@@ -51,6 +51,10 @@ export type RefreshInput = {
   lastRefreshedAt: string | null;
   /** Ultima escrita da linha (ISO): para fonte "running" e o batimento (heartbeat) da trava, renovado a cada minuto (M2). */
   updatedAt?: string | null;
+  /** Conexão tem um mecanismo de atualização automática que não depende de `refreshCron` (ex.: watch de arquivo
+   * no FTP do provider firebird-ftp — ver `enqueueDueFirebirdFtpRefreshes`). Sem isto, "sem cron" era sempre
+   * lido como "Manual", o que é falso para essas conexões: elas atualizam sozinhas ao detectar arquivo novo. */
+  autoWatch?: boolean;
 };
 
 const F = (kind: FreshnessKind, label: string, tone: Status, severity: number, reason: string | null = null): Freshness => ({ kind, label, tone, reason, severity });
@@ -61,11 +65,20 @@ export function isEmptyOutcome(message: string | null | undefined): boolean {
   return !!message && EMPTY_OUTCOME_RE.test(message);
 }
 
+/** Cancelamento pedido pelo próprio usuário: grava `status: FAILED` com uma destas mensagens (ver rotas de
+ * cancelamento em uploads/[id], uploads/cancel-all, dataset-sources/[id]/refresh), mas não é uma falha real do
+ * sistema — não deve contar como erro, nem oferecer "tentar novamente". */
+const CANCELLED_OUTCOME_RE = /^Cancelado pelo usuário$|^Cancelled$/;
+export function isCancelledOutcome(message: string | null | undefined): boolean {
+  return !!message && CANCELLED_OUTCOME_RE.test(message);
+}
+
 export function presentRefreshFreshness(src: RefreshInput, now: Date = new Date()): Freshness {
   if (src.active === false) return F("paused", "Pausada", "inactive", 1);
   const status = normalizeRunStatus(src.lastStatus);
   if (status === "failed") {
     if (isEmptyOutcome(src.lastError)) return F("empty", "Vazio (tabela anterior mantida)", "inactive", 2, src.lastError);
+    if (isCancelledOutcome(src.lastError)) return F("paused", "Cancelada", "inactive", 2, src.lastError);
     return F("failing", "Com erro", "error", 6, src.lastError);
   }
   if (status === "running" || status === "queued") {
@@ -89,7 +102,12 @@ export function presentRefreshFreshness(src: RefreshInput, now: Date = new Date(
   }
   if (src.mode === "live") return F("live", "Ao vivo", "healthy", 2);
   if (!src.refreshCron && !src.nextRefreshAt) {
-    return status === "ok" || src.lastRefreshedAt ? F("manual", "Manual", "healthy", 1, "Sem agenda: atualiza só quando você pedir") : F("empty", "Aguardando 1ª carga", "warning", 3);
+    if (status === "ok" || src.lastRefreshedAt) {
+      return src.autoWatch
+        ? F("manual", "Automática", "healthy", 1, "Sem cron: atualiza sozinha ao detectar arquivo novo na origem")
+        : F("manual", "Manual", "healthy", 1, "Sem agenda: atualiza só quando você pedir");
+    }
+    return F("empty", "Aguardando 1ª carga", "warning", 3);
   }
   if (src.nextRefreshAt) {
     const next = Date.parse(src.nextRefreshAt);

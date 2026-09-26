@@ -3,7 +3,7 @@
 import { CheckCircle2, CircleDashed, CircleX, Clock3, DatabaseZap, ExternalLink, Loader2 } from "lucide-react";
 import { fmtRelative, fmtDuration } from "@/lib/fmt";
 import { Time } from "@/components/ui/time";
-import { presentCount, isEmptyOutcome } from "@/lib/present";
+import { presentCount, isEmptyOutcome, isCancelledOutcome } from "@/lib/present";
 
 export type SourceRefreshWithSource = {
   id: string;
@@ -44,7 +44,10 @@ function fmtRows(n: string | null) {
 
 export function SourceRefreshCard({ job }: { job: SourceRefreshWithSource }) {
   const isEmpty = job.status === "FAILED" && isEmptyOutcome(job.lastError);
-  const cfg = isEmpty
+  const isCancelled = job.status === "FAILED" && isCancelledOutcome(job.lastError);
+  const cfg = isCancelled
+    ? { cls: "badge-ghost", icon: CircleDashed, label: "Cancelado" }
+    : isEmpty
     ? { cls: "badge-ghost", icon: CircleDashed, label: "Vazio" }
     : STATUS_CONFIG[job.status] ?? { cls: "badge-ghost", icon: Clock3, label: job.status };
   const Icon = cfg.icon;
@@ -93,7 +96,7 @@ export function SourceRefreshCard({ job }: { job: SourceRefreshWithSource }) {
             </>
           )}
           <span>·</span>
-          <span>{fmtRelative(job.createdAt)}</span>
+          <span title="Início desta tentativa">{fmtRelative(job.createdAt)}</span>
           {workerSlot && isRunning && (
             <>
               <span>·</span>
@@ -109,12 +112,12 @@ export function SourceRefreshCard({ job }: { job: SourceRefreshWithSource }) {
           {isDone && (
             <>
               <span>·</span>
-              <span title="Duração total">⏱ {fmtDuration(job.updatedAt.getTime() - job.createdAt.getTime())}</span>
+              <span title="Duração total, incluindo o tempo na fila antes de começar">⏱ {fmtDuration(job.updatedAt.getTime() - job.createdAt.getTime())}</span>
             </>
           )}
         </div>
 
-        {job.status === "FAILED" && job.lastError && (
+        {job.status === "FAILED" && job.lastError && !isCancelled && (
           <p className={`mt-2 rounded-lg px-3 py-2 text-xs ${isEmpty ? "bg-base-200 text-base-content/65" : "bg-error/10 text-error"}`}>
             {job.lastError}
           </p>

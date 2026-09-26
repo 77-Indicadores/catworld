@@ -10,7 +10,7 @@ const source = (over: Partial<WorkspaceSource> = {}): WorkspaceSource => ({
   id: "s1", name: "vendas", mode: "extract", sourceKind: "table", sourceGroupId: null, sourceSchema: "dbo", sourceTable: "vendas", sourceSql: null,
   refreshCron: "0 * * * *", keyColumn: "id", deltaColumn: null, reconciliationCron: null, sourceSqlReconciliation: null, detectDeletions: false, keysSql: null, keysMinIntervalMinutes: null, lastKeysCheckAt: null, lastRemovedCount: null, active: true,
   lastStatus: "completed", lastRowCount: "1487197", lastError: null, lastRefreshedAt: NOW_ISO, nextRefreshAt: new Date(Date.now() + 3600_000).toISOString(),
-  connection: { id: "c1", name: "dev-live" }, ...over,
+  connection: { id: "c1", name: "dev-live", provider: "postgres" }, ...over,
 });
 
 const table = (s: WorkspaceSource, name = s.name): WorkspaceTable => ({
