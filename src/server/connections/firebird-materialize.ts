@@ -156,6 +156,69 @@ function globToRegExp(pattern: string): RegExp {
 }
 
 /**
+ * ERPs Firebird antigos (Poliview e afins) costumam ter procedures que chamam UDFs externas (bibliotecas
+ * .so/.dll do servidor Firebird original do cliente, tipo `ib_udf`/uma lib própria) que NUNCA fazem parte do
+ * `.fdb` em si — o backup traz só o banco, não os binários de UDF do servidor. Resultado real, visto contra o
+ * backup da Jacy Construtora (2026-09-26): qualquer procedure que dependesse (direta ou indiretamente) de
+ * INCDATE ou DIV falhava com "Function ... is not defined, module name or entrypoint could not be found".
+ *
+ * Em vez de tentar levar a biblioteca binária original (não temos acesso a ela, e nem faria sentido — é
+ * específica do SO/arch do servidor do cliente), decompilamos o BLR das procedures que as chamavam
+ * (RDB$PROCEDURES.RDB$PROCEDURE_SOURCE, texto puro no catálogo) para entender exatamente a semântica:
+ *   INCDATE(d TIMESTAMP, anos INTEGER, meses INTEGER, dias INTEGER) RETURNS TIMESTAMP — soma anos/meses/dias
+ *   DIV(a INTEGER, b INTEGER) RETURNS DOUBLE PRECISION — divisão em ponto flutuante de dois inteiros
+ * (assinaturas confirmadas via RDB$FUNCTION_ARGUMENTS). As duas têm equivalente exato e nativo no Firebird
+ * (DATEADD, CAST) desde a versão 2.1 — não precisam de UDF nenhuma.
+ *
+ * Isto só redefine a função DENTRO do .fdb EFÊMERO que acabamos de materializar (nunca o servidor original do
+ * cliente): é seguro porque esse arquivo é uma cópia descartável, recriada a cada materialização. Só substitui
+ * quando a função já existe como EXTERNAL com a mesma aridade esperada — nunca cria uma função nova do zero
+ * nem mexe numa já nativa/PSQL, para não arriscar chocar com algo específico de outro cliente que use o mesmo
+ * nome para algo diferente.
+ */
+const LEGACY_UDF_SHIMS = [
+  {
+    name: "INCDATE",
+    argCount: 4,
+    ddl: `CREATE OR ALTER FUNCTION INCDATE (D TIMESTAMP, ANOS INTEGER, MESES INTEGER, DIAS INTEGER)
+RETURNS TIMESTAMP
+AS
+BEGIN
+  RETURN DATEADD(DIAS DAY TO DATEADD(MESES MONTH TO DATEADD(ANOS YEAR TO D)));
+END`,
+  },
+  {
+    name: "DIV",
+    argCount: 2,
+    ddl: `CREATE OR ALTER FUNCTION DIV (A INTEGER, B INTEGER)
+RETURNS DOUBLE PRECISION
+AS
+BEGIN
+  RETURN CAST(A AS DOUBLE PRECISION) / B;
+END`,
+  },
+] as const;
+
+async function patchLegacyUdfShims(db: Firebird.Database): Promise<void> {
+  for (const shim of LEGACY_UDF_SHIMS) {
+    try {
+      const rows = await db.queryAsync<{ "RDB$MODULE_NAME": string | null; N: number }>(
+        `SELECT F.RDB$MODULE_NAME, (SELECT COUNT(*) FROM RDB$FUNCTION_ARGUMENTS FA WHERE FA.RDB$FUNCTION_NAME = F.RDB$FUNCTION_NAME AND FA.RDB$ARGUMENT_POSITION > 0) AS N
+         FROM RDB$FUNCTIONS F WHERE F.RDB$FUNCTION_NAME = ?`,
+        [shim.name],
+      );
+      const row = rows[0];
+      if (!row || !row["RDB$MODULE_NAME"] || Number(row.N) !== shim.argCount) continue; // não existe, já é nativa, ou aridade diferente da esperada — não mexe
+      await db.queryAsync(shim.ddl);
+    } catch (e) {
+      // Best-effort: se o shim falhar, a conexão fica como estava antes (procedures que dependem da UDF
+      // continuam quebradas, mas nada regride) — nunca deve derrubar a materialização inteira por causa disto.
+      console.warn(`[firebird-materialize] falha ao aplicar shim de ${shim.name}:`, e instanceof Error ? e.message : e);
+    }
+  }
+}
+
+/**
  * Materializa (se necessário) a conexão `connectionId`. Devolve o endpoint pronto para uso. Nunca roda duas
  * vezes em paralelo para a mesma conexão (CAS); se outro worker já está materializando, esta chamada espera
  * (poll curto) em vez de duplicar o trabalho.
@@ -228,7 +291,7 @@ export async function ensureMaterialized(connectionId: string, creds: FtpCredent
     // Sem forcar wireCrypt (negociacao padrao do driver) — ver nota em firebird.ts sobre por que DISABLE quebra
     // contra o Firebird 5.x real que a imagem usa.
     await Firebird.attachAsync({ host: endpoint.host, port: endpoint.port, database: endpoint.database, user: endpoint.user, password: endpoint.password, encoding: (endpoint.charset ?? "UTF8") as never })
-      .then((db) => db.queryAsync("SELECT 1 FROM RDB$DATABASE").then(() => db.detachAsync()));
+      .then((db) => db.queryAsync("SELECT 1 FROM RDB$DATABASE").then(() => patchLegacyUdfShims(db)).then(() => db.detachAsync()));
 
     const prevPath = already?.endpoint.database;
     await markReady(connectionId, signature, endpoint);
