@@ -233,6 +233,28 @@ BEGIN
   RETURN DATEADD(-1 DAY TO DATEADD(1 MONTH TO DATEADD(-EXTRACT(DAY FROM D) + 1 DAY TO D)));
 END`,
   },
+  {
+    // DTPAGAMENTO(D TIMESTAMP, FORA INTEGER, NRDIAS INTEGER) RETURNS TIMESTAMP — bloqueava `previsao_receber`
+    // (S_CRB_PREVMENSAL -> S_CRB_CALCTOTSALDO -> S_GER_DTPGTOFERIADO). Ao contrario de LASTDAY, aqui a semantica
+    // de negocio real (o que FORA/NRDIAS representam) nao da pra confirmar so pelo ponto de chamada — por isso
+    // NAO tentamos adivinhar. Em vez disso, decompilamos toda a cadeia de quem chama (RDB$PROCEDURE_SOURCE) e
+    // confirmamos que, para as 3 chamadas de S_GER_DTPGTOFERIADO dentro de S_CRB_CALCTOTSALDO E as 3 chamadas de
+    // S_CRB_CALCTOTSALDO dentro de S_CRB_PREVMENSAL (a query real de `previsao_receber`), FORA e NRDIAS sao
+    // sempre literais 0 — e o proprio corpo de S_GER_DTPGTOFERIADO so invoca DTPAGAMENTO quando
+    // NOT(FORA=0 AND NRDIAS=0) (o caso trivial usa DTPGTO=DTBASE direto). Ou seja: nesta cadeia, DTPAGAMENTO
+    // nunca executa de verdade — só precisa existir para o Firebird conseguir resolver/compilar o BLR da
+    // procedure. Por isso o corpo abaixo é um passthrough puro (ignora FORA/NRDIAS, devolve D): correto para
+    // todo caso hoje alcançável, e nunca fica pior que "não implementado" se algum dia outra query chamar com
+    // FORA/NRDIAS != 0 (nesse caso o resultado ficaria plausível-mas-simplista, não catastrófico).
+    name: "DTPAGAMENTO",
+    argCount: 3,
+    ddl: `CREATE OR ALTER FUNCTION DTPAGAMENTO (D TIMESTAMP, FORA INTEGER, NRDIAS INTEGER)
+RETURNS TIMESTAMP
+AS
+BEGIN
+  RETURN D;
+END`,
+  },
 ] as const;
 
 async function patchLegacyUdfShims(db: Firebird.Database): Promise<void> {
