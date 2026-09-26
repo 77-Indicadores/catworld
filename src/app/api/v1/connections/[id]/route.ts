@@ -39,8 +39,9 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       filePattern: z.string().min(1).optional(),
       innerFilePattern: z.string().min(1).optional(),
       charset: z.string().min(1).optional(),
+      pollMinutes: z.coerce.number().int().min(1).max(10080).optional(),
     }).parse(await request.json());
-    const { password, encrypt, trustServerCert, sshTunnelEnabled, sshHost, sshPort, sshUsername, sshAuthMethod, sshPassword, sshPrivateKey, sshPassphrase, remotePath, filePattern, innerFilePattern, charset, ...data } = input;
+    const { password, encrypt, trustServerCert, sshTunnelEnabled, sshHost, sshPort, sshUsername, sshAuthMethod, sshPassword, sshPrivateKey, sshPassphrase, remotePath, filePattern, innerFilePattern, charset, pollMinutes, ...data } = input;
     let credentialsUpdate: { encryptedCredentials?: string } = {};
     if (password || encrypt !== undefined || trustServerCert !== undefined) {
       const existing = await prisma.connection.findUniqueOrThrow({ where: { id }, select: { encryptedCredentials: true } });
@@ -51,7 +52,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       credentialsUpdate = { encryptedCredentials: encryptSecret(JSON.stringify(current)) };
     }
     let metadataUpdate: { metadataJson?: string } = {};
-    if (remotePath !== undefined || filePattern !== undefined || innerFilePattern !== undefined || charset !== undefined) {
+    if (remotePath !== undefined || filePattern !== undefined || innerFilePattern !== undefined || charset !== undefined || pollMinutes !== undefined) {
       const existing = await prisma.connection.findUniqueOrThrow({ where: { id }, select: { metadataJson: true, server: true, port: true } });
       const current = existing.metadataJson ? parseFirebirdFtpConfig(existing.metadataJson) : undefined;
       const nextInnerFilePattern = innerFilePattern ?? current?.firebird?.innerFilePattern;
@@ -63,6 +64,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
             port: data.port ?? existing.port ?? undefined,
             remotePath: remotePath ?? current?.ftp.remotePath,
             filePattern: filePattern ?? current?.ftp.filePattern,
+            pollMinutes: pollMinutes ?? current?.ftp.pollMinutes,
           },
           firebird: (nextInnerFilePattern || nextCharset) ? { innerFilePattern: nextInnerFilePattern, charset: nextCharset } : undefined,
         }))),

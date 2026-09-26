@@ -16,7 +16,8 @@ import {
   queryColumnsFirebird, quotedFirebirdTable, sourceClockFirebird, streamFirebirdRows, tableColumnsFirebird,
   type FirebirdEndpoint,
 } from "./firebird";
-import { ensureMaterialized, ftpCredsFromConnection, renewMaterialization, type FirebirdFtpConfig } from "./firebird-materialize";
+import { DEFAULT_FIREBIRD_POLL_MINUTES, ensureMaterialized, ftpCredsFromConnection, renewMaterialization, type FirebirdFtpConfig } from "./firebird-materialize";
+import { remoteFileSignature, statRemoteFile } from "./ftp-watch";
 import { compareWithCatalog, convertSourceValue, type ResolvedColumn } from "./source-values";
 import { clearSourceOptions, effectiveIntegrity, getSourceOptions, setRunMarker, setSourceOptions, takeRunMarker, type RunMarker, type SourceOptions } from "./source-options";
 import { makeRowConverter } from "./source-row-convert";
@@ -42,6 +43,8 @@ const firebirdFtpConfigSchema = z.object({
     port: z.number().int().min(1).max(65535).optional(),
     remotePath: z.string().min(1, "ftp.remotePath obrigatorio"),
     filePattern: z.string().min(1, "ftp.filePattern obrigatorio"),
+    // 1 min a 1 semana (10080 min) — ver DEFAULT_FIREBIRD_POLL_MINUTES em firebird-materialize.ts.
+    pollMinutes: z.number().int().min(1).max(10080).optional(),
   }),
   firebird: z.object({
     innerFilePattern: z.string().min(1).optional(),
@@ -363,6 +366,59 @@ export async function enqueueDueSourceRefreshes() {
  * (full snapshot periódico — ver refreshDatasetSource com opts.reconciliation). */
 export async function enqueueDueReconciliations() {
   await enqueueDue("reconciliation");
+}
+
+/** Por processo de worker (não persistido): cada instância verifica de forma independente, o que é aceitável
+ * — na pior hipótese, workers duplicados fazem LIST redundante no mesmo FTP, nunca disparam refresh duplicado
+ * (queueSourceRefresh já usa advisory lock + "já tem job ativo?" pra isso). */
+const lastFirebirdWatchAt = new Map<string, number>();
+
+/**
+ * Pedido do usuário (2026-09-26): para firebird-ftp, a chegada de um arquivo NOVO no FTP deve disparar sozinha
+ * a atualização de todas as fontes atreladas à conexão — sem precisar configurar um cron por tabela (o
+ * `refreshCron` de cada `DatasetSource` continua existindo e funcionando normalmente como rede de segurança,
+ * mas deixa de ser a ÚNICA forma de manter os dados frescos).
+ *
+ * Só faz um `LIST` (statRemoteFile, nunca baixa o zip) por conexão a cada `ftp.pollMinutes` (configurável por
+ * conexão — ver metadataJson; DEFAULT_FIREBIRD_POLL_MINUTES se ausente. A frequência real de chegada do backup
+ * varia por cliente: um manda 1x/dia, outro pode mandar de hora em hora, então não faz sentido um intervalo
+ * fixo global) e compara com a assinatura (`tamanho:mtime`) da última materialização bem-sucedida guardada em
+ * `cw_connection_materializations.remote_signature`. Se mudou (ou nunca materializou), enfileira o refresh de
+ * TODAS as fontes ativas da conexão de uma vez — a primeira a rodar materializa de verdade, as demais reusam o
+ * mesmo `.fdb` já restaurado (mesmo cache de `ensureMaterialized`, ver firebird-materialize.ts).
+ */
+export async function enqueueDueFirebirdFtpRefreshes(): Promise<void> {
+  const connections = await prisma.connection.findMany({
+    where: { provider: "firebird-ftp", active: true },
+    select: { id: true, server: true, port: true, username: true, encryptedCredentials: true, metadataJson: true },
+  });
+  const now = Date.now();
+  for (const connection of connections) {
+    try {
+      const config = parseFirebirdFtpConfig(connection.metadataJson);
+      const pollMs = (config.ftp.pollMinutes ?? DEFAULT_FIREBIRD_POLL_MINUTES) * 60_000;
+      const last = lastFirebirdWatchAt.get(connection.id) ?? 0;
+      if (now - last < pollMs) continue;
+      lastFirebirdWatchAt.set(connection.id, now);
+      const creds = ftpCredsFromConnection(connection);
+      const remote = await statRemoteFile(creds, config.ftp.remotePath, config.ftp.filePattern);
+      if (!remote) continue; // pasta vazia/arquivo ainda nao chegou — nao e erro, so nao ha nada pra disparar
+      const signature = remoteFileSignature(remote);
+      const row = await prisma.$queryRawUnsafe<{ remote_signature: string | null }[]>(
+        `SELECT remote_signature FROM cw_connection_materializations WHERE connection_id = $1::uuid`, connection.id,
+      );
+      if (row[0]?.remote_signature === signature) continue; // arquivo remoto nao mudou desde a ultima sincronizacao
+      const sources = await prisma.datasetSource.findMany({
+        where: { connectionId: connection.id, active: true, mode: "extract" },
+        select: { id: true },
+      });
+      for (const source of sources) {
+        await queueSourceRefresh(source.id).catch((e) => console.warn(`[firebird-watch] falha ao enfileirar fonte ${source.id}:`, e instanceof Error ? e.message : e));
+      }
+    } catch (e) {
+      console.warn(`[firebird-watch] falha checando conexao ${connection.id}:`, e instanceof Error ? e.message : e);
+    }
+  }
 }
 
 export async function createDatasetSource(input: {

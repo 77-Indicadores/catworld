@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const prismaMock = vi.hoisted(() => ({
-  datasetSource: { findUnique: vi.fn(), updateMany: vi.fn(), update: vi.fn() },
+  datasetSource: { findUnique: vi.fn(), findMany: vi.fn(), updateMany: vi.fn(), update: vi.fn() },
   datasetColumn: { deleteMany: vi.fn(async () => undefined), createMany: vi.fn(async () => undefined) },
   datasetTable: { update: vi.fn(async () => undefined) },
   datasetVersion: { create: vi.fn(async () => undefined) },
+  connection: { findMany: vi.fn() },
+  $queryRawUnsafe: vi.fn(),
   $transaction: vi.fn(async (ops: unknown[]) => Promise.all(ops)),
 }));
 const storage = vi.hoisted(() => ({
@@ -21,6 +23,11 @@ const firebirdMaterializeMock = vi.hoisted(() => ({
   ensureMaterialized: vi.fn(),
   renewMaterialization: vi.fn(async () => undefined),
   ftpCredsFromConnection: vi.fn(() => ({ host: "ftp.example.com", port: 21, user: "u", password: "p" })),
+  DEFAULT_FIREBIRD_POLL_MINUTES: 60,
+}));
+const ftpWatchMock = vi.hoisted(() => ({
+  statRemoteFile: vi.fn(),
+  remoteFileSignature: vi.fn((stat: { size: number; mtime: Date | null }) => `${stat.size}:${stat.mtime ? stat.mtime.toISOString() : ""}`),
 }));
 const firebirdMock = vi.hoisted(() => ({
   tableColumnsFirebird: vi.fn(async () => [{ originalName: "id", sqlName: "id", sqlType: "BIGINT", nullable: false }]),
@@ -41,8 +48,9 @@ vi.mock("./postgres", () => ({
 vi.mock("./mssql", () => ({ sourceClockMssql: vi.fn(), queryColumnsMssql: vi.fn(), quotedMssqlTable: vi.fn(), streamMssqlRows: vi.fn(), tableColumnsMssql: vi.fn() }));
 vi.mock("./firebird", () => firebirdMock);
 vi.mock("./firebird-materialize", () => firebirdMaterializeMock);
+vi.mock("./ftp-watch", () => ftpWatchMock);
 
-import { firebirdEndpointFor, parseFirebirdFtpConfig, refreshDatasetSource } from "./sources";
+import { enqueueDueFirebirdFtpRefreshes, firebirdEndpointFor, parseFirebirdFtpConfig, refreshDatasetSource } from "./sources";
 
 const validEndpoint = { host: "127.0.0.1", port: 3050, database: "/var/lib/catworld/firebird-restore/c1/x.fdb", user: "sysdba", password: "secret" };
 
@@ -120,6 +128,77 @@ describe("firebirdEndpointFor", () => {
   it("recusa uma conexao que nao e firebird-ftp (erro de programacao do chamador, nao input do usuario)", async () => {
     await expect(firebirdEndpointFor({ ...connection, provider: "postgres" })).rejects.toThrow(/firebird-ftp/);
     expect(firebirdMaterializeMock.ensureMaterialized).not.toHaveBeenCalled();
+  });
+});
+
+describe("enqueueDueFirebirdFtpRefreshes: chegada de arquivo novo dispara as fontes atreladas, sem cron por tabela", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  function connectionRow(id: string) {
+    return {
+      id, provider: "firebird-ftp", server: "194.238.31.66", port: 2521, username: "ftpuser",
+      encryptedCredentials: "x",
+      metadataJson: JSON.stringify({ ftp: { host: "194.238.31.66", remotePath: "/PLV", filePattern: "*.zip" } }),
+    };
+  }
+
+  it("nao dispara nada quando a assinatura remota nao mudou desde a ultima sincronizacao", async () => {
+    const id = "watch-unchanged";
+    prismaMock.connection.findMany.mockResolvedValue([connectionRow(id)]);
+    ftpWatchMock.statRemoteFile.mockResolvedValue({ name: "x.zip", path: "/PLV/x.zip", size: 100, mtime: new Date("2026-01-01T00:00:00Z") });
+    prismaMock.$queryRawUnsafe.mockResolvedValue([{ remote_signature: "100:2026-01-01T00:00:00.000Z" }]);
+
+    await enqueueDueFirebirdFtpRefreshes();
+
+    expect(ftpWatchMock.statRemoteFile).toHaveBeenCalledTimes(1);
+    expect(prismaMock.datasetSource.findMany).not.toHaveBeenCalled();
+  });
+
+  it("dispara o refresh de todas as fontes ativas da conexao quando o arquivo remoto mudou", async () => {
+    const id = "watch-changed";
+    prismaMock.connection.findMany.mockResolvedValue([connectionRow(id)]);
+    ftpWatchMock.statRemoteFile.mockResolvedValue({ name: "x.zip", path: "/PLV/x.zip", size: 200, mtime: new Date("2026-01-02T00:00:00Z") });
+    prismaMock.$queryRawUnsafe.mockResolvedValue([{ remote_signature: "100:2026-01-01T00:00:00.000Z" }]); // assinatura antiga, diferente
+    prismaMock.datasetSource.findMany.mockResolvedValue([{ id: "s1" }, { id: "s2" }]);
+
+    await enqueueDueFirebirdFtpRefreshes();
+
+    expect(prismaMock.datasetSource.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ connectionId: id, active: true, mode: "extract" }) }),
+    );
+  });
+
+  it("primeira sincronizacao (sem materializacao previa) tambem dispara todas as fontes", async () => {
+    const id = "watch-first-time";
+    prismaMock.connection.findMany.mockResolvedValue([connectionRow(id)]);
+    ftpWatchMock.statRemoteFile.mockResolvedValue({ name: "x.zip", path: "/PLV/x.zip", size: 200, mtime: new Date("2026-01-02T00:00:00Z") });
+    prismaMock.$queryRawUnsafe.mockResolvedValue([]); // nenhuma materializacao registrada ainda
+    prismaMock.datasetSource.findMany.mockResolvedValue([{ id: "s1" }]);
+
+    await enqueueDueFirebirdFtpRefreshes();
+
+    expect(prismaMock.datasetSource.findMany).toHaveBeenCalled();
+  });
+
+  it("arquivo ainda nao chegou (pasta vazia): nao e erro, so nao dispara nada", async () => {
+    const id = "watch-empty-folder";
+    prismaMock.connection.findMany.mockResolvedValue([connectionRow(id)]);
+    ftpWatchMock.statRemoteFile.mockResolvedValue(null);
+
+    await expect(enqueueDueFirebirdFtpRefreshes()).resolves.toBeUndefined();
+    expect(prismaMock.datasetSource.findMany).not.toHaveBeenCalled();
+  });
+
+  it("respeita o intervalo minimo entre checagens: a segunda chamada rapida nao bate no FTP de novo", async () => {
+    const id = "watch-throttle";
+    prismaMock.connection.findMany.mockResolvedValue([connectionRow(id)]);
+    ftpWatchMock.statRemoteFile.mockResolvedValue({ name: "x.zip", path: "/PLV/x.zip", size: 100, mtime: new Date("2026-01-01T00:00:00Z") });
+    prismaMock.$queryRawUnsafe.mockResolvedValue([{ remote_signature: "100:2026-01-01T00:00:00.000Z" }]);
+
+    await enqueueDueFirebirdFtpRefreshes();
+    await enqueueDueFirebirdFtpRefreshes();
+
+    expect(ftpWatchMock.statRemoteFile).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -21,7 +21,7 @@ import { previewFile, applyTypeOverrides, type FilePreview } from "@/server/uplo
 import { importUpload } from "@/server/uploads/importer";
 import { isNonRetryable } from "@/server/uploads/non-retryable";
 import { FROM_PREVIEW, queueImportUploadAuto } from "@/server/uploads/actions";
-import { enqueueDueSourceRefreshes, enqueueDueReconciliations, refreshDatasetSource, nextRefreshFromCron } from "@/server/connections/sources";
+import { enqueueDueSourceRefreshes, enqueueDueReconciliations, enqueueDueFirebirdFtpRefreshes, refreshDatasetSource, nextRefreshFromCron } from "@/server/connections/sources";
 import { enqueueDueDerivedRefreshes, refreshDerivedTable } from "@/server/connections/derived";
 import { migrateProjectStorage, migrateDatasetStorage } from "@/server/storage/migrate";
 import { pickInt } from "@/server/worker/config";
@@ -825,7 +825,7 @@ async function main() {
       if (Date.now() - lastRecovery > 60000) {
         try {
           await recoverStale();
-          if (handlesSourceRefresh) { await enqueueDueSourceRefreshes(); await enqueueDueReconciliations(); }
+          if (handlesSourceRefresh) { await enqueueDueSourceRefreshes(); await enqueueDueReconciliations(); await enqueueDueFirebirdFtpRefreshes(); }
           if (handlesDerivedRefresh) await enqueueDueDerivedRefreshes();
           await scheduleCleanupIfNeeded();
         } catch (e) {

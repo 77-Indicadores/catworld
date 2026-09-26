@@ -21,17 +21,21 @@ function providerLabel(provider: string) {
 
 const DEFAULT_PORT: Record<Provider, number> = { postgres: 5432, mssql: 1433, "firebird-ftp": 21 };
 
+/** Ausente = DEFAULT_FIREBIRD_POLL_MINUTES em firebird-materialize.ts — mantido em sincronia manualmente (é só o valor mostrado no placeholder/default do formulário). */
+const DEFAULT_FIREBIRD_POLL_MINUTES = 60;
+
 /** `Connection.metadataJson` de uma conexao firebird-ftp: só o caminho/padrão do FTP e do backup (sem segredo) — ver parseFirebirdFtpConfig em sources.ts. */
-function firebirdMeta(c: Connection | null): { remotePath: string; filePattern: string; innerFilePattern: string; charset: string } {
-  const empty = { remotePath: "", filePattern: "", innerFilePattern: "", charset: "" };
+function firebirdMeta(c: Connection | null): { remotePath: string; filePattern: string; innerFilePattern: string; charset: string; pollMinutes: number } {
+  const empty = { remotePath: "", filePattern: "", innerFilePattern: "", charset: "", pollMinutes: DEFAULT_FIREBIRD_POLL_MINUTES };
   if (!c?.metadataJson) return empty;
   try {
-    const parsed = JSON.parse(c.metadataJson) as { ftp?: { remotePath?: string; filePattern?: string }; firebird?: { innerFilePattern?: string; charset?: string } };
+    const parsed = JSON.parse(c.metadataJson) as { ftp?: { remotePath?: string; filePattern?: string; pollMinutes?: number }; firebird?: { innerFilePattern?: string; charset?: string } };
     return {
       remotePath: parsed.ftp?.remotePath ?? "",
       filePattern: parsed.ftp?.filePattern ?? "",
       innerFilePattern: parsed.firebird?.innerFilePattern ?? "",
       charset: parsed.firebird?.charset ?? "",
+      pollMinutes: parsed.ftp?.pollMinutes ?? DEFAULT_FIREBIRD_POLL_MINUTES,
     };
   } catch {
     return empty;
@@ -101,6 +105,8 @@ export default function ConnectionsPage() {
       // sem isto, salvar com esses campos em branco (o caso comum) falharia na validacao.
       if (!String(payload.innerFilePattern ?? "").trim()) delete payload.innerFilePattern;
       if (!String(payload.charset ?? "").trim()) delete payload.charset;
+      // Mesmo motivo: pollMinutes vazio viraria 0 no z.coerce.number() (falha o min(1)) em vez de "usar o padrão".
+      if (!String(payload.pollMinutes ?? "").trim()) delete payload.pollMinutes;
     } else {
       payload.sshTunnelEnabled = f.get("sshTunnelEnabled") === "on";
     }
@@ -209,7 +215,10 @@ export default function ConnectionsPage() {
                   <div><dt>{c.provider === "firebird-ftp" ? "Caminho remoto" : "Banco"}</dt><dd className={c.provider === "firebird-ftp" ? "font-mono text-xs" : ""}>{c.databaseName}</dd></div>
                   <div><dt>{c.provider === "firebird-ftp" ? "Usuário FTP" : "Usuário"}</dt><dd>{c.username}</dd></div>
                   {c.provider === "firebird-ftp" ? (
-                    <div><dt>Padrão do arquivo</dt><dd className="font-mono text-xs">{firebirdMeta(c).filePattern || "—"}</dd></div>
+                    <>
+                      <div><dt>Padrão do arquivo</dt><dd className="font-mono text-xs">{firebirdMeta(c).filePattern || "—"}</dd></div>
+                      <div><dt>Verifica a cada</dt><dd>{firebirdMeta(c).pollMinutes} min</dd></div>
+                    </>
                   ) : (
                     <div><dt>{c.provider === "mssql" ? "TLS" : "SSL"}</dt><dd>{c.provider === "mssql" ? mssqlSslLabel(c.sslMode) : c.sslMode}</dd></div>
                   )}
@@ -273,6 +282,9 @@ export default function ConnectionsPage() {
                     </Field>
                     <Field label="Charset do backup (opcional)" hint="Ex: WIN1252 para ERPs Firebird antigos. Padrão: UTF8.">
                       <input name="charset" defaultValue={firebirdDefaults.charset} className="input w-full font-mono text-sm" onChange={() => setFormTest(null)} />
+                    </Field>
+                    <Field label="Verificar arquivo novo a cada (minutos)" hint="Sem cron por tabela: ao detectar um arquivo novo no FTP, todas as fontes desta conexão são atualizadas sozinhas. Ajuste pela frequência real de chegada do backup (ex: cliente manda 1x/dia → 60 min já é de sobra).">
+                      <input name="pollMinutes" type="number" min={1} max={10080} defaultValue={firebirdDefaults.pollMinutes} className="input w-full" onChange={() => setFormTest(null)} />
                     </Field>
                   </>
                 ) : (

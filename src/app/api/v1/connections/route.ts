@@ -112,15 +112,18 @@ export async function POST(request: NextRequest) {
       filePattern: z.string().min(1, "padrao do arquivo obrigatorio (ex.: *.zip)"),
       innerFilePattern: z.string().min(1).optional(),
       charset: z.string().min(1).optional(),
+      // Quanto tempo entre checagens de "o arquivo remoto mudou?" (ver enqueueDueFirebirdFtpRefreshes em
+      // sources.ts) — configuravel por conexao porque a frequencia real de chegada do backup varia por cliente.
+      pollMinutes: z.coerce.number().int().min(1).max(10080).optional(),
     });
     const raw = await request.json();
     const providerRaw = (raw as Record<string, unknown>)?.provider ?? "postgres";
     if (providerRaw === "firebird-ftp") {
       const input = firebirdFtpSchema.parse(raw);
-      const { password, remotePath, filePattern, innerFilePattern, charset, ...data } = input;
+      const { password, remotePath, filePattern, innerFilePattern, charset, pollMinutes, ...data } = input;
       const metadataJson = JSON.stringify(
         parseFirebirdFtpConfig(JSON.stringify({
-          ftp: { host: input.server, port: input.port, remotePath, filePattern },
+          ftp: { host: input.server, port: input.port, remotePath, filePattern, pollMinutes },
           firebird: (innerFilePattern || charset) ? { innerFilePattern, charset } : undefined,
         })),
       );

@@ -33,9 +33,14 @@ import { downloadRemoteFile, remoteFileSignature, statRemoteFile, type FtpCreden
 import type { FirebirdEndpoint } from "./firebird";
 
 export type FirebirdFtpConfig = {
-  ftp: { host: string; port?: number; remotePath: string; filePattern: string };
+  /** pollMinutes: intervalo (minutos) entre checagens de "o arquivo remoto mudou?" — ver enqueueDueFirebirdFtpRefreshes
+   * em sources.ts. Configurável por conexão porque a frequência real de chegada do backup varia por cliente (a
+   * Jacy manda 1x/dia; outro cliente pode mandar de hora em hora). Ausente = DEFAULT_FIREBIRD_POLL_MINUTES. */
+  ftp: { host: string; port?: number; remotePath: string; filePattern: string; pollMinutes?: number };
   firebird?: { innerFilePattern?: string; charset?: string };
 };
+
+export const DEFAULT_FIREBIRD_POLL_MINUTES = 60;
 
 /** Quanto tempo uma materialização OK vale antes de outra fonte da mesma conexão ter que reconferir o FTP. */
 export const MATERIALIZATION_TTL_MS = 15 * 60_000;
