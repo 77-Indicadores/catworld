@@ -119,6 +119,50 @@ function mapFirebirdType(row: FbFieldRow): { sqlType: string; lossyNumeric?: boo
   }
 }
 
+// Códigos do protocolo WIRE (node-firebird, describeField/SQL_TYPE_NAMES em wire/xsqlvar.js e wire/const.js) —
+// NÃO são os mesmos códigos de RDB$FIELD_TYPE do catálogo (FB_TYPE acima). queryColumnsFirebird sonda uma
+// QUERY (não uma tabela do catálogo), então o driver só entrega esses códigos wire; usar FB_TYPE/mapFirebirdType
+// aqui faz todo campo cair no "default" e virar NVARCHAR(MAX) sempre — bug real, achado testando a materialização
+// de verdade em produção contra o backup da Jacy Construtora (2026-09-25): as 7 colunas de um SELECT com AS
+// vieram todas NVARCHAR(MAX) em vez de bigint/numeric/date.
+const WIRE_TYPE = {
+  TEXT: 452, VARYING: 448, SHORT: 500, LONG: 496, FLOAT: 482, DOUBLE: 480, D_FLOAT: 530, TIMESTAMP: 510,
+  BLOB: 520, TYPE_TIME: 560, TYPE_DATE: 570, INT64: 580, INT128: 32752, TIMESTAMP_TZ: 32754,
+  TIMESTAMP_TZ_EX: 32748, TIME_TZ: 32756, TIME_TZ_EX: 32750, DEC16: 32760, DEC34: 32762, BOOLEAN: 32764,
+} as const;
+
+type WireField = { type: number; subType: number | null; length: number | null; scale: number | null };
+
+/** Mapeia o tipo físico de uma coluna de QUERY (protocolo wire, não catálogo) — ver nota acima. */
+function mapFirebirdWireType(col: WireField): { sqlType: string; lossyNumeric?: boolean } {
+  const scale = col.scale ?? 0; // negativo = casas decimais, mesma convenção do catálogo
+  const isFixedPoint = scale < 0 && ([WIRE_TYPE.SHORT, WIRE_TYPE.LONG, WIRE_TYPE.INT64, WIRE_TYPE.INT128] as number[]).includes(col.type);
+  if (isFixedPoint) {
+    const precision = col.type === WIRE_TYPE.INT64 ? 18 : col.type === WIRE_TYPE.INT128 ? 38 : col.type === WIRE_TYPE.SHORT ? 4 : 9;
+    return { sqlType: `DECIMAL(${precision},${-scale})` };
+  }
+  switch (col.type) {
+    case WIRE_TYPE.SHORT: return { sqlType: "INT" };
+    case WIRE_TYPE.LONG: return { sqlType: "INT" };
+    case WIRE_TYPE.INT64: return { sqlType: "BIGINT" };
+    case WIRE_TYPE.INT128: return { sqlType: "DECIMAL(38,0)" };
+    case WIRE_TYPE.FLOAT: case WIRE_TYPE.DOUBLE: case WIRE_TYPE.D_FLOAT:
+    case WIRE_TYPE.DEC16: case WIRE_TYPE.DEC34: return { sqlType: "FLOAT", lossyNumeric: true };
+    case WIRE_TYPE.TYPE_DATE: return { sqlType: "DATE" };
+    case WIRE_TYPE.TYPE_TIME: case WIRE_TYPE.TIME_TZ: case WIRE_TYPE.TIME_TZ_EX: return { sqlType: "TIME" };
+    case WIRE_TYPE.TIMESTAMP: case WIRE_TYPE.TIMESTAMP_TZ: case WIRE_TYPE.TIMESTAMP_TZ_EX: return { sqlType: "DATETIME2" };
+    case WIRE_TYPE.BOOLEAN: return { sqlType: "BIT" };
+    case WIRE_TYPE.TEXT: case WIRE_TYPE.VARYING: {
+      const len = col.length ?? 255;
+      return { sqlType: `NVARCHAR(${Math.min(Math.max(len, 1), 4000)})` };
+    }
+    case WIRE_TYPE.BLOB:
+      return col.subType === 1 ? { sqlType: "NVARCHAR(MAX)" } : { sqlType: "VARBINARY(MAX)" };
+    default:
+      return { sqlType: "NVARCHAR(MAX)" };
+  }
+}
+
 const FIELD_CATALOG_SQL = `
   SELECT
     TRIM(rf.RDB$FIELD_NAME)   AS FIELD_NAME,
@@ -165,10 +209,7 @@ export async function queryColumnsFirebird(endpoint: FirebirdEndpoint, query: st
     const result = await db.queryAsync<Record<string, unknown>>(`SELECT FIRST 0 * FROM (${statement}) cw_source_probe`, [], { withMeta: true });
     return result.fields.map((col) => {
       const name = col.field ?? col.alias ?? "?";
-      const m = mapFirebirdType({
-        FIELD_NAME: name, FIELD_TYPE: col.type, SUB_TYPE: col.subType ?? null, FIELD_LENGTH: col.length ?? null,
-        FIELD_PRECISION: null, FIELD_SCALE: col.scale ?? 0, NULL_FLAG: col.nullable === false ? 1 : null, CHARSET: null,
-      });
+      const m = mapFirebirdWireType({ type: col.type, subType: col.subType ?? null, length: col.length ?? null, scale: col.scale ?? 0 });
       return { originalName: name, sqlName: sqlIdentifier(name), sqlType: m.sqlType, nullable: col.nullable !== false, ...(m.lossyNumeric ? { lossyNumeric: true } : {}) };
     });
   });
