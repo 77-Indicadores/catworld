@@ -155,6 +155,18 @@ function globToRegExp(pattern: string): RegExp {
  * vezes em paralelo para a mesma conexão (CAS); se outro worker já está materializando, esta chamada espera
  * (poll curto) em vez de duplicar o trabalho.
  */
+/**
+ * O registro de materialização (Postgres, sobrevive a deploy/restart) pode dizer "ready" com um TTL ainda
+ * válido apontando para um .fdb que já não existe mais em disco: `CATWORLD_FIREBIRD_WORKDIR` é o disco LOCAL
+ * do container, efêmero — um novo deploy/restart o zera, mas o registro no banco continua de pé até o TTL
+ * expirar sozinho. Sem esta checagem, ensureMaterialized confiava cegamente no registro e devolvia um endpoint
+ * morto (Firebird responde "I/O error ... Error while trying to open file") — bug real, reproduzido em produção
+ * logo depois de um redeploy no meio de uma sessão de testes contra a Jacy Construtora (2026-09-25).
+ */
+async function materializedFileUsable(path: string): Promise<boolean> {
+  return await fsStat(path).then(() => true).catch(() => false);
+}
+
 export async function ensureMaterialized(connectionId: string, creds: FtpCredentials, config: FirebirdFtpConfig): Promise<ReadyMaterialization> {
   const already = await currentMaterialization(connectionId);
   const remote = await statRemoteFile(creds, config.ftp.remotePath, config.ftp.filePattern);
@@ -165,7 +177,7 @@ export async function ensureMaterialized(connectionId: string, creds: FtpCredent
     const row = await prisma.$queryRawUnsafe<{ remote_signature: string | null }[]>(
       `SELECT remote_signature FROM cw_connection_materializations WHERE connection_id = $1::uuid`, connectionId,
     );
-    if (row[0]?.remote_signature === signature) return already; // nada mudou: reusa sem baixar nada
+    if (row[0]?.remote_signature === signature && await materializedFileUsable(already.endpoint.database)) return already; // nada mudou: reusa sem baixar nada
   }
 
   for (let attempt = 0; attempt < 60; attempt++) {
@@ -177,7 +189,7 @@ export async function ensureMaterialized(connectionId: string, creds: FtpCredent
       const row = await prisma.$queryRawUnsafe<{ remote_signature: string | null }[]>(
         `SELECT remote_signature FROM cw_connection_materializations WHERE connection_id = $1::uuid`, connectionId,
       );
-      if (row[0]?.remote_signature === signature) return fresh; // quem furou a fila já resolveu por nós
+      if (row[0]?.remote_signature === signature && await materializedFileUsable(fresh.endpoint.database)) return fresh; // quem furou a fila já resolveu por nós
     }
   }
 
