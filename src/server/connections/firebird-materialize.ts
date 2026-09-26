@@ -197,6 +197,28 @@ BEGIN
   RETURN CAST(A AS DOUBLE PRECISION) / B;
 END`,
   },
+  {
+    // Mesmo achado de INCDATE/DIV, descoberto ao testar de verdade as 6 consultas do Poliview contra o .fdb
+    // já com o shim de INCDATE/DIV aplicado (2026-09-26): S_BCO_MOVANALDET também chama uma ROUND externa
+    // (módulo `rfunc`, entrypoint `fn_round` — mesma biblioteca de INCDATE), ROUND(valor DOUBLE PRECISION,
+    // casas INTEGER) RETURNS DOUBLE PRECISION — arredondamento comum, sem nada de especial na semântica.
+    // Implementado por aritmética pura (FLOOR/POWER), nunca chamando o ROUND nativo do Firebird de dentro do
+    // próprio corpo: mesmo o texto sendo idêntico ("ROUND"), não dá pra ter certeza de que o compilador não
+    // resolveria a chamada de volta para este catálogo (recursão) — não vale o risco de travar o motor.
+    name: "ROUND",
+    argCount: 2,
+    ddl: `CREATE OR ALTER FUNCTION ROUND (V DOUBLE PRECISION, P INTEGER)
+RETURNS DOUBLE PRECISION
+AS
+DECLARE VARIABLE FATOR DOUBLE PRECISION;
+BEGIN
+  FATOR = POWER(10, P);
+  IF (V >= 0) THEN
+    RETURN FLOOR(V * FATOR + 0.5) / FATOR;
+  ELSE
+    RETURN -FLOOR(-V * FATOR + 0.5) / FATOR;
+END`,
+  },
 ] as const;
 
 async function patchLegacyUdfShims(db: Firebird.Database): Promise<void> {
