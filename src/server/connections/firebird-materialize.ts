@@ -255,6 +255,33 @@ BEGIN
   RETURN D;
 END`,
   },
+  {
+    // ROUND2(V DOUBLE PRECISION, CASAS INTEGER, MODO INTEGER) RETURNS DOUBLE PRECISION — apareceu so depois do
+    // shim de DTPAGAMENTO revelar a proxima funcao ausente na cadeia real de `previsao_receber`
+    // (S_CRB_CALCTOTSALDO, calculo de residuo de variacao monetaria). Os 2 pontos de chamada encontrados usam
+    // sempre ROUND2(valor, 2, 2) — arredondamento pra 2 casas decimais (valor monetario), mas o 3o argumento
+    // (aqui sempre literal 2 tambem) nao da pra confirmar com certeza pelo ponto de chamada: pode ser um modo de
+    // arredondamento (truncar/half-up/half-even) que so muda o resultado bem raramente (exatamente em bordas de
+    // 0,005). Ao contrario de DTPAGAMENTO, o branch que chama ROUND2 depende de dado do contrato
+    // (CTR_GERARESIDUOVARMONET=1, lido do banco) e nao de parametro fixo da query — entao NAO da pra provar que
+    // fica sempre inalcancavel. Optamos por implementar o caso comum (arredondamento padrao pra CASAS decimais,
+    // mesma aritmetica ja validada do shim ROUND acima) ignorando MODO: correto para a esmagadora maioria dos
+    // valores, com risco residual só nas bordas exatas de meio-centavo — bem menor que o risco de DTPAGAMENTO
+    // (que teria efeito em toda linha, nao só em bordas).
+    name: "ROUND2",
+    argCount: 3,
+    ddl: `CREATE OR ALTER FUNCTION ROUND2 (V DOUBLE PRECISION, CASAS INTEGER, MODO INTEGER)
+RETURNS DOUBLE PRECISION
+AS
+DECLARE VARIABLE FATOR DOUBLE PRECISION;
+BEGIN
+  FATOR = POWER(10, CASAS);
+  IF (V >= 0) THEN
+    RETURN FLOOR(V * FATOR + 0.5) / FATOR;
+  ELSE
+    RETURN -FLOOR(-V * FATOR + 0.5) / FATOR;
+END`,
+  },
 ] as const;
 
 async function patchLegacyUdfShims(db: Firebird.Database): Promise<void> {
