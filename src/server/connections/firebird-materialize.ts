@@ -219,6 +219,20 @@ BEGIN
     RETURN -FLOOR(-V * FATOR + 0.5) / FATOR;
 END`,
   },
+  {
+    // Mesma familia (modulo `rfunc`), achada testando `razaoconsolidada`/`col_3_17_contasreceber`: LASTDAY(d)
+    // RETURNS TIMESTAMP — ultimo dia do mes de `d`. Semantica padrao, sem ambiguidade (ao contrario de
+    // DTPAGAMENTO/PARSE/LONGPARSE/ROUND2/STRCOUNT, tambem ausentes mas cuja logica de negocio exata nao da
+    // pra inferir com confianca so pelo ponto de chamada — ver relatorio ao usuario, nao implementados aqui).
+    name: "LASTDAY",
+    argCount: 1,
+    ddl: `CREATE OR ALTER FUNCTION LASTDAY (D TIMESTAMP)
+RETURNS TIMESTAMP
+AS
+BEGIN
+  RETURN DATEADD(-1 DAY TO DATEADD(1 MONTH TO DATEADD(-EXTRACT(DAY FROM D) + 1 DAY TO D)));
+END`,
+  },
 ] as const;
 
 async function patchLegacyUdfShims(db: Firebird.Database): Promise<void> {
