@@ -47,6 +47,18 @@ function options(endpoint: FirebirdEndpoint): Options {
     // cliente, entao usamos a negociacao padrao do driver. Forcar DISABLE (pensado originalmente para talvez
     // precisar falar com um Firebird 2.5/3.0 antigo) quebra contra Firebird 5.x, que e o motor que a imagem usa
     // (confirmado: erro "Incompatible wire encryption levels" testando contra Firebird 5.0.4 real).
+    //
+    // maxInlineBlobSize: sem isto, o driver manda p_sqldata_inline_blob_size=0 no protocolo (>= v19, Firebird
+    // 4/5) — ou seja, PEDE pro servidor nunca entregar blob embutido na propria resposta do fetch. Toda coluna
+    // de texto longo (NVARCHAR(4000)/(800)/(MAX) — comuns nas procedures do Poliview) vira BLOB SUB_TYPE TEXT
+    // por baixo, e sem inline cada uma delas exige um ciclo assincrono a parte (open_blob -> get_segment* ->
+    // close_blob) POR COLUNA POR LINHA. Numa consulta larga (~15-20 colunas assim) com muitas linhas, isso vira
+    // um volume enorme de RPCs de blob concorrentes na mesma conexao — e foi exatamente o padrao visto no erro
+    // intermitente "Invalid BLOB ID" (sempre em fontes com muitas colunas de texto largas, sempre some ao tentar
+    // de novo — assinatura de corrida de concorrencia, nao de dado incorreto). Setando um limite generoso aqui,
+    // o servidor entrega o valor direto dentro da propria resposta do fetch pra qualquer blob ate esse tamanho,
+    // eliminando o RPC assincrono por completo pra esse caso — que e a esmagadora maioria dos campos reais.
+    maxInlineBlobSize: 65536,
   };
 }
 
