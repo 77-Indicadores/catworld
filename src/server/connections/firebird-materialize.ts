@@ -329,6 +329,42 @@ BEGIN
     RETURN SUBSTRING(REST FROM 1 FOR POS - 1);
 END`,
   },
+  {
+    // STRCOUNT(SUBSTR VARCHAR, STR VARCHAR) RETURNS INTEGER — ultima funcao que faltava, bloqueando
+    // razaoconsolidada/rel_336_fluxocaixa (numa cadeia diferente do PARSE, via S_CRB_GETSQLRECTOCOMPROMETIDO)
+    // e col_3_17_contasreceber (via S_CTB_RETCCTB). Semantica confirmada por ~20 pontos de chamada dentro de
+    // S_CTB_RETCCTB, todos consistentes: devolve quantas vezes SUBSTR aparece dentro de STR. Usada de duas
+    // formas, ambas exigindo a MESMA ordem de argumentos (substr, str) — nunca invertida:
+    //   - como "contains": IF (STRCOUNT(:MSKCNPJCGC, CTBTAG) > 0) THEN CTBTAG = REPLACE(:CTBTAG, :MSKCNPJCGC, '')
+    //     (mesma ordem substr/str do REPLACE do Firebird logo depois, confirmando qual e o "agulha" e qual e o
+    //     "palheiro")
+    //   - como contagem literal: IF (STRCOUNT('.', CTB) <> STRCOUNT('.', MASKCCTB)) — compara nº de pontos em
+    //     dois códigos contábeis para saber se um já está no formato analítico.
+    name: "STRCOUNT",
+    argCount: 2,
+    ddl: `CREATE OR ALTER FUNCTION STRCOUNT (SUBSTR VARCHAR(4000), STR VARCHAR(8000))
+RETURNS INTEGER
+AS
+DECLARE VARIABLE REST VARCHAR(8000);
+DECLARE VARIABLE POS INTEGER;
+DECLARE VARIABLE CNT INTEGER;
+DECLARE VARIABLE LEN INTEGER;
+BEGIN
+  CNT = 0;
+  IF (SUBSTR IS NULL OR STR IS NULL OR SUBSTR = '') THEN
+    RETURN 0;
+  LEN = CHAR_LENGTH(SUBSTR);
+  REST = STR;
+  POS = POSITION(SUBSTR IN REST);
+  WHILE (POS > 0) DO
+  BEGIN
+    CNT = CNT + 1;
+    REST = SUBSTRING(REST FROM POS + LEN);
+    POS = POSITION(SUBSTR IN REST);
+  END
+  RETURN CNT;
+END`,
+  },
 ] as const;
 
 async function patchLegacyUdfShims(db: Firebird.Database): Promise<void> {
