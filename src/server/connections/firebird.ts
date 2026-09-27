@@ -209,7 +209,17 @@ export async function queryColumnsFirebird(endpoint: FirebirdEndpoint, query: st
       // Sem TOP 0 nativo: FIRST 0 é o equivalente Firebird (dialeto 3) para sondar forma sem ler linhas.
       const result = await db.queryAsync<Record<string, unknown>>(`SELECT FIRST 0 * FROM (${statement}) cw_source_probe`, [], { withMeta: true });
       return result.fields.map((col) => {
-        const name = col.field ?? col.alias ?? "?";
+        // col.alias (isc_info_sql_alias) e sempre o nome certo: para uma coluna real, o driver ja preenche
+        // igual ao nome do campo; para uma expressao com "AS apelido" explicito, e o apelido; so fica vazio
+        // no caso raro de nao ter nem um nem outro. col.field (isc_info_sql_field) e o nome BRUTO do Firebird
+        // — para expressoes computadas sem "AS" (subquery escalar, SUM(...), concatenacao) o Firebird preenche
+        // com um nome generico da propria expressao ("CONCATENATION", "SUM", ou ate string vazia para
+        // subquery), nunca com o apelido dado pelo usuario. Usar `field` primeiro (como era antes) fazia
+        // varias colunas com "AS" diferentes colidirem no mesmo nome generico quando materializadas (ex.:
+        // 4 subqueries "AS x1/x2/x3/x4" todas viravam "campo" — sqlIdentifier("") — e a fonte falhava ao
+        // criar com "coluna especificada mais de uma vez"). `||` (nao `??`) e proposital: string vazia deve
+        // cair para o fallback tambem, nao só null/undefined.
+        const name = col.alias || col.field || "?";
         const m = mapFirebirdWireType({ type: col.type, subType: col.subType ?? null, length: col.length ?? null, scale: col.scale ?? 0 });
         return { originalName: name, sqlName: sqlIdentifier(name), sqlType: m.sqlType, nullable: col.nullable !== false, ...(m.lossyNumeric ? { lossyNumeric: true } : {}) };
       });
