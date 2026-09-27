@@ -50,6 +50,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       keysMinIntervalMinutes: z.number().int().min(1).nullable().optional(),
       sourceGroupId: z.string().uuid().optional(),
       onInvalid: z.enum(["null", "fail"]).optional(),
+      /** Migracao: substitui esta fonte existente (compara o schema novo com o catalogo dela antes de criar — ver createDatasetSource). */
+      replacesSourceId: z.string().uuid().optional(),
+      acceptBreakingChange: z.boolean().optional(),
     }).parse(await request.json());
     await assertCanUseConnection(actor, input.connectionId, ds);
     assertValidCron(input.refreshCron, "refreshCron");
@@ -72,6 +75,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         detectDeletions: input.detectDeletions,
         keysMinIntervalMinutes: input.keysMinIntervalMinutes,
         sourceGroupId: input.sourceGroupId,
+        replacesSourceId: input.replacesSourceId,
+        acceptBreakingChange: input.acceptBreakingChange,
       })).map(exposeSource), undefined, 201);
     }
     if (input.sourceKind === "query" && !input.name?.trim()) {

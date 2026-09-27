@@ -6,6 +6,7 @@ import { ApiError } from "@/server/http";
 import type { SourceColumn } from "./postgres";
 import { resolveEffectiveTarget, type SshTunnelConnection } from "./ssh-tunnel";
 import { TEXT_TYPE, decimalOrText } from "./source-values";
+import { mssqlTypeFamily } from "@/server/sql-contract/result";
 
 export type MssqlConnection = SshTunnelConnection & {
   server: string;
@@ -296,17 +297,19 @@ export function quotedMssqlTable(schema: string, table: string) {
 
 type Mapped = { sqlType: string; lossyNumeric?: boolean };
 
+/** Familia por nome vem de `MSSQL_TYPE_REGISTRY` (sql-contract/result.ts) — mesma fonte usada por `mssqlKind` para ColumnKind. */
 function mapMssqlType(dataType: string, precision?: number | null, scale?: number | null): Mapped {
-  const t = dataType.toLowerCase();
-  if (["bigint", "int", "smallint", "tinyint"].includes(t)) return { sqlType: "BIGINT" };
-  if (["decimal", "numeric"].includes(t)) return decimalOrText(precision, scale);
-  if (t === "money") return { sqlType: "DECIMAL(19,4)" };
-  if (t === "smallmoney") return { sqlType: "DECIMAL(10,4)" };
-  if (["float", "real"].includes(t)) return { sqlType: TEXT_TYPE, lossyNumeric: true };
-  if (t === "date") return { sqlType: "DATE" };
-  if (["datetime", "datetime2", "smalldatetime", "datetimeoffset"].includes(t)) return { sqlType: "DATETIME2" };
-  if (t === "time") return { sqlType: "TIME" };
-  return { sqlType: TEXT_TYPE };
+  switch (mssqlTypeFamily(dataType)) {
+    case "bigint": return { sqlType: "BIGINT" };
+    case "numeric": return decimalOrText(precision, scale);
+    case "money19": return { sqlType: "DECIMAL(19,4)" };
+    case "money10": return { sqlType: "DECIMAL(10,4)" };
+    case "float": return { sqlType: TEXT_TYPE, lossyNumeric: true };
+    case "date": return { sqlType: "DATE" };
+    case "datetime": return { sqlType: "DATETIME2" };
+    case "time": return { sqlType: "TIME" };
+    default: return { sqlType: TEXT_TYPE };
+  }
 }
 
 const mssqlTypeMap = new Map<unknown, string>([

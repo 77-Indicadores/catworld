@@ -142,7 +142,7 @@ export async function queryColumns(connection: PgConnection, query: string): Pro
   });
 }
 
-import { legacyFormatColumns, mssqlKind, normalizeRows, pgKind, type ColumnKind } from "@/server/sql-contract/result";
+import { legacyFormatColumns, mssqlKind, normalizeRows, pgKind, pgOidFamily, type ColumnKind } from "@/server/sql-contract/result";
 import { dedupeColumnNames, rowsFromArrays } from "@/server/sql-contract/columns";
 
 export async function executePostgresReadOnly(connection: PgConnection, query: string, timeout = 30, limit = 10000, offset = 0, normalize = false, orderBy?: string) {
@@ -253,14 +253,17 @@ function mapPgType(row: { data_type: string; udt_name: string; numeric_precision
   return { sqlType: TEXT_TYPE };
 }
 
+/** Familia por OID vem de `PG_TYPE_REGISTRY` (sql-contract/result.ts) — mesma fonte usada por `pgKind` para ColumnKind. */
 function mapPgOid(oid: number, typmod?: number): Mapped {
-  if ([20, 21, 23].includes(oid)) return { sqlType: "BIGINT" };
-  if (oid === 1700) { const n = numericFromTypmod(typmod); return decimalOrText(n.precision, n.scale); }
-  if ([700, 701].includes(oid)) return { sqlType: TEXT_TYPE, lossyNumeric: true };
-  if (oid === 1082) return { sqlType: "DATE" };
-  if ([1114, 1184].includes(oid)) return { sqlType: "DATETIME2" };
-  if (oid === 1083) return { sqlType: "TIME" };
-  return { sqlType: TEXT_TYPE };
+  switch (pgOidFamily(oid)) {
+    case "bigint": return { sqlType: "BIGINT" };
+    case "numeric": { const n = numericFromTypmod(typmod); return decimalOrText(n.precision, n.scale); }
+    case "float": return { sqlType: TEXT_TYPE, lossyNumeric: true };
+    case "date": return { sqlType: "DATE" };
+    case "datetime": return { sqlType: "DATETIME2" };
+    case "time": return { sqlType: "TIME" };
+    default: return { sqlType: TEXT_TYPE };
+  }
 }
 
 /** Relogio da origem (UTC), para limitar a marca d'agua de fontes incrementais. */

@@ -3,7 +3,9 @@
 Regra geral: **um valor nao vazio da origem nunca vira NULL, nunca e arredondado e nunca depende do fuso do processo.** O que nao cabe
 no tipo de destino faz a rodada falhar com mensagem acionavel (a tabela anterior permanece), em vez de gravar um valor diferente.
 Implementacao: `src/server/connections/source-values.ts` (conversao), `source-pg-types.ts` (parsers do driver `pg`, so na conexao de
-extracao), `postgres.ts` / `mssql.ts` (mapeamento de tipo). Testes: `source-values.test.ts`, `sources-reliability.pg.test.ts`.
+extracao), `postgres.ts` / `mssql.ts` (mapeamento de tipo, usando `PG_TYPE_REGISTRY`/`MSSQL_TYPE_REGISTRY` de
+`src/server/sql-contract/result.ts` — registro unico por OID/nome de tipo, compartilhado com o `ColumnKind` usado
+na serializacao de resultado de query livre, ver comentario em `result.ts`). Testes: `source-values.test.ts`, `sources-reliability.pg.test.ts`.
 
 ## Postgres
 
@@ -51,6 +53,28 @@ O catalogo gravado no ultimo carregamento e comparado com a estrutura atual (`co
   arredondamento de escala de sempre, mas `NaN`, `Infinity` e estouro **falham** (antes viravam NULL); chave nessa coluna e recusada;
 - coluna nova, removida/renomeada ou de tipo incompativel = mudanca de estrutura: a tabela e recarregada por inteiro (fonte por tabela
   e reconciliacao) ou a rodada falha com `SOURCE_SCHEMA_CHANGED` e enfileira a reconciliacao (fonte por consulta com janela).
+
+## Migracao de fonte para outra conexao (gate de compatibilidade)
+
+Nao existe "trocar a conexao de uma fonte existente" — migrar (ex.: Firebird -> Postgres) e sempre **criar uma
+fonte nova** apontando pra conexao nova. Isso e arriscado por si so: o tipo canonico e recalculado do metadata
+vivo da conexao nova a cada introspeccao, e DDL menos especifica (ex. `numeric` sem `(p,s)`) ou inferencia de
+tipo diferente numa agregacao/subquery pode produzir um canonico diferente do catalogo antigo mesmo
+representando o mesmo dado logico — so que isso so aparecia depois do cutover, quando um consumidor externo
+(OData/Power BI) ja tinha quebrado.
+
+Por isso, `POST /api/v1/datasets/{id}/sources` aceita `replacesSourceId` (a fonte que esta sendo substituida):
+o schema recem-introspectado da conexao nova e comparado com o catalogo JA GRAVADO dessa fonte
+(`buildStructuredDiff`, `src/server/connections/schema-preview.ts`) **antes** de qualquer escrita. Cada coluna
+cai numa categoria (`unchanged`/`new`/`removed`/`tolerated`/`structural`); se houver `removed` ou `structural`
+(mudanca que quebraria um consumidor externo) a criacao e **recusada** com `409 SCHEMA_INCOMPATIBLE` e o diff
+completo no corpo do erro, a menos que `acceptBreakingChange: true` seja enviado explicitamente. Fontes tipo
+"table" criadas em lote (`sourceTables`) so aceitam `replacesSourceId` com exatamente 1 tabela (senao seria
+ambiguo qual delas corresponde a fonte substituida).
+
+Isso e um gate obrigatorio embutido no proprio ato de criar a fonte substituta — nao uma ferramenta separada
+que alguem precisa lembrar de rodar antes (mesmo principio do Confluent Schema Registry recusando registrar um
+schema incompativel, ou do dbt model contract falhando a materializacao — nao uma verificacao opcional a parte).
 
 ## Marca d'agua (coluna de incremento)
 

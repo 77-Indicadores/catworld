@@ -18,7 +18,9 @@ import {
 } from "./firebird";
 import { DEFAULT_FIREBIRD_POLL_MINUTES, ensureMaterialized, ftpCredsFromConnection, renewMaterialization, type FirebirdFtpConfig } from "./firebird-materialize";
 import { remoteFileSignature, statRemoteFile } from "./ftp-watch";
+import { recordHealthCheck } from "./health";
 import { compareWithCatalog, convertSourceValue, type ResolvedColumn } from "./source-values";
+import { buildStructuredDiff, type StructuredDiff } from "./schema-preview";
 import { clearSourceOptions, effectiveIntegrity, getSourceOptions, setRunMarker, setSourceOptions, takeRunMarker, type RunMarker, type SourceOptions } from "./source-options";
 import { makeRowConverter } from "./source-row-convert";
 import { WatermarkTracker, buildDeltaPredicate, compareWatermark, deltaCap, deltaKindOf, isFutureWatermark, normalizeWatermark } from "./source-delta";
@@ -401,13 +403,24 @@ export async function enqueueDueFirebirdFtpRefreshes(): Promise<void> {
       if (now - last < pollMs) continue;
       lastFirebirdWatchAt.set(connection.id, now);
       const creds = ftpCredsFromConnection(connection);
+      const pollStartedAt = Date.now();
       const remote = await statRemoteFile(creds, config.ftp.remotePath, config.ftp.filePattern);
-      if (!remote) continue; // pasta vazia/arquivo ainda nao chegou — nao e erro, so nao ha nada pra disparar
+      const latencyMs = Date.now() - pollStartedAt;
+      if (!remote) {
+        // pasta vazia/arquivo ainda nao chegou — nao e erro, so nao ha nada pra disparar
+        await recordHealthCheck({ subjectType: "connection", connectionId: connection.id, kind: "poll", outcome: "unchanged", latencyMs });
+        continue;
+      }
       const signature = remoteFileSignature(remote);
       const row = await prisma.$queryRawUnsafe<{ remote_signature: string | null }[]>(
         `SELECT remote_signature FROM cw_connection_materializations WHERE connection_id = $1::uuid`, connection.id,
       );
-      if (row[0]?.remote_signature === signature) continue; // arquivo remoto nao mudou desde a ultima sincronizacao
+      if (row[0]?.remote_signature === signature) {
+        // arquivo remoto nao mudou desde a ultima sincronizacao
+        await recordHealthCheck({ subjectType: "connection", connectionId: connection.id, kind: "poll", outcome: "unchanged", latencyMs });
+        continue;
+      }
+      await recordHealthCheck({ subjectType: "connection", connectionId: connection.id, kind: "poll", outcome: "changed", latencyMs });
       const sources = await prisma.datasetSource.findMany({
         where: { connectionId: connection.id, active: true, mode: "extract" },
         select: { id: true },
@@ -416,6 +429,7 @@ export async function enqueueDueFirebirdFtpRefreshes(): Promise<void> {
         await queueSourceRefresh(source.id).catch((e) => console.warn(`[firebird-watch] falha ao enfileirar fonte ${source.id}:`, e instanceof Error ? e.message : e));
       }
     } catch (e) {
+      await recordHealthCheck({ subjectType: "connection", connectionId: connection.id, kind: "poll", outcome: "error", errorMessage: e instanceof Error ? e.message : String(e) });
       console.warn(`[firebird-watch] falha checando conexao ${connection.id}:`, e instanceof Error ? e.message : e);
     }
   }
@@ -441,6 +455,16 @@ export async function createDatasetSource(input: {
   sourceGroupId?: string;
   /** valor irrepresentavel (infinity, data BC): padrao das fontes NOVAS e "fail" (para a carga); "null" = NULL + aviso (M4) */
   onInvalid?: "null" | "fail";
+  /**
+   * Id da fonte que esta sendo substituida (migracao de conexao — hoje nao ha "trocar a conexao de uma
+   * fonte existente", so criar uma nova apontando pra conexao nova). Se informado, o schema recem-introspectado
+   * e comparado com o catalogo JA GRAVADO dessa fonte (compareWithCatalog/buildStructuredDiff) ANTES de
+   * qualquer escrita: mudanca estrutural (tipo incompativel ou coluna removida) recusa a criacao com
+   * SCHEMA_INCOMPATIBLE a menos que `acceptBreakingChange` seja true. Espelha o gate que Schema
+   * Registry/dbt model contracts aplicam na hora de registrar/materializar, nao um passo separado que da pra esquecer.
+   */
+  replacesSourceId?: string;
+  acceptBreakingChange?: boolean;
 }, opts?: { deferQueue?: boolean }) {
   const [dataset, connection] = await Promise.all([
     prisma.dataset.findUnique({ where: { id: input.datasetId }, include: { project: true } }),
@@ -472,6 +496,23 @@ export async function createDatasetSource(input: {
     ? await ctxTableColumns(ctx, input.sourceSchema!, input.sourceTable!)
     : await ctxQueryColumns(ctx, input.sourceSql!);
   if (!columns.length) throw new ApiError(400, "EMPTY_SOURCE", "Fonte nao retornou colunas");
+  let schemaCheck: StructuredDiff | undefined;
+  if (input.replacesSourceId) {
+    const replaced = await prisma.datasetSource.findUnique({
+      where: { id: input.replacesSourceId },
+      select: { targetTable: { select: { columns: { select: { sqlName: true, sqlType: true } } } } },
+    });
+    if (!replaced) throw new ApiError(404, "REPLACES_SOURCE_NOT_FOUND", "Fonte a substituir nao encontrada");
+    schemaCheck = buildStructuredDiff(columns as ResolvedColumn[], replaced.targetTable?.columns);
+    if (schemaCheck.hasBreakingChange && !input.acceptBreakingChange) {
+      throw new ApiError(
+        409,
+        "SCHEMA_INCOMPATIBLE",
+        `A estrutura da conexao nova e incompativel com a fonte substituida (${schemaCheck.changes.join("; ")}). Envie acceptBreakingChange=true para criar mesmo assim.`,
+        { schemaCheck },
+      );
+    }
+  }
   assertDeleteDetection(input);
   const detect = input.mode === "extract" && !!input.detectDeletions;
   // FON-06: fonte NOVA com chave e sem deteccao de exclusoes ganha reconciliacao diaria (full snapshot) por padrao; sem isso,
@@ -541,7 +582,7 @@ export async function createDatasetSource(input: {
   await setSourceOptions(source.id, { strict: true, onInvalid: input.onInvalid ?? "fail" })
     .catch((e) => console.warn(`[source] opcoes da fonte ${source.id} nao gravadas (valera o comportamento legado): ${e instanceof Error ? e.message : e}`));
   if (input.mode === "extract" && !opts?.deferQueue) await queueSourceRefresh(source.id);
-  return source;
+  return schemaCheck ? { ...source, schemaCheck } : source;
 }
 
 export async function createDatasetSources(input: {
@@ -557,7 +598,13 @@ export async function createDatasetSources(input: {
   detectDeletions?: boolean | null;
   keysMinIntervalMinutes?: number | null;
   sourceGroupId?: string;
+  /** So faz sentido com exatamente 1 tabela (senao e ambiguo qual delas esta sendo substituida) — ver createDatasetSource. */
+  replacesSourceId?: string;
+  acceptBreakingChange?: boolean;
 }) {
+  if (input.replacesSourceId && input.sourceTables.length !== 1) {
+    throw new ApiError(400, "INVALID_SOURCE", "replacesSourceId so pode ser usado ao criar exatamente 1 tabela (migracao e sempre 1-para-1)");
+  }
   const sourceGroupId = input.sourceGroupId ?? randomUUID();
   const sources: Awaited<ReturnType<typeof createDatasetSource>>[] = [];
   try {
@@ -576,6 +623,8 @@ export async function createDatasetSources(input: {
         detectDeletions: input.detectDeletions,
         keysMinIntervalMinutes: input.keysMinIntervalMinutes,
         sourceGroupId,
+        replacesSourceId: input.replacesSourceId,
+        acceptBreakingChange: input.acceptBreakingChange,
       }, { deferQueue: true }));
     }
   } catch (e) {

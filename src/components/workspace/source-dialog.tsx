@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { Cable, CheckCircle2, CircleSlash, DatabaseZap, GitMerge, Play, Plus, RefreshCw, Search, Table2 } from "lucide-react";
-import { apiRequest, errorMessage } from "@/lib/api-client";
+import { apiRequest, ApiClientError, errorMessage } from "@/lib/api-client";
 import { CronPreview } from "./cron-field";
 
 type Connection = { id: string; name: string; provider: string; server: string; databaseName: string };
@@ -9,6 +9,8 @@ type SchemaRow = { schema: string };
 type TableRow = { schema: string; table: string };
 type Column = { originalName: string; sqlName: string; sqlType: string };
 type Step = "origin" | "mode" | "incremental" | "preview";
+type ExistingSource = { id: string; name: string; sourceTable: string | null; connection?: { name: string } };
+type StructuredColumnDiff = { sqlName: string; catalogType: string | null; candidateType: string | null; category: "unchanged" | "new" | "removed" | "tolerated" | "structural" };
 
 function suggestKeyColumn(cols: Column[]): string {
   const byName = cols.find(c => /^id$/i.test(c.originalName)) ?? cols.find(c => /_id$|Id$/.test(c.originalName));
@@ -63,10 +65,14 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
   const [keysMinInterval, setKeysMinInterval] = useState("");
   const [incrementalColumns, setIncrementalColumns] = useState<Column[]>([]);
   const [loadingIncrementalColumns, setLoadingIncrementalColumns] = useState(false);
+  const [existingSources, setExistingSources] = useState<ExistingSource[]>([]);
+  const [replacesSourceId, setReplacesSourceId] = useState("");
+  const [schemaIncompatible, setSchemaIncompatible] = useState<StructuredColumnDiff[] | null>(null);
 
   async function open() {
     setStep("origin"); setError(""); setColumns([]); setSelectedTables([]); setQueryStatus("idle"); setQueryTestedSql(""); setTableSearch(""); setRefreshCron("");
     setIncrementalEnabled(false); setKeyColumn(""); setDeltaColumn(""); setIncrementalColumns([]); setDetectDeletions(false); setKeysSql(""); setKeysMinInterval("");
+    setReplacesSourceId(""); setSchemaIncompatible(null);
     ref.current?.showModal();
     setLoadingMeta(true);
     try {
@@ -79,6 +85,9 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
     } finally {
       setLoadingMeta(false);
     }
+    // Lista de fontes ja existentes no dataset, para oferecer "esta fonte substitui qual?" numa migracao.
+    // Falha aqui nao bloqueia o fluxo principal (a opcao de substituir so fica indisponivel).
+    apiRequest<ExistingSource[]>(`/api/v1/datasets/${datasetId}/sources`).then(({ data }) => setExistingSources(data ?? [])).catch(() => undefined);
   }
 
   useEffect(() => {
@@ -104,6 +113,12 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
   function toggleTable(table: string) {
     setSelectedTables((prev) => prev.includes(table) ? prev.filter((t) => t !== table) : [...prev, table]);
   }
+
+  // "Substitui fonte existente" so faz sentido para exatamente 1 alvo (senao e ambiguo qual tabela e qual fonte
+  // se correspondem — ver validacao equivalente em createDatasetSources no backend). Nao limpamos o estado
+  // reativamente (setState em efeito): so deixamos de USAR/mostrar `replacesSourceId`/`schemaIncompatible`
+  // quando a selecao deixa de ser 1-para-1; eles voltam a valer se o usuario reselecionar 1 tabela so.
+  const canReplace = sourceKind === "query" || selectedTables.length === 1;
 
   async function preview() {
     if (!connectionId) return;
@@ -163,17 +178,20 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
     }
   }
 
-  async function create() {
+  async function create(acceptBreakingChange = false) {
     if (detectDeletions && incrementalEnabled && sourceKind === "query" && !keysSql.trim()) {
       setError("Informe a consulta de chaves para marcar exclusões."); return;
     }
-    setLoading(true); setError("");
+    setLoading(true); setError(""); setSchemaIncompatible(null);
     const detect = mode === "extract" && incrementalEnabled && !!keyColumn.trim();
     const intervalNum = Number(keysMinInterval);
     const detection = {
       detectDeletions: detect && detectDeletions,
       keysMinIntervalMinutes: detect && detectDeletions && keysMinInterval.trim() && Number.isInteger(intervalNum) && intervalNum >= 1 ? intervalNum : null,
     };
+    // Migracao: compara a estrutura da conexao nova com o catalogo da fonte escolhida ANTES de criar
+    // (o backend recusa com SCHEMA_INCOMPATIBLE se houver mudanca de tipo que quebraria contratos externos).
+    const migration = canReplace && replacesSourceId ? { replacesSourceId, acceptBreakingChange } : {};
     try {
       await apiRequest(`/api/v1/datasets/${datasetId}/sources`, {
         method: "POST",
@@ -188,6 +206,7 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
           keyColumn: mode === "extract" && incrementalEnabled ? (keyColumn.trim() || null) : null,
           deltaColumn: mode === "extract" && incrementalEnabled ? (deltaColumn.trim() || null) : null,
           ...detection,
+          ...migration,
         } : {
           connectionId,
           name: queryName,
@@ -198,11 +217,16 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
           keyColumn: mode === "extract" && incrementalEnabled ? (keyColumn.trim() || null) : null,
           ...detection,
           keysSql: detection.detectDeletions ? keysSql.trim() : null,
+          ...migration,
         }),
       });
       ref.current?.close();
       onComplete();
     } catch (e) {
+      if (e instanceof ApiClientError && e.code === "SCHEMA_INCOMPATIBLE") {
+        const diff = (e.details as { schemaCheck?: { columns?: StructuredColumnDiff[] } } | undefined)?.schemaCheck?.columns;
+        setSchemaIncompatible(diff?.filter((c) => c.category === "structural" || c.category === "removed") ?? []);
+      }
       setError(errorMessage(e));
     } finally {
       setLoading(false);
@@ -381,6 +405,29 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
             <div className="mt-5 space-y-4">
               <div className="rounded-box border border-base-300 bg-base-200/40 p-4 text-sm"><strong>{modeLabel}</strong><span className="ml-2 text-base-content/65">{sourceKind === "table" ? `${selectedTables.length} tabela(s) de ${schema}` : queryName}</span>{mode === "extract" && <span className="ml-2 text-base-content/65">· {incrementalEnabled && keyColumn.trim() ? `Incremental por "${keyColumn.trim()}"${deltaColumn.trim() ? ` (delta: ${deltaColumn.trim()})` : ""}` : "Substitui tudo a cada carga"}</span>}</div>
               {sourceKind === "table" ? <div className="max-h-72 overflow-auto rounded-box border border-base-300"><table className="table table-sm"><thead><tr><th>Tabela {providerLabel}</th><th>Nome no Catworld</th></tr></thead><tbody>{selectedTables.map((t) => <tr key={t}><td className="font-mono text-xs">{schema}.{t}</td><td>{t}</td></tr>)}</tbody></table></div> : columns.length > 0 ? <div className="max-h-72 overflow-auto rounded-box border border-base-300"><table className="table table-sm"><thead><tr><th>Coluna na origem</th><th>Nome no Catworld</th><th>Tipo</th></tr></thead><tbody>{columns.map((c) => <tr key={c.sqlName}><td>{c.originalName}</td><td className="font-mono text-xs">{c.sqlName}</td><td>{c.sqlType}</td></tr>)}</tbody></table></div> : <div className="alert alert-warning alert-soft">Nenhuma coluna carregada. Volte e gere a previa novamente.</div>}
+
+              {canReplace && existingSources.length > 0 && (
+                <Field label="Substitui uma fonte existente? (migração)" hint="Compara a estrutura da conexão nova com a fonte escolhida antes de criar; recusa se houver mudança de tipo que quebraria contratos externos (OData/Power BI).">
+                  <select className="select w-full" value={replacesSourceId} onChange={(e) => { setReplacesSourceId(e.target.value); setSchemaIncompatible(null); }}>
+                    <option value="">Nenhuma (fonte nova)</option>
+                    {existingSources.map((s) => <option key={s.id} value={s.id}>{s.name}{s.connection?.name ? ` — conexão atual: ${s.connection.name}` : ""}</option>)}
+                  </select>
+                </Field>
+              )}
+
+              {canReplace && schemaIncompatible && (
+                <div className="alert alert-warning alert-soft flex-col items-start gap-2">
+                  <span className="font-medium">Estrutura incompatível com a fonte substituída — criar assim quebraria contratos externos (OData/Power BI):</span>
+                  {schemaIncompatible.length > 0 && (
+                    <ul className="ml-4 list-disc text-sm">
+                      {schemaIncompatible.map((c) => (
+                        <li key={c.sqlName}><span className="font-mono">{c.sqlName}</span>: {c.category === "removed" ? "coluna removida na conexão nova" : `${c.catalogType} → ${c.candidateType}`}</li>
+                      ))}
+                    </ul>
+                  )}
+                  <button type="button" className="btn btn-warning btn-sm" disabled={loading} onClick={() => create(true)}>Criar mesmo assim (ignorar incompatibilidade)</button>
+                </div>
+              )}
             </div>
           )}
 
@@ -391,7 +438,7 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
               {step === "origin" && <button type="button" disabled={!canChooseOrigin} className="btn btn-primary btn-sm" onClick={() => setStep("mode")}>Continuar</button>}
               {step === "mode" && <button type="button" disabled={loading} className="btn btn-primary btn-sm" onClick={enterIncrementalStep}><RefreshCw size={14} />{loading ? "Carregando..." : "Continuar"}</button>}
               {step === "incremental" && <button type="button" disabled={loading || (incrementalEnabled && !keyColumn.trim())} className="btn btn-primary btn-sm" onClick={preview}><RefreshCw size={14} />{loading ? "Carregando..." : sourceKind === "query" ? "Revisar consulta" : "Gerar previa"}</button>}
-              {step === "preview" && <button type="button" onClick={create} disabled={loading || (sourceKind === "query" && columns.length === 0)} className="btn btn-primary btn-sm">{loading ? "Criando..." : "Criar fonte(s)"}</button>}
+              {step === "preview" && <button type="button" onClick={() => create()} disabled={loading || (sourceKind === "query" && columns.length === 0)} className="btn btn-primary btn-sm">{loading ? "Criando..." : "Criar fonte(s)"}</button>}
             </div>
           </div>
         </div>

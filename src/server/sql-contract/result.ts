@@ -18,24 +18,78 @@ export type ColumnKind = "date" | "datetime" | "time" | "bigint" | "decimal" | "
 /** Como o driver materializa DATE em Date: pg usa meia-noite local, mssql meia-noite UTC. */
 export type DriverFlavor = "pg" | "mssql";
 
-const PG_KIND: Record<number, ColumnKind> = {
-  1082: "date", 1114: "datetime", 1184: "datetime", 1083: "time", 1266: "time",
-  20: "bigint", 1700: "decimal", 17: "binary",
+/**
+ * Familia usada para derivar o `sqlType` canonico do catalogo de fontes (ver `mapPgOid`/`mapPgType` em
+ * connections/postgres.ts, `mapMssqlType` em connections/mssql.ts). Ausente = cai no fallback de texto
+ * (`TEXT_TYPE`) — mesmo criterio de hoje. `money19`/`money10` sao os dois casos MSSQL com escala FIXA
+ * (`money`=DECIMAL(19,4), `smallmoney`=DECIMAL(10,4)), sem depender de precision/scale do catalogo.
+ */
+export type TypeFamily = "bigint" | "float" | "numeric" | "money19" | "money10" | "date" | "datetime" | "time";
+
+/**
+ * Registro unico por OID do Postgres: cada linha carrega as duas facetas que hoje viviam em tabelas
+ * separadas (`mapPgOid` em postgres.ts e o antigo `PG_KIND` aqui) — a familia usada pro tipo canonico
+ * de SCHEMA (`sqlType`, coluna gravada) e o `ColumnKind` usado pra serializar o VALOR de um resultado de
+ * query livre. As duas propositalmente DIVERGEM em alguns OIDs, porque respondem perguntas diferentes:
+ *  - `timetz` (1266): schema trata como texto (o `TIME` do storage nao guarda o deslocamento, perderia
+ *    dado); resultado de query trata como "time" (o valor cru ainda carrega o deslocamento certo).
+ *  - `int2`/`int4` (21/23): cabem em `number` do JS sem perda, entao o resultado de query nao precisa da
+ *    serializacao especial de "bigint" (essa so existe pra int8, que estoura `Number.MAX_SAFE_INTEGER`);
+ *    o schema, porem, trata os tres como a mesma familia `BIGINT` (inteiro exato).
+ *  - `float4`/`float8` (700/701): o resultado de query devolve o `number` como o driver ja entrega; o
+ *    schema precisa do valor exato em texto (perderia precisao guardando como `number`), por isso vira
+ *    `lossyNumeric`/texto no catalogo.
+ * Ver `docs/source-type-mapping.md` pra tabela completa por tipo (nome), que cobre tambem os casos sem
+ * OID direto (`information_schema.columns`, usado por `tableColumns`).
+ */
+export const PG_TYPE_REGISTRY: Record<number, { family?: TypeFamily; columnKind?: ColumnKind }> = {
+  17: { columnKind: "binary" },                              // bytea
+  20: { family: "bigint", columnKind: "bigint" },             // int8
+  21: { family: "bigint" },                                   // int2
+  23: { family: "bigint" },                                   // int4
+  700: { family: "float" },                                   // float4
+  701: { family: "float" },                                   // float8
+  1082: { family: "date", columnKind: "date" },               // date
+  1083: { family: "time", columnKind: "time" },               // time
+  1114: { family: "datetime", columnKind: "datetime" },       // timestamp
+  1184: { family: "datetime", columnKind: "datetime" },       // timestamptz
+  1266: { columnKind: "time" },                                // timetz
+  1700: { family: "numeric", columnKind: "decimal" },         // numeric
 };
 
-export const pgKind = (oid: number): ColumnKind => PG_KIND[oid] ?? "other";
+export const pgOidFamily = (oid: number): TypeFamily | undefined => PG_TYPE_REGISTRY[oid]?.family;
+export const pgKind = (oid: number): ColumnKind => PG_TYPE_REGISTRY[oid]?.columnKind ?? "other";
 
-export function mssqlKind(declaration: string | undefined): ColumnKind {
-  switch ((declaration ?? "").toLowerCase()) {
-    case "date": return "date";
-    case "datetime": case "datetime2": case "smalldatetime": case "datetimeoffset": return "datetime";
-    case "time": return "time";
-    case "bigint": return "bigint";
-    case "decimal": case "numeric": case "money": case "smallmoney": return "decimal";
-    case "binary": case "varbinary": case "image": return "binary";
-    default: return "other";
-  }
-}
+/**
+ * Registro unico por NOME de tipo do MSSQL (minusculo): mesma ideia do `PG_TYPE_REGISTRY`, mas aqui as
+ * duas facetas usam o MESMO dominio de chave (`mapMssqlType` em mssql.ts e o antigo `mssqlKind` aqui já
+ * recebiam o mesmo nome de tipo em string — não OID vs. nome como no Postgres), entao a unificacao e
+ * direta, sem nenhuma faceta ficando implicita.
+ */
+export const MSSQL_TYPE_REGISTRY: Record<string, { family?: TypeFamily; columnKind?: ColumnKind }> = {
+  bigint: { family: "bigint", columnKind: "bigint" },
+  int: { family: "bigint" },
+  smallint: { family: "bigint" },
+  tinyint: { family: "bigint" },
+  decimal: { family: "numeric", columnKind: "decimal" },
+  numeric: { family: "numeric", columnKind: "decimal" },
+  money: { family: "money19", columnKind: "decimal" },
+  smallmoney: { family: "money10", columnKind: "decimal" },
+  float: { family: "float" },
+  real: { family: "float" },
+  date: { family: "date", columnKind: "date" },
+  datetime: { family: "datetime", columnKind: "datetime" },
+  datetime2: { family: "datetime", columnKind: "datetime" },
+  smalldatetime: { family: "datetime", columnKind: "datetime" },
+  datetimeoffset: { family: "datetime", columnKind: "datetime" },
+  time: { family: "time", columnKind: "time" },
+  binary: { columnKind: "binary" },
+  varbinary: { columnKind: "binary" },
+  image: { columnKind: "binary" },
+};
+
+export const mssqlTypeFamily = (dataType: string): TypeFamily | undefined => MSSQL_TYPE_REGISTRY[dataType.toLowerCase()]?.family;
+export const mssqlKind = (declaration: string | undefined): ColumnKind => MSSQL_TYPE_REGISTRY[(declaration ?? "").toLowerCase()]?.columnKind ?? "other";
 
 const p2 = (n: number) => String(n).padStart(2, "0");
 
