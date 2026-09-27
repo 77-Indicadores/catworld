@@ -282,6 +282,53 @@ BEGIN
     RETURN -FLOOR(-V * FATOR + 0.5) / FATOR;
 END`,
   },
+  {
+    // PARSE(LISTA VARCHAR, DELIM VARCHAR, INDICE INTEGER) RETURNS VARCHAR — bloqueava `razaoconsolidada`/
+    // `rel_336_fluxocaixa` numa cadeia bem mais profunda que INCDATE/ROUND (S_GER_CRIALISTASTR ->
+    // S_GER_CRIAFROMWHERE -> ... -> S_FLX_RZANALCONSOLEMPRDBLOCO), que a principio parecia alto risco (motor de
+    // SQL dinamico). Mas decompilando o unico ponto de chamada (S_GER_CRIALISTASTR) a semantica sai
+    // completamente inambigua, ao contrario de DTPAGAMENTO/ROUND2: e um split-by-delimiter classico —
+    //   CONTADOR = 1; ITEM = PARSE(LISTA, ',', CONTADOR);
+    //   WHILE (ITEM <> '') DO BEGIN ... CONTADOR = CONTADOR + 1; ITEM = PARSE(LISTA, ',', CONTADOR); END
+    // ou seja: devolve o N-esimo token (1-based) de LISTA separado por DELIM, e '' quando o indice passa do
+    // ultimo token (e' assim que o chamador sabe parar de iterar). Implementado por busca de posicao/substring
+    // pura, sem nenhuma suposicao alem do que o proprio loop do chamador exige.
+    name: "PARSE",
+    argCount: 3,
+    ddl: `CREATE OR ALTER FUNCTION PARSE (LISTA VARCHAR(16000), DELIM VARCHAR(50), IDX INTEGER)
+RETURNS VARCHAR(16000)
+AS
+DECLARE VARIABLE REST VARCHAR(16000);
+DECLARE VARIABLE POS INTEGER;
+DECLARE VARIABLE I INTEGER;
+BEGIN
+  IF (LISTA IS NULL OR DELIM IS NULL OR DELIM = '' OR IDX IS NULL OR IDX < 1) THEN
+    RETURN '';
+  REST = LISTA;
+  I = 1;
+  WHILE (I < IDX) DO
+  BEGIN
+    POS = POSITION(DELIM IN REST);
+    IF (POS = 0) THEN
+    BEGIN
+      REST = '';
+      I = IDX;
+    END
+    ELSE
+    BEGIN
+      REST = SUBSTRING(REST FROM POS + CHAR_LENGTH(DELIM));
+      I = I + 1;
+    END
+  END
+  IF (REST = '') THEN
+    RETURN '';
+  POS = POSITION(DELIM IN REST);
+  IF (POS = 0) THEN
+    RETURN REST;
+  ELSE
+    RETURN SUBSTRING(REST FROM 1 FOR POS - 1);
+END`,
+  },
 ] as const;
 
 async function patchLegacyUdfShims(db: Firebird.Database): Promise<void> {
