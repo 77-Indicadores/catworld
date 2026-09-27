@@ -95,12 +95,12 @@ export async function firebirdEndpointFor(connection: FirebirdCapableConnection)
  * `firebirdEndpointFor`). `connection` e sempre a linha completa (Postgres/MSSQL leem credenciais dela direto);
  * para firebird-ftp, `firebirdEndpoint` já vem pronto (materializado uma vez pelo chamador).
  */
-type ProviderCtx =
+export type ProviderCtx =
   | { kind: "postgres"; connection: PgConnection }
   | { kind: "mssql"; connection: MssqlConnection }
   | { kind: "firebird"; endpoint: FirebirdEndpoint };
 
-function providerCtxFor(connection: (PgConnection & MssqlConnection) & { provider: string }, firebirdEndpoint?: FirebirdEndpoint): ProviderCtx {
+export function providerCtxFor(connection: (PgConnection & MssqlConnection) & { provider: string }, firebirdEndpoint?: FirebirdEndpoint): ProviderCtx {
   if (connection.provider === "mssql") return { kind: "mssql", connection };
   if (connection.provider === "firebird-ftp") {
     if (!firebirdEndpoint) throw new Error("providerCtxFor firebird-ftp exige firebirdEndpoint (chame firebirdEndpointFor antes)");
@@ -109,13 +109,13 @@ function providerCtxFor(connection: (PgConnection & MssqlConnection) & { provide
   return { kind: "postgres", connection };
 }
 
-async function ctxTableColumns(ctx: ProviderCtx, schema: string, table: string): Promise<SourceColumn[]> {
+export async function ctxTableColumns(ctx: ProviderCtx, schema: string, table: string): Promise<SourceColumn[]> {
   if (ctx.kind === "mssql") return tableColumnsMssql(ctx.connection, schema, table);
   if (ctx.kind === "firebird") return tableColumnsFirebird(ctx.endpoint, schema, table);
   return tableColumns(ctx.connection, schema, table);
 }
 
-async function ctxQueryColumns(ctx: ProviderCtx, sql: string): Promise<SourceColumn[]> {
+export async function ctxQueryColumns(ctx: ProviderCtx, sql: string): Promise<SourceColumn[]> {
   if (ctx.kind === "mssql") return queryColumnsMssql(ctx.connection, sql);
   if (ctx.kind === "firebird") return queryColumnsFirebird(ctx.endpoint, sql);
   return queryColumns(ctx.connection, sql);

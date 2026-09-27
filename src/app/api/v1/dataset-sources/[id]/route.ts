@@ -4,24 +4,30 @@ import { prisma } from "@/server/db";
 import { resolveActor } from "@/server/auth/actor";
 import { canAccess } from "@/server/auth/permissions";
 import { ApiError, handleApiError, ok } from "@/server/http";
-import { assertDeleteDetection, assertValidCron, exposeSource, nextRefreshFromCron } from "@/server/connections/sources";
+import {
+  assertDeleteDetection, assertValidCron, ctxQueryColumns, ctxTableColumns, exposeSource, firebirdEndpointFor,
+  nextRefreshFromCron, providerCtxFor,
+} from "@/server/connections/sources";
 import { deleteDatasetSource } from "@/server/data/catalog";
-import { queryColumns, tableColumns, type SourceColumn } from "@/server/connections/postgres";
-import { queryColumnsMssql, tableColumnsMssql } from "@/server/connections/mssql";
+import type { PgConnection, SourceColumn } from "@/server/connections/postgres";
+import type { MssqlConnection } from "@/server/connections/mssql";
 import { resolveColumn, shouldResetDelta } from "@/server/connections/source-guards";
 import { clearSourceOptions, getSourceOptions, setSourceOptions } from "@/server/connections/source-options";
 import { audit } from "@/server/audit";
 
 // (rotas do Next so podem exportar handlers HTTP: as funcoes auxiliares vivem em connections/source-guards)
+// Mesmo dispatch por provider de refreshDatasetSource/createDatasetSource (ver ProviderCtx em connections/sources.ts) —
+// antes desta funcao tinha sua propria copia manual (so mssql/postgres, sem firebird-ftp: uma fonte firebird nunca
+// conseguia editar chave/coluna de incremento aqui, 400 KEY_COLUMN_UNKNOWN sempre).
 async function sourceColumnsFor(source: {
-  sourceKind: string; sourceSchema: string | null; sourceTable: string | null; sourceSql: string | null;
-  connection: Parameters<typeof tableColumns>[0] & { provider: string };
+  sourceKind: string; sourceSchema: string | null; sourceTable: string | null;
+  connection: (PgConnection & MssqlConnection) & { id: string; provider: string; metadataJson: string | null };
 }, sourceSql: string | null): Promise<SourceColumn[]> {
-  const mssql = source.connection.provider === "mssql";
-  if (source.sourceKind === "table") {
-    return mssql ? tableColumnsMssql(source.connection, source.sourceSchema!, source.sourceTable!) : tableColumns(source.connection, source.sourceSchema!, source.sourceTable!);
-  }
-  return mssql ? queryColumnsMssql(source.connection, sourceSql!) : queryColumns(source.connection, sourceSql!);
+  const firebirdEndpoint = source.connection.provider === "firebird-ftp" ? await firebirdEndpointFor(source.connection) : undefined;
+  const ctx = providerCtxFor(source.connection, firebirdEndpoint);
+  return source.sourceKind === "table"
+    ? ctxTableColumns(ctx, source.sourceSchema!, source.sourceTable!)
+    : ctxQueryColumns(ctx, sourceSql!);
 }
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
