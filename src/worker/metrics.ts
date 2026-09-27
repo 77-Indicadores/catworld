@@ -48,6 +48,10 @@ export type JobMetricInput = {
   workerLabel: string;
   /** Tabela que o job alimentou (historico por tabela). */
   tableId?: string | null;
+  /** Conexao de origem (SOURCE_REFRESH) — nulo em uploads/DERIVED_REFRESH/migracoes. */
+  connectionId?: string | null;
+  /** Copia de Job.storageServerId (so setado em SOURCE_REFRESH). */
+  storageServerId?: string | null;
 };
 
 /**
@@ -116,6 +120,23 @@ export async function resolveJobTableId(job: { upload_id: string | null; payload
   return null;
 }
 
+/**
+ * Conexao de origem do job: so SOURCE_REFRESH tem uma (via DatasetSource.connectionId) — uploads e
+ * DERIVED_REFRESH nao vem de uma Connection externa. Melhor esforco: nunca lanca.
+ */
+export async function resolveJobConnectionId(job: { payload_json: string | null }): Promise<string | null> {
+  try {
+    const p = job.payload_json ? (JSON.parse(job.payload_json) as { datasetSourceId?: string }) : {};
+    if (p.datasetSourceId) {
+      const s = await prisma.datasetSource.findUnique({ where: { id: p.datasetSourceId }, select: { connectionId: true } });
+      return s?.connectionId ?? null;
+    }
+  } catch {
+    // sem vinculo
+  }
+  return null;
+}
+
 /** Nunca lança — auditoria não pode derrubar o processamento do job. */
 export async function recordJobMetric(m: JobMetricInput): Promise<void> {
   try {
@@ -132,6 +153,8 @@ export async function recordJobMetric(m: JobMetricInput): Promise<void> {
         errorMessage: m.errorMessage ?? null,
         workerLabel: m.workerLabel,
         tableId: m.tableId ?? null,
+        connectionId: m.connectionId ?? null,
+        storageServerId: m.storageServerId ?? null,
       },
     });
   } catch (e) {

@@ -5,6 +5,7 @@ import { prisma } from "@/server/db";
 import { resolveActor, requireRole } from "@/server/auth/actor";
 import { handleApiError, ok, ApiError } from "@/server/http";
 import { decryptSecret } from "@/server/security/crypto";
+import { recordHealthCheck } from "@/server/connections/health";
 
 function parseMssqlUrl(url: string): sql.config {
   const withoutScheme = url.replace(/^sqlserver:\/\//i, "");
@@ -75,12 +76,14 @@ export async function POST(r: NextRequest, { params }: { params: Promise<{ id: s
           where: { id },
           data: { lastStatus: "healthy", lastLatencyMs: latencyMs, lastCheckedAt: new Date() },
         });
+        await recordHealthCheck({ subjectType: "storage_server", storageServerId: id, kind: "test", outcome: "healthy", latencyMs });
         return ok({ healthy: true, latencyMs, database });
       } catch (err) {
         await prisma.storageServer.update({
           where: { id },
           data: { lastStatus: "error", lastCheckedAt: new Date() },
         }).catch(() => undefined);
+        await recordHealthCheck({ subjectType: "storage_server", storageServerId: id, kind: "test", outcome: "error", errorMessage: err instanceof Error ? err.message : String(err) });
         throw err;
       } finally {
         await pool.end().catch(() => undefined);
@@ -97,12 +100,14 @@ export async function POST(r: NextRequest, { params }: { params: Promise<{ id: s
           where: { id },
           data: { lastStatus: "healthy", lastLatencyMs: latencyMs, lastCheckedAt: new Date() },
         });
+        await recordHealthCheck({ subjectType: "storage_server", storageServerId: id, kind: "test", outcome: "healthy", latencyMs });
         return ok({ healthy: true, latencyMs, database });
       } catch (err) {
         await prisma.storageServer.update({
           where: { id },
           data: { lastStatus: "error", lastCheckedAt: new Date() },
         }).catch(() => undefined);
+        await recordHealthCheck({ subjectType: "storage_server", storageServerId: id, kind: "test", outcome: "error", errorMessage: err instanceof Error ? err.message : String(err) });
         throw err;
       } finally {
         await pool.close().catch(() => undefined);

@@ -6,6 +6,7 @@ import { testPostgres } from "@/server/connections/postgres";
 import { testMssql } from "@/server/connections/mssql";
 import { testFirebird } from "@/server/connections/firebird";
 import { firebirdEndpointFor } from "@/server/connections/sources";
+import { recordHealthCheck } from "@/server/connections/health";
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -21,12 +22,14 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
           ? await testFirebird(await firebirdEndpointFor(connection))
           : await testPostgres(connection);
       await prisma.connection.update({ where: { id: connection.id }, data: { lastStatus: "healthy", lastLatencyMs: result.latencyMs, lastError: null, lastCheckedAt: new Date() } });
+      await recordHealthCheck({ subjectType: "connection", connectionId: connection.id, kind: "test", outcome: "healthy", latencyMs: result.latencyMs });
       return ok({ healthy: true, ...result });
     } catch (testError) {
       // Sem isto, uma falha de teste nao deixava rastro: a tela continuava mostrando o ultimo sucesso
       // (ou "Nao testada") como se nada tivesse mudado (ver auditoria de UX, achado "conexoes/sync").
       const message = testError instanceof Error ? publicQueryErrorMessage(testError.message) : "Falha ao testar a conexão.";
       await prisma.connection.update({ where: { id: connection.id }, data: { lastStatus: "error", lastError: message, lastCheckedAt: new Date() } });
+      await recordHealthCheck({ subjectType: "connection", connectionId: connection.id, kind: "test", outcome: "error", errorMessage: message });
       throw testError;
     }
   } catch (e) {

@@ -29,5 +29,5 @@ export function buildClaimSql(allowedTypes: string[] | null): string {
        LIMIT 1
        FOR UPDATE SKIP LOCKED
      )
-     RETURNING id,type,upload_id,payload_json,attempts,max_attempts,weight`;
+     RETURNING id,type,upload_id,payload_json,attempts,max_attempts,weight,storage_server_id`;
 }

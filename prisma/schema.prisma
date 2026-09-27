@@ -178,6 +178,8 @@ model Connection {
   updatedAt            DateTime  @updatedAt @map("updated_at") @db.Timestamp(3)
   sources              DatasetSource[]
   materialization      ConnectionMaterialization?
+  jobMetrics           JobMetric[]
+  healthChecks         HealthCheck[]
 
   @@map("cw_connections")
 }
@@ -402,12 +404,44 @@ model JobMetric {
   workerLabel   String?  @map("worker_label") @db.VarChar(120)
   /// Tabela que a execucao alimentou (historico por tabela); nulo antes deste campo.
   tableId       String?  @map("table_id") @db.Uuid
+  /// Conexao de origem (SOURCE_REFRESH/DERIVED_REFRESH); nulo em jobs sem conexao (uploads, migracoes).
+  /// Nulo tambem em linhas anteriores a este campo — sem backfill, historico por conexao comeca daqui.
+  connectionId    String?  @map("connection_id") @db.Uuid
+  /// Copia de Job.storageServerId (mesmo formato livre, sem FK) — permite media de duracao por storage.
+  storageServerId String?  @map("storage_server_id") @db.VarChar(64)
   createdAt     DateTime @default(now()) @map("created_at") @db.Timestamp(3)
+  connection    Connection? @relation(fields: [connectionId], references: [id], onDelete: SetNull)
 
   @@index([tableId, createdAt])
   @@index([createdAt])
   @@index([jobType, createdAt])
+  @@index([connectionId, createdAt])
   @@map("cw_job_metrics")
+}
+
+/// Log append-only de todo poll/teste de saude (Connection ou StorageServer) — o unico jeito de ver
+/// "checamos e nao mudou nada" ou "checamos e deu erro", que hoje nao deixa rastro nenhum (ver
+/// enqueueDueFirebirdFtpRefreshes em sources.ts, que so age quando algo muda). Retencao: 90 dias,
+/// limpo pela mesma rotina METADATA_CLEANUP que ja poda cw_jobs.
+model HealthCheck {
+  id              String   @id @default(uuid()) @db.Uuid
+  /// "connection" | "storage_server" — discrimina qual FK abaixo esta preenchida.
+  subjectType     String   @map("subject_type") @db.VarChar(20)
+  connectionId    String?  @map("connection_id") @db.Uuid
+  storageServerId String?  @map("storage_server_id") @db.Uuid
+  /// "poll" = check leve (ex.: FTP LIST do watch do Firebird) | "test" = teste manual completo ("Testar conexao").
+  kind            String   @db.VarChar(10)
+  /// "unchanged" | "changed" | "healthy" | "error"
+  outcome         String   @db.VarChar(20)
+  latencyMs       Int?     @map("latency_ms")
+  errorMessage    String?  @map("error_message") @db.Text
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamp(3)
+  connection      Connection?    @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  storageServer   StorageServer? @relation(fields: [storageServerId], references: [id], onDelete: Cascade)
+
+  @@index([connectionId, createdAt])
+  @@index([storageServerId, createdAt])
+  @@map("cw_health_checks")
 }
 
 model StorageServer {
@@ -430,6 +464,7 @@ model StorageServer {
   createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamp(3)
   updatedAt            DateTime  @updatedAt @map("updated_at") @db.Timestamp(3)
   datasets             Dataset[]
+  healthChecks         HealthCheck[]
 
   @@map("cw_storage_servers")
 }

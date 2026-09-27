@@ -8,7 +8,7 @@
 import { prisma } from "@/server/db";
 
 export async function deleteInBatches(
-  table: "cw_audit_events" | "cw_jobs",
+  table: "cw_audit_events" | "cw_jobs" | "cw_health_checks",
   where: string,
   params: unknown[],
   batch = 20_000,

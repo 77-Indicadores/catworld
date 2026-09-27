@@ -5,6 +5,7 @@ import { EmptyState, PageHeader, Panel, StatusBadge } from "@/components/ui/prim
 import { useApiAction, useFeedback } from "@/components/ui/feedback";
 import { apiRequest, errorMessage } from "@/lib/api-client";
 import { Time } from "@/components/ui/time";
+import { ConnectionHealthBlock } from "@/components/settings/connection-health-block";
 
 type Connection = { id: string; name: string; provider: string; environment: string; server: string; port: number | null; databaseName: string; sslMode: string; username: string; active: boolean; lastStatus: string | null; lastLatencyMs: number | null; lastError: string | null; lastCheckedAt: string | null; sshTunnelEnabled?: boolean; sshHost?: string | null; sshPort?: number | null; sshUsername?: string | null; sshAuthMethod?: string | null; metadataJson?: string | null };
 type TestState = null | { ok: true; latencyMs: number; database?: string } | { ok: false; message: string };
@@ -235,6 +236,7 @@ export default function ConnectionsPage() {
                 {c.lastStatus === "error" && c.lastError && (
                   <p className="mt-2 rounded bg-error/8 px-2 py-1 font-mono text-[11px] text-error">{c.lastError}</p>
                 )}
+                <ConnectionHealthBlock connectionId={c.id} />
                 <div className="mt-4 text-right">
                   <button disabled={testing === c.id} onClick={() => test(c.id)} className="btn btn-outline btn-sm">
                     <RefreshCw size={14} className={testing === c.id ? "animate-spin" : ""} />{testing === c.id ? "Testando..." : "Testar conexão"}

@@ -6,6 +6,7 @@ import { releaseAllImportLocks } from "@/server/db/import-lock";
 import { deleteInBatches } from "@/server/db/batched-delete";
 import { purgeLedger } from "@/server/integrity/ledger";
 import { purgeExpiredMaterializations } from "@/server/connections/firebird-materialize";
+import { HEALTH_CHECKS_RETENTION_DAYS } from "@/server/connections/health";
 import { JobCancelledError, runWithCancelToken, watchJobStatus } from "@/server/db/job-cancel";
 import { createWriteStream } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -26,7 +27,7 @@ import { enqueueDueDerivedRefreshes, refreshDerivedTable } from "@/server/connec
 import { migrateProjectStorage, migrateDatasetStorage } from "@/server/storage/migrate";
 import { pickInt } from "@/server/worker/config";
 import { auditJob } from "@/server/audit-request";
-import { startHeartbeat, currentRssMb, recordJobMetric, resolveJobTableId, writeWorkerLiveness, readWorkerLiveness, clearWorkerLiveness } from "./metrics";
+import { startHeartbeat, currentRssMb, recordJobMetric, resolveJobTableId, resolveJobConnectionId, writeWorkerLiveness, readWorkerLiveness, clearWorkerLiveness } from "./metrics";
 import { setDuckdbMemoryLimit } from "@/server/worker/runtime-limits";
 import { WorkerState, abortAndWait, identityConflict, isPidAlive, waitIdentityFree, listProfileNames, loadProfile, parseProfileArg, type WorkerProfileRow } from "./runtime";
 
@@ -43,7 +44,7 @@ Sentry.init({
 process.on("uncaughtException", (e) => { Sentry.captureException(e); console.error("[worker] uncaughtException:", e); });
 process.on("unhandledRejection", (e) => { Sentry.captureException(e); console.error("[worker] unhandledRejection:", e); });
 
-type Claimed = { id: string; type: string; upload_id: string | null; payload_json: string | null; attempts: number; max_attempts: number; weight: number };
+type Claimed = { id: string; type: string; upload_id: string | null; payload_json: string | null; attempts: number; max_attempts: number; weight: number; storage_server_id: string | null };
 
 // Fuso do processo em UTC antes de qualquer leitura/gravação de data (FON-03): o driver e o Date do JS interpretam timestamp sem fuso no fuso local.
 ensureUtcTimezone();
@@ -152,6 +153,9 @@ async function runMetadataCleanup() {
     // apaga do disco e do servidor Firebird efemero. Nao existe job dedicado (materializacao roda inline dentro
     // de refreshDatasetSource via ensureMaterialized); so a limpeza periodica precisa de um gatilho proprio.
     await purgeExpiredMaterializations().catch((e) => console.error("[cleanup] purgeExpiredMaterializations falhou:", e instanceof Error ? e.message : e));
+    // Log de health-check (polls/testes de conexao/storage): retencao fixa em 90 dias, nao configuravel.
+    await deleteInBatches("cw_health_checks", `created_at < NOW() - ($1 || ' days')::INTERVAL`, [String(HEALTH_CHECKS_RETENTION_DAYS)])
+      .catch((e) => console.error("[cleanup] purga de cw_health_checks falhou:", e instanceof Error ? e.message : e));
 
     // Fetch blobNames before deleting so we can clean up the files on disk.
     const expiredUploads = await prisma.$queryRawUnsafe<{ blob_name: string }[]>(
@@ -681,6 +685,7 @@ async function loop(concurrencyId: number) {
         jobId: job.id, jobType: job.type, status: "COMPLETED", weight: job.weight,
         fileSizeBytes, rssBeforeMb: rssBefore, rssAfterMb: currentRssMb(),
         durationMs: Date.now() - t0, workerLabel, tableId: await resolveJobTableId(job),
+        connectionId: await resolveJobConnectionId(job), storageServerId: job.storage_server_id,
       });
       await auditJob({ jobId: job.id, jobType: job.type, success: true, workerLabel, durationMs: Date.now() - t0, attempts: job.attempts, ...jobResource(job) });
     } catch (e) {
@@ -688,6 +693,7 @@ async function loop(concurrencyId: number) {
         jobId: job.id, jobType: job.type, status: "FAILED", weight: job.weight,
         fileSizeBytes, rssBeforeMb: rssBefore, rssAfterMb: currentRssMb(),
         durationMs: Date.now() - t0, workerLabel, tableId: await resolveJobTableId(job),
+        connectionId: await resolveJobConnectionId(job), storageServerId: job.storage_server_id,
         errorMessage: e instanceof Error ? e.message : String(e),
       });
       await auditJob({

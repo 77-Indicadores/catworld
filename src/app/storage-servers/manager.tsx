@@ -8,6 +8,7 @@ import { PageHeader, Panel } from "@/components/ui/primitives";
 import { useDialog, ModalBackdrop } from "@/components/ui/modal";
 import { apiRequest, errorMessage } from "@/lib/api-client";
 import { maskConnectionString } from "@/lib/mask-url";
+import { ConnectionHealthBlock } from "@/components/settings/connection-health-block";
 
 type Server = {
   id: string;
@@ -58,6 +59,21 @@ function DatasetsCell({ server }: { server: Server }) {
             ))}
           </ul>
         )}
+      </div>
+    </div>
+  );
+}
+
+/** Mesma ideia da DatasetsCell acima: só carrega o histórico de saúde quando o dropdown é aberto, nunca N vezes no load da tabela. */
+function HealthCell({ server }: { server: Server }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="dropdown dropdown-end">
+      <button tabIndex={0} className="btn btn-ghost btn-xs" onClick={() => setOpen(true)} title="Ver histórico de saúde">
+        <Clock3 size={13} />
+      </button>
+      <div tabIndex={0} className="dropdown-content z-50 mt-1 max-h-96 w-80 overflow-y-auto rounded-box border border-base-300 bg-base-100 p-3 text-left shadow-xl">
+        {open ? <ConnectionHealthBlock storageServerId={server.id} variant="bare" /> : <p className="text-xs text-base-content/65">Clique para carregar.</p>}
       </div>
     </div>
   );
@@ -228,6 +244,7 @@ export function StorageServerManager({ initialServers }: { initialServers: Serve
                   <th>URL</th>
                   <th className="text-center">Datasets</th>
                   <th className="text-center">Status</th>
+                  <th className="text-center">Saúde</th>
                   <th className="text-right">Ações</th>
                 </tr>
               </thead>
@@ -258,6 +275,7 @@ export function StorageServerManager({ initialServers }: { initialServers: Serve
                               <span className="text-[10px] text-base-content/65">{checkedAgoLabel(s.lastCheckedAt)}</span>
                             </div>}
                       </td>
+                      <td data-label="Saúde" className="text-center"><HealthCell server={s} /></td>
                       <td data-label="Ações">
                         <div className="flex items-center justify-end gap-1">
                           <button
