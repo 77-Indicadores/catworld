@@ -71,6 +71,24 @@ export const FROM_RETRY = ["FAILED"];
 /** O worker enfileira o import automatico enquanto o upload esta em preview (QUEUED_PREVIEW/PREVIEWING). */
 export const FROM_PREVIEW = ["QUEUED_PREVIEW", "PREVIEWING"];
 
+// Uploads nesses dois status nunca tem job associado por construcao (PENDING_UPLOAD = antes do preview
+// ser enfileirado; AWAITING_CONFIRMATION = esperando o usuario confirmar o mapeamento) — se o navegador
+// fecha ou a conexao cai nesse meio-tempo, o registro fica preso para sempre (so "Cancelar fila" na tela
+// de Uploads limpava manualmente). 24h e bem mais que o tempo normal dessas duas etapas (interativas).
+const STALE_UPLOAD_HOURS = 24;
+
+/** Cancela uploads abandonados (ver STALE_UPLOAD_HOURS). Chamado pelo METADATA_CLEANUP; retorna quantos. */
+export async function cancelStaleUploads(): Promise<number> {
+  const result = await prisma.upload.updateMany({
+    where: {
+      status: { in: ["PENDING_UPLOAD", "AWAITING_CONFIRMATION"] },
+      updatedAt: { lt: new Date(Date.now() - STALE_UPLOAD_HOURS * 3_600_000) },
+    },
+    data: { status: "FAILED", errorMessage: `Cancelado automaticamente: sem atividade por mais de ${STALE_UPLOAD_HOURS}h` },
+  });
+  return result.count;
+}
+
 export function assertUploadStatus(status: string, allowed: string[]) {
   if (!allowed.includes(status)) {
     throw new ApiError(409, "INVALID_UPLOAD_STATE", `Upload em status ${status} nao aceita esta operacao`);

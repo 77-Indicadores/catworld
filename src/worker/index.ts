@@ -21,7 +21,7 @@ import { env } from "@/server/env";
 import { previewFile, applyTypeOverrides, type FilePreview } from "@/server/uploads/parser";
 import { importUpload } from "@/server/uploads/importer";
 import { isNonRetryable } from "@/server/uploads/non-retryable";
-import { FROM_PREVIEW, queueImportUploadAuto } from "@/server/uploads/actions";
+import { FROM_PREVIEW, queueImportUploadAuto, cancelStaleUploads } from "@/server/uploads/actions";
 import { enqueueDueSourceRefreshes, enqueueDueReconciliations, enqueueDueFirebirdFtpRefreshes, refreshDatasetSource, nextRefreshFromCron } from "@/server/connections/sources";
 import { enqueueDueDerivedRefreshes, refreshDerivedTable } from "@/server/connections/derived";
 import { migrateProjectStorage, migrateDatasetStorage } from "@/server/storage/migrate";
@@ -156,6 +156,10 @@ async function runMetadataCleanup() {
     // Log de health-check (polls/testes de conexao/storage): retencao fixa em 90 dias, nao configuravel.
     await deleteInBatches("cw_health_checks", `created_at < NOW() - ($1 || ' days')::INTERVAL`, [String(HEALTH_CHECKS_RETENTION_DAYS)])
       .catch((e) => console.error("[cleanup] purga de cw_health_checks falhou:", e instanceof Error ? e.message : e));
+    // Uploads presos em PENDING_UPLOAD/AWAITING_CONFIRMATION (nunca tiveram job, por construcao) ha mais de 24h:
+    // cancela sozinho em vez de esperar alguem clicar "Cancelar fila" manualmente.
+    const cancelledStaleUploads = await cancelStaleUploads().catch((e) => { console.error("[cleanup] cancelStaleUploads falhou:", e instanceof Error ? e.message : e); return 0; });
+    if (cancelledStaleUploads > 0) console.log(`[METADATA_CLEANUP] uploads abandonados cancelados=${cancelledStaleUploads}`);
 
     // Fetch blobNames before deleting so we can clean up the files on disk.
     const expiredUploads = await prisma.$queryRawUnsafe<{ blob_name: string }[]>(
