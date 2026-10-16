@@ -17,6 +17,7 @@ import { prisma } from "@/server/db";
 import { withAdvisoryLock } from "@/server/db/advisory-lock";
 import { withImportLock, type Lease } from "@/server/db/import-lock";
 import { sqlIdentifier, fitIdentifiers } from "@/server/security/naming";
+import { dropEchoColumns, echoWarning, wideRowError, withEchoColumns } from "./echo-columns";
 import { previewFile, rowsFromFile, type FilePreview, type ParsedColumn, type RowsFromFileOpts } from "./parser";
 import { convertForPg } from "./convert-values";
 import type { PgStorageConnection } from "@/server/storage/pg-storage";
@@ -139,7 +140,9 @@ export async function importUploadPg(
   const lockTable = pre.table?.sqlName ?? sqlIdentifier(pre.originalFilename.replace(/.[^.]+$/, ""));
   try {
     return await withImportLock(`${pre.dataset.id}:${pre.dataset.schemaName}.${lockTable}`, (lease) => importUploadPgLocked(uploadId, source, conn, lease));
-  } catch (e) {
+  } catch (caught) {
+    // Tabela larga demais (centenas de colunas): mensagem clara e sem retentativa
+    const e = wideRowError(caught) ?? caught;
     // Cada tentativa que falha vira uma linha no livro (com o motivo estruturado quando é uma barra de integridade) e, se for a
     // integridade, um evento de auditoria com success=false — a evidência que antes ficava só em console.
     const entry = {
@@ -184,6 +187,11 @@ async function importUploadPgLocked(
   if (!mapping.length && upload.mappingJson) {
     mapping = (await previewFile(source as string)).columns;
   }
+  // cw_synced_at/cw_deleted_at reenviados (SELECT * -> reenvio) nao viram colunas; o arquivo e lido com eles (leitura posicional)
+  const { mapping: withoutEcho, echo } = dropEchoColumns(mapping);
+  mapping = withoutEcho;
+  const echoMsg = echoWarning(echo);
+  if (echoMsg) console.warn("[importUploadPg] %s upload=%s", echoMsg, uploadId);
   if (!mapping.length) {
     // Arquivo sem colunas não carrega nada e não pode contar como concluído (a tabela não foi tocada): FAILED, com motivo.
     await prisma.upload.update({
@@ -272,7 +280,7 @@ async function importUploadPgLocked(
     if (flushError) throw flushError;
   };
   try {
-    for await (const row of alreadyApplied ? emptyRows() : rowsFromFile(source, mapping, opts)) {
+    for await (const row of alreadyApplied ? emptyRows() : rowsFromFile(source, withEchoColumns(mapping, echo), opts)) {
       batch.push(row);
       if (batch.length >= BATCH_SIZE) {
         const full = batch;
@@ -494,7 +502,7 @@ async function importUploadPgLocked(
   await recordLedger({
     kind: "upload", outcome: "COMPLETED", verdict: evaluation.verdict, datasetId: upload.dataset!.id, tableId: table.id, uploadId: upload.id,
     tableName, mode: upload.mode, expectedRows: expected?.expected ?? null, parsedRows: total, physicalRows: Number(actual), prevRows: prevRowsForLedger,
-    detail: evaluationDetail(evaluation, { importMethod: alreadyApplied ? "already-applied" : "pg-unnest-batch", storage: "postgres", ...(expected ? { expectedSource: expected.source, clientRowCount: expected.clientRowCount } : {}) }),
+    detail: evaluationDetail(evaluation, { importMethod: alreadyApplied ? "already-applied" : "pg-unnest-batch", storage: "postgres", ...(expected ? { expectedSource: expected.source, clientRowCount: expected.clientRowCount } : {}), ...(echoMsg ? { warning: echoMsg, droppedColumns: echo.map((x) => x.col.originalName) } : {}) }),
   });
 
   return { tableId: table.id, inserted, updated, rowCount: actual };

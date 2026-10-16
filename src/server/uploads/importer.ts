@@ -17,6 +17,7 @@ import { getStoragePool } from "@/server/storage/pool";
 import { getStorageConnection, type ColDef } from "@/server/storage/connection";
 import { quoteIdentifier, sqlIdentifier } from "@/server/security/naming";
 import { previewFile, rowsFromFile, type FilePreview, type ParsedColumn, type RowsFromFileOpts, type ParseStats } from "./parser";
+import { dropEchoColumns, echoWarning, withEchoColumns, type EchoColumn } from "./echo-columns";
 import { env } from "@/server/env";
 import { normalizeDateLike } from "./date-normalize";
 import { convertForTds, decimalTsqlExpr, isWideDecimal } from "./convert-values";
@@ -108,6 +109,7 @@ async function tdsBulkCopy(
   onProgress?: (rows: number) => void,
   typed = true,
   stats?: ParseStats,
+  echo: EchoColumn[] = [],
 ): Promise<{ total: number; reclassifiedCols: string[] }> {
   const { getWorkerConfig } = await import("@/server/worker/config");
   const { importBatchDelayMs: batchDelay } = await getWorkerConfig();
@@ -160,7 +162,7 @@ async function tdsBulkCopy(
     onProgress?.(total);
   };
 
-  for await (const row of rowsFromFile(source, mapping, opts, stats)) {
+  for await (const row of rowsFromFile(source, withEchoColumns(mapping, echo), opts, stats)) {
     batch.push(row);
     if (batch.length >= 50_000) await flush();
   }
@@ -207,6 +209,11 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
   if (!mapping.length && upload.mappingJson) {
     mapping = (await previewFile(source as string)).columns;
   }
+  // cw_synced_at/cw_deleted_at reenviados (SELECT * -> reenvio) nao viram colunas; o arquivo e lido com eles (leitura posicional)
+  const { mapping: withoutEcho, echo } = dropEchoColumns(mapping);
+  mapping = withoutEcho;
+  const echoMsg = echoWarning(echo);
+  if (echoMsg) console.warn("[importUpload] %s upload=%s", echoMsg, uploadId);
   if (!mapping.length) {
     // Arquivo sem colunas não carrega nada e não pode contar como concluído (a tabela não foi tocada): FAILED, com motivo.
     await prisma.upload.update({
@@ -369,7 +376,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
           phaseTimings.importMethod = "already-applied";
         } else {
           phaseTimings.importMethod = "tds-primary";
-          const _r = await tdsBulkCopy(writePool, source, mapping, schema, destTable, opts, knownRowCount, uploadId, onProgress, true, parseStats);
+          const _r = await tdsBulkCopy(writePool, source, mapping, schema, destTable, opts, knownRowCount, uploadId, onProgress, true, parseStats, echo);
           total = _r.total; reclassifiedCols.push(..._r.reclassifiedCols);
           // DECIMAL largo entrou como texto exato (NVARCHAR(64)): converte a coluna da staging para o tipo final. Falha alto se algum valor
           // não couber (nunca arredonda); a staging vira a tabela no swap, então o tipo da staging é o tipo publicado.
@@ -666,7 +673,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
       await recordLedger({
         kind: "upload", outcome: "COMPLETED", verdict: evaluation.verdict, datasetId: upload.dataset!.id, tableId: table.id, uploadId: upload.id,
         tableName, mode: upload.mode, expectedRows: expected?.expected ?? null, parsedRows: total, physicalRows: Number(actual), prevRows: prevRowsForLedger,
-        detail: evaluationDetail(evaluation, { ...(expected ? { expectedSource: expected.source, clientRowCount: expected.clientRowCount } : {}), importMethod: phaseTimings.importMethod, parseMethod: parseStats.parseMethod, fallbackReason: parseStats.fallbackReason, storage: "sqlserver" }),
+        detail: evaluationDetail(evaluation, { ...(expected ? { expectedSource: expected.source, clientRowCount: expected.clientRowCount } : {}), importMethod: phaseTimings.importMethod, parseMethod: parseStats.parseMethod, fallbackReason: parseStats.fallbackReason, storage: "sqlserver", ...(echoMsg ? { warning: echoMsg, droppedColumns: echo.map((x) => x.col.originalName) } : {}) }),
       });
 
       return { tableId: table.id, inserted, updated, rowCount: actual };
