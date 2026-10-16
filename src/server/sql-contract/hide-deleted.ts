@@ -177,6 +177,16 @@ export async function hideDeletedRows(input: string, ctx: HideDeletedCtx): Promi
     fix(ast);
   }
 
+  // O sqlify do parser escreve `CAST(x AS NVARCHAR(MAX))` como `NVARCHARmax` (o AST traz length "max" sem parenteses):
+  // o SQL Server recusava ("Type NVARCHARmax is not a defined system type"). Visto em producao numa tabela derivada.
+  const fixMaxLength = (n: Node): void => {
+    if (Array.isArray(n)) { for (const x of n) fixMaxLength(x); return; }
+    if (!n || typeof n !== "object") return;
+    if (typeof n.dataType === "string" && typeof n.length === "string" && n.length.toLowerCase() === "max") { n.length = "MAX"; n.parentheses = true; }
+    for (const k of Object.keys(n)) fixMaxLength(n[k]);
+  };
+  fixMaxLength(ast);
+
   let out: string;
   try {
     out = parser.sqlify(ast, { database: "transactsql" });

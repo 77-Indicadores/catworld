@@ -24,6 +24,12 @@ const run = async (sql: string, schemas?: string[]) => {
 const norm = (s: string) => s.replace(/\s+/g, " ").trim();
 
 describe("hideDeletedRows", () => {
+  it("tipo (MAX) sobrevive a reescrita: CAST/CONVERT AS NVARCHAR(MAX) (o sqlify do parser gerava NVARCHARmax)", async () => {
+    const r = await run("SELECT CAST(code AS NVARCHAR(MAX)) AS c, CAST(b AS varbinary(max)) AS b, CONVERT(NVARCHAR(MAX), x) AS x, CAST(n AS NVARCHAR(10)) AS n FROM ds.vendas");
+    expect(r.rewritten).toBe(1);
+    expect(norm(r.sql)).toBe(`SELECT CAST(code AS NVARCHAR(MAX)) AS c, CAST(b AS VARBINARY(MAX)) AS b, CONVERT(NVARCHAR(MAX), x) AS x, CAST(n AS NVARCHAR(10)) AS n FROM ${F("ds", "vendas")}`);
+  });
+
   it("reescreve FROM com alias, mantendo o alias", async () => {
     const r = await run("SELECT v.id FROM ds.vendas v");
     expect(r.rewritten).toBe(1);
