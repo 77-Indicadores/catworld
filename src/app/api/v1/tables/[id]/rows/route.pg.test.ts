@@ -79,4 +79,14 @@ d("rota rows (Postgres real)", { timeout: 60_000 }, () => {
     const y0 = await get(`?since=${encodeURIComponent("0000-01-01T00:00:00Z")}`);
     expect(y0.status).toBe(400);
   });
+
+  it("sample=1 nunca passa de `limit`, mesmo com a carga inteira no mesmo carimbo (o baseline traz o grupo todo)", async () => {
+    await pool.query(`UPDATE ${S}.vendas SET cw_synced_at = timestamp '2026-07-01 00:00:00'`);
+    const baseline = await get("?limit=100");
+    expect(baseline.body.data.length).toBeGreaterThan(100);
+    const r = await get("?limit=100&sample=1");
+    expect(r.status).toBe(200);
+    expect(r.body.data).toHaveLength(100);
+    expect((await get("?sample=1&since=2026-01-01T00:00:00Z")).status).toBe(400);
+  });
 });

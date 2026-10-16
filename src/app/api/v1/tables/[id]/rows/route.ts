@@ -39,6 +39,10 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     }
     const sinceRaw = request.nextUrl.searchParams.get("since");
     const cursorRaw = request.nextUrl.searchParams.get("cursor");
+    // sample=1: so as primeiras `limit` linhas, fora do protocolo de sync (que pode devolver o grupo empatado inteiro, ate TIE_CAP).
+    const sample = request.nextUrl.searchParams.get("sample") === "1";
+    if (sample && (sinceRaw || cursorRaw))
+      throw new ApiError(400, "VALIDATION_ERROR", "\"sample\" nao combina com \"since\" nem \"cursor\"");
 
     if (sinceRaw && table.source?.mode === "live") {
       throw new ApiError(400, "SINCE_NOT_SUPPORTED", "\"since\" só é suportado em fontes extract (fontes live não têm cópia local para comparar).");
@@ -87,7 +91,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       return result.rows as Record<string, unknown>[];
     };
 
-    if (conn.provider === "postgres") {   // "live" ja retornou acima; vale tambem SEM `since` (baseline paginado)
+    if (conn.provider === "postgres" && !sample) {   // "live" ja retornou acima; vale tambem SEM `since` (baseline paginado)
       const qSyncedAt = conn.q("cw_synced_at");
       const qDeletedAt = conn.q("cw_deleted_at");
       const isBaseline = !parsedSince;

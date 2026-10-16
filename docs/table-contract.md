@@ -18,8 +18,9 @@ Quem tinha o direito continua com o mesmo acesso. No OData o cache de token vale
 | `limit` | inteiro ≥ 0, padrão 100, máximo 1000 (acima: usa 1000). `abc`/`-5` → **400 `VALIDATION_ERROR`** (antes: 500) |
 | `since` | ISO-8601; só em fonte **extract** (`SINCE_NOT_SUPPORTED` no live) |
 | `cursor` | opcional, junto com `since`: continua a página seguinte (ver abaixo) |
+| `sample` | `1` = só as primeiras `limit` linhas ativas, fora do protocolo de sync (nunca mais que `limit`; sem `hasMore`/`nextCursor`). Não combina com `since`/`cursor` → **400 `VALIDATION_ERROR`**. Usado pela aba de dados da interface |
 
-Sem `since` é uma **amostra** das primeiras `limit` linhas (sem `offset`): para ler tudo use `/queries` (`stream`) ou o export.
+Sem `since` (e sem `sample`), no Postgres, é o **baseline paginado** do protocolo abaixo: pode trazer mais que `limit` quando há grupo empatado. Para uma amostra de tamanho fixo use `sample=1`; para ler tudo use `/queries` (`stream`) ou o export.
 
 ### `since` sem perda
 

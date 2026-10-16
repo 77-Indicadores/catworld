@@ -39,10 +39,11 @@ export function TablePanel({ table }: { table: Table }) {
     Promise.resolve().then(() => { if (!cancelled) { setLoading(true); setError(""); } });
     const live = sourceModeValue === "live";
     apiRequest<{ rows?: Record<string, unknown>[] } | Record<string, unknown>[]>(
-      live ? `/api/v1/dataset-sources/${sourceId}/query` : `/api/v1/tables/${table.id}/rows?limit=100`,
+      live ? `/api/v1/dataset-sources/${sourceId}/query` : `/api/v1/tables/${table.id}/rows?limit=100&sample=1`,
       live ? { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ limit: 100 }) } : undefined,
     )
-      .then(({ data }) => { if (cancelled) return; setRows(live ? (data as { rows?: Record<string, unknown>[] })?.rows ?? [] : (data as Record<string, unknown>[]) ?? []); })
+      // slice: a grade desenha tudo de uma vez; nunca mais que a amostra pedida
+      .then(({ data }) => { if (cancelled) return; setRows((live ? (data as { rows?: Record<string, unknown>[] })?.rows ?? [] : (data as Record<string, unknown>[]) ?? []).slice(0, 100)); })
       .catch((err) => { if (!cancelled) setError(errorMessage(err)); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
