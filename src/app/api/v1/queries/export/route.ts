@@ -4,6 +4,7 @@ import { z } from "zod";
 import { resolveActor } from "@/server/auth/actor";
 import { syncActorGrants } from "@/server/auth/sync-grants";
 import { runStorageQuery } from "@/server/sql-contract/run";
+import { resolveQueryStorage } from "@/server/sql-contract/route-storage";
 import { resolveQueryScope } from "@/server/auth/permissions";
 import { ApiError, handleApiError, isQueryTimeout, publicQueryErrorMessage, queryTimeoutError } from "@/server/http";
 import { audit } from "@/server/audit";
@@ -27,8 +28,8 @@ export async function POST(r: NextRequest) {
 
     // Acesso: antes esta rota nao conferia nada (no Postgres qualquer ator lia qualquer schema).
     const scope = await resolveQueryScope(actor, { datasetId: input.datasetId, projectId: input.projectId });
-    const schemas = scope.datasets.map((d) => d.schemaName);
-    const storageServerId = scope.datasets[0]?.storageServerId ?? null;
+    // Servidor pelos schemas citados no SQL (o projeto pode ter datasets em servidores diferentes)
+    const { schemas, storageServerId } = await resolveQueryStorage(input.sql, scope);
     const syncScope: { datasetIds?: string[]; projectIds?: string[] } | undefined =
       input.datasetId ? { datasetIds: [input.datasetId] } : input.projectId ? { projectIds: [input.projectId] } : undefined;
 

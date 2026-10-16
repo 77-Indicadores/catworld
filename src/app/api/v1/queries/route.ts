@@ -10,6 +10,7 @@ import { prisma } from "@/server/db";
 import { getStorageConnection } from "@/server/storage/connection";
 import { hideDeletedForStorage } from "@/server/sql-contract/hide-deleted-run";
 import { pgRoleForActor, runStorageQuery, type QueryResult } from "@/server/sql-contract/run";
+import { resolveQueryStorage } from "@/server/sql-contract/route-storage";
 import { getContractMode } from "@/server/sql-contract/apply";
 import { getNormalizeDefault } from "@/server/sql-contract/format-default";
 import { paginationWarnings } from "@/server/sql-contract/query-shape";
@@ -46,8 +47,8 @@ export async function POST(request: NextRequest) {
     const normalize = input.normalize ?? await getNormalizeDefault();
     // Acesso: antes esta rota nao conferia nada (no Postgres qualquer ator lia qualquer schema).
     const scope = await resolveQueryScope(actor, { datasetId: input.datasetId, projectId: input.projectId });
-    const schemas = scope.datasets.map((d) => d.schemaName);
-    const storageServerId = scope.datasets[0]?.storageServerId ?? null;
+    // Servidor pelos schemas citados no SQL (o projeto pode ter datasets em servidores diferentes)
+    const { schemas, storageServerId } = await resolveQueryStorage(input.sql, scope);
     const syncScope: { datasetIds?: string[]; projectIds?: string[] } | undefined =
       input.datasetId ? { datasetIds: [input.datasetId] } : input.projectId ? { projectIds: [input.projectId] } : undefined;
 

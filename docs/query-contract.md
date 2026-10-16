@@ -35,6 +35,15 @@ Saída (`data`): `{ columns, rows, rowCount, truncated, executionTimeMs }`.
   cabeçalhos `X-Cache: HIT|MISS` e `X-Cache-Hits`. (Antes, `cached` e `cacheHits` apareciam dentro de `data`, só no HIT.)
 - O acesso ao dataset é verificado **antes** do cache: perder o grant tem efeito imediato.
 
+## Servidor de storage
+
+Um projeto pode ter datasets em servidores diferentes (Azure SQL e Postgres). A consulta roda no servidor dos **schemas citados no SQL**
+(casados com os datasets que o ator lê), vale com ou sem escopo, também no `/queries/export`. Antes ia ao servidor do 1º dataset do
+escopo (ordem não garantida) ou ao padrão, e tabela existente dava `Invalid object name`.
+
+- Schemas de servidores diferentes na mesma consulta: **400 `MIXED_STORAGE`** (a mensagem lista os grupos); consulte cada grupo separado.
+- Nenhum schema de dataset citado (só nomes sem schema): comportamento anterior.
+
 ## Tempo limite
 
 Estouro de tempo devolve **408 `QUERY_TIMEOUT`** (antes: 400 `QUERY_FAILED` genérico); o SDK já o mapeia para `QueryTimeoutError`.
