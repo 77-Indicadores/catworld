@@ -47,6 +47,16 @@ export function fitIdentifiers(names: string[], max = PG_IDENTIFIER_MAX): string
   return kept.map((n, i) => n ?? uniqueIdentifier(names[i]!, taken, max));
 }
 
+/**
+ * Nomes para o Postgres de colunas vindas de outro banco (SQL Server aceita 128): o nome longo vira os primeiros `max` bytes —
+ * o MESMO corte que o Postgres faz sozinho num SQL, entao uma consulta que cita o nome longo continua achando a coluna. So quem
+ * colide (outro nome ja existente ou dois longos com o mesmo comeco) ganha `_2`, `_3`... Nomes curtos nunca mudam.
+ */
+export function pgTruncatedIdentifiers(names: string[], max = PG_IDENTIFIER_MAX): string[] {
+  const taken = new Set(names.filter((n) => n.length <= max));
+  return names.map((n) => (n.length <= max ? n : uniqueIdentifier(n.slice(0, max), taken, max)));
+}
+
 export function datasetSchema(projectSlug: string, datasetSlug: string): string {
   return sqlIdentifier(`d_${projectSlug.replaceAll("-", "_")}__${datasetSlug.replaceAll("-", "_")}`, 128);
 }

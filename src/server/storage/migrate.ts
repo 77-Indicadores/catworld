@@ -12,6 +12,7 @@ import { getStorageConnection } from "./connection";
 import type { StorageConnection, ColDef } from "./connection";
 import { markNonRetryable } from "@/server/uploads/non-retryable";
 import { parseDecimalType } from "@/lib/decimal-type";
+import { pgTruncatedIdentifiers } from "@/server/security/naming";
 
 /**
  * BIGINT e DECIMAL com mais de 15 dígitos significativos: o driver do SQL Server (tedious) decodifica esses
@@ -25,8 +26,20 @@ function needsExactTextRead(sqlType: string): boolean {
   return !!d && d.precision > 15;
 }
 
-export type TableCopyResult = { table: string; rows: number };
+export type TableCopyResult = { table: string; rows: number; renamed?: { from: string; to: string }[] };
 export type DatasetCopyResult = { datasetId: string; schema: string; tables: TableCopyResult[] };
+
+/**
+ * Atualizacoes do catalogo para as colunas renomeadas na copia (nome > 63 bytes no Postgres). Vao na MESMA transacao que troca
+ * o ponteiro do dataset: o app nunca le o servidor novo com o nome antigo (nem o antigo com o nome novo).
+ */
+function catalogRenameOps(datasetId: string, tables: TableCopyResult[]) {
+  return tables.flatMap(({ table, renamed }) => (renamed ?? []).flatMap(({ from, to }) => [
+    prisma.datasetColumn.updateMany({ where: { sqlName: from, table: { datasetId, sqlName: table } }, data: { sqlName: to } }),
+    prisma.datasetSource.updateMany({ where: { datasetId, keyColumn: from, targetTable: { sqlName: table } }, data: { keyColumn: to } }),
+    prisma.datasetSource.updateMany({ where: { datasetId, deltaColumn: from, targetTable: { sqlName: table } }, data: { deltaColumn: to } }),
+  ]));
+}
 
 type MigrateJobPayload = { projectId?: string; datasetId?: string };
 
@@ -78,8 +91,13 @@ async function copySchema(
     // recarimbadas — para preservar o histórico de `rows?since=` e não fazer um consumidor incremental achar
     // que toda a tabela mudou no instante da migração. `atomicSwap` (abaixo) só adiciona essas colunas quando
     // elas NÃO existem na staging (ADD COLUMN IF NOT EXISTS): como aqui elas já vêm copiadas, ele não mexe.
-    const colDefs: ColDef[] = cols.map(c => ({
-      name: c.name,
+    // SQL Server aceita nome de coluna com 128 caracteres; o Postgres corta em 63 bytes e duas colunas longas com o mesmo
+    // comeco viravam o mesmo nome ("column ... specified more than once", visto migrando LITORAL-CLEAN). Le pelo nome da
+    // origem, grava com o nome que cabe; as renomeacoes voltam para o catalogo no commit da migracao.
+    const dstNames = dst.provider === "postgres" ? pgTruncatedIdentifiers(cols.map(c => c.name)) : cols.map(c => c.name);
+    const renamed = cols.flatMap((c, i) => (dstNames[i] !== c.name ? [{ from: c.name, to: dstNames[i]! }] : []));
+    const colDefs: ColDef[] = cols.map((c, i) => ({
+      name: dstNames[i]!,
       sqlType: c.sqlType,
       nullable: true,
     }));
@@ -154,7 +172,7 @@ async function copySchema(
       throw e;
     }
 
-    results.push({ table, rows: allRows.length });
+    results.push({ table, rows: allRows.length, ...(renamed.length ? { renamed } : {}) });
   }
 
   return results;
@@ -197,11 +215,12 @@ export async function migrateProjectStorage(
   }
 
   // Commit atomico: so chega aqui se TODOS os datasets copiaram com sucesso.
-  await prisma.$transaction(
-    datasetsToMigrate.map(d =>
+  await prisma.$transaction([
+    ...datasetsToMigrate.map(d =>
       prisma.dataset.update({ where: { id: d.id }, data: { storageServerId: targetStorageServerId } }),
     ),
-  );
+    ...datasetResults.flatMap(r => catalogRenameOps(r.datasetId, r.tables)),
+  ]);
 
   return { datasetsMigrated: datasetResults.length, datasets: datasetResults };
 }
@@ -222,7 +241,10 @@ export async function migrateDatasetStorage(
   const srcConn = await getStorageConnection(dataset.storageServerId!);
   const tables = await copySchema(srcConn, dstConn, dataset.schemaName);
 
-  await prisma.dataset.update({ where: { id: dataset.id }, data: { storageServerId: targetStorageServerId } });
+  await prisma.$transaction([
+    prisma.dataset.update({ where: { id: dataset.id }, data: { storageServerId: targetStorageServerId } }),
+    ...catalogRenameOps(dataset.id, tables),
+  ]);
 
   return { datasetId: dataset.id, schema: dataset.schemaName, tables };
 }
