@@ -64,6 +64,11 @@ export interface StorageConnection {
 
   /** Executa SQL raw e retorna linhas */
   query<T = Record<string, unknown>>(sql: string): Promise<T[]>;
+  /**
+   * Executa SQL raw e entrega as linhas em lotes de ate `batchSize`, sem materializar o resultado inteiro (copias de tabelas
+   * grandes: a leitura toda numa chamada so derrubava o worker por memoria). Sair do loop antes do fim cancela a leitura.
+   */
+  queryBatches?<T = Record<string, unknown>>(sql: string, batchSize: number): AsyncGenerator<T[]>;
   /** Executa SQL raw e retorna número de linhas afetadas */
   execute(sql: string): Promise<number>;
 

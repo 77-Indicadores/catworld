@@ -726,6 +726,18 @@ async function releaseSelf(refund = false) {
   const escaped = workerId.replace(/[\\%_]/g, (c) => `\\${c}`);
   const labels = Array.from({ length: concurrency }, (_, i) => `${workerId}-${i + 1}`);
   const likes = labels.map((_, i) => `${escaped}-${i + 1}@%`);
+  // Apos uma QUEDA, o job que estava rodando ja gastou a tentativa (o claim soma ao pegar). Esgotadas, vira FAILED: antes
+  // voltava para a fila sem olhar o limite e um job que derruba o worker (ex.: migracao lendo uma tabela enorme de uma vez)
+  // rodava em loop — visto em producao com 159 tentativas e nenhum erro registrado.
+  const exhausted = refund ? 0 : await prisma.$executeRawUnsafe(
+    `UPDATE cw_jobs
+     SET status='FAILED', locked_at=NULL, locked_by=NULL, heartbeat_at=NULL,
+         last_error='O worker caiu durante este job em todas as tentativas (provavel falta de memoria); nao sera repetido sozinho.'
+     WHERE status='RUNNING' AND (locked_by LIKE ANY($1::text[]) OR locked_by = ANY($2::text[])) AND attempts >= max_attempts`,
+    likes,
+    labels,
+  );
+  if (exhausted > 0) console.warn(`[worker] startup: ${exhausted} job(s) esgotaram as tentativas derrubando o worker: FAILED`);
   const released = await prisma.$executeRawUnsafe(
     `UPDATE cw_jobs
      SET status='QUEUED', locked_at=NULL, locked_by=NULL, heartbeat_at=NULL, available_at=NOW(),

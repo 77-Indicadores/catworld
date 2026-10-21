@@ -196,6 +196,26 @@ export class PgStorageConnection implements StorageConnection {
     return result.rows as T[];
   }
 
+  async *queryBatches<T = Record<string, unknown>>(sql: string, batchSize: number): AsyncGenerator<T[]> {
+    // Cursor numa transacao de leitura: FETCH em lotes, memoria = ~1 lote (o mesmo mecanismo do export de tabela).
+    const client = await this._pool.connect();
+    let ok = false;
+    try {
+      await client.query("BEGIN READ ONLY");
+      await client.query(`DECLARE cw_batches NO SCROLL CURSOR FOR ${sql}`);
+      while (true) {
+        const r = await client.query(`FETCH FORWARD ${Math.max(1, Math.floor(batchSize))} FROM cw_batches`);
+        if (!r.rows.length) break;
+        yield r.rows as T[];
+      }
+      await client.query("COMMIT");
+      ok = true;
+    } finally {
+      if (!ok) await client.query("ROLLBACK").catch(() => undefined);
+      client.release();
+    }
+  }
+
   async execute(sql: string): Promise<number> {
     const result = await this._pool.query(sql);
     return result.rowCount ?? 0;

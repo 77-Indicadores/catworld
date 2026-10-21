@@ -241,6 +241,36 @@ export class MssqlStorageConnection implements StorageConnection {
     return result.recordset as T[];
   }
 
+  async *queryBatches<T = Record<string, unknown>>(sqlStr: string, batchSize: number): AsyncGenerator<T[]> {
+    const p = await this.rawPool();
+    const request = p.request();
+    request.stream = true;
+    // Contrapressao: o stream pausa a cada lote cheio e so volta quando o consumidor pede o proximo (memoria = ~1 lote).
+    let batch: T[] = [];
+    const queue: T[][] = [];
+    let error: Error | null = null;
+    let done = false;
+    let wake: (() => void) | null = null;
+    const notify = () => { wake?.(); wake = null; };
+    request.on("row", (row: T) => {
+      batch.push(row);
+      if (batch.length >= batchSize) { queue.push(batch); batch = []; request.pause(); notify(); }
+    });
+    request.on("error", (e: Error) => { error ??= e; notify(); });
+    request.on("done", () => { if (batch.length) { queue.push(batch); batch = []; } done = true; notify(); });
+    void request.query(sqlStr);
+    try {
+      while (true) {
+        if (error) throw error;
+        if (queue.length) { yield queue.shift()!; request.resume(); continue; }
+        if (done) return;
+        await new Promise<void>((r) => { wake = r; });
+      }
+    } finally {
+      if (!done) request.cancel(); // consumidor saiu antes do fim (erro na escrita): nao deixa a leitura presa no servidor
+    }
+  }
+
   async execute(sqlStr: string): Promise<number> {
     const p = await this.rawPool();
     const result = await p.request().query(sqlStr);

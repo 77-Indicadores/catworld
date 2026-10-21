@@ -69,6 +69,9 @@ export async function findActiveMigrationConflict(
   return null;
 }
 
+/** Tabelas de trabalho do Catworld (staging de upload/sync, mesclada, chaves, staging de migracao): nunca sao copiadas. */
+export const isWorkTable = (t: string) => /^(cw_(stage|mgd|keys|src|migstg)_|__drv_)/i.test(t);
+
 function stagingName(table: string): string {
   const safe = table.slice(0, 20).replace(/[^a-zA-Z0-9_]/g, "_");
   return `cw_migstg_${safe}_${randomBytes(4).toString("hex")}`;
@@ -81,11 +84,18 @@ async function copySchema(
 ): Promise<TableCopyResult[]> {
   await dst.createSchemaIfNotExists(schema);
 
-  const tables = await src.listTables(schema);
+  // Tabelas de trabalho (staging de upload/sync, mescladas, staging de outra migracao) nao sao dados: existem so durante
+  // uma carga e somem no swap. Lista-las fazia a migracao ler uma tabela que ja nao existia (SELECT sem colunas ->
+  // "Incorrect syntax near the keyword 'FROM'", visto migrando MANINHO/STORM, que recebe carga o tempo todo).
+  const tables = (await src.listTables(schema)).filter((t) => !isWorkTable(t));
   const results: TableCopyResult[] = [];
 
   for (const table of tables) {
     const cols = await src.listColumns(schema, table);
+    if (!cols.length) {
+      if (!(await src.tableExists(schema, table))) continue; // sumiu entre a listagem e agora (substituida/apagada)
+      throw markNonRetryable(new Error(`Tabela ${schema}.${table} sem colunas legiveis na origem: nao da para copiar.`));
+    }
 
     // Colunas internas (cw_synced_at, cw_deleted_at, _cw_rh) são copiadas com o VALOR original — nunca
     // recarimbadas — para preservar o histórico de `rows?since=` e não fazer um consumidor incremental achar
@@ -106,11 +116,11 @@ async function copySchema(
     await dst.dropTableIfExists(schema, stage);
     await dst.createTable(schema, stage, colDefs);
 
-    // Copia dados via uma unica leitura completa da tabela (sem ORDER BY/OFFSET) + bulkInsert
+    // Copia dados via UMA consulta da tabela (sem ORDER BY/OFFSET), lida em lotes, + bulkInsert
     // em lotes no destino. E uma copia integral: nao precisa de ordem nem de paginacao estavel,
     // e paginar com OFFSET exige ORDER BY — sem chave natural, o fallback de stableOrderBy ordena
     // por TODAS as colunas, forcando um sort completo da tabela a cada pagina (custo cresce com o
-    // OFFSET, ficando cada vez mais lento: O(n^2) no total). Uma leitura unica evita isso.
+    // OFFSET, ficando cada vez mais lento: O(n^2) no total). Uma consulta so evita isso.
     //
     // BIGINT e DECIMAL(p>15) do SQL Server: convertidos para texto exato NA CONSULTA (nao depois, em JS — o
     // driver ja teria decodificado como Number e perdido digitos antes do nosso codigo rodar). Ver
@@ -124,14 +134,17 @@ async function copySchema(
       return qName;
     }).join(", ");
 
-    const allRows = await src.query<Record<string, unknown>>(
-      `SELECT ${colList} FROM ${srcQ}.${srcT}`,
-    );
+    // Leitura em LOTES (queryBatches): antes a tabela inteira ia para a memoria numa chamada so; nas maiores (TMK/FTP 3,4 mi,
+    // MANINHO/STORM 950 mil linhas) o worker caia e o job voltava para a fila em loop (159 tentativas).
+    const selectSql = `SELECT ${colList} FROM ${srcQ}.${srcT}`;
+    const batches: AsyncIterable<Record<string, unknown>[]> = src.queryBatches
+      ? src.queryBatches<Record<string, unknown>>(selectSql, BATCH)
+      : (async function* () { yield await src.query<Record<string, unknown>>(selectSql); })();
+    let copied = 0;
 
     try {
-      for (let off = 0; off < allRows.length; off += BATCH) {
-        const rows = allRows.slice(off, off + BATCH);
-
+      for await (const rows of batches) {
+        copied += rows.length;
         const bulkRows = rows.map(row => cols.map(c => {
           const v = row[c.name];
           if (v == null) return null;
@@ -172,7 +185,7 @@ async function copySchema(
       throw e;
     }
 
-    results.push({ table, rows: allRows.length, ...(renamed.length ? { renamed } : {}) });
+    results.push({ table, rows: copied, ...(renamed.length ? { renamed } : {}) });
   }
 
   return results;
