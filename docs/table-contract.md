@@ -11,6 +11,19 @@ Todas as rotas abaixo exigem **acesso READ ao dataset** (grant GLOBAL, de projet
 
 Quem tinha o direito continua com o mesmo acesso. No OData o cache de token vale **15 s** (revogar um token tem efeito em até 15 s).
 
+## `GET /api/v1/datasets/:id/freshness`
+
+Frescor por tabela para monitores (leve: sem colunas nem conexão; o catálogo completo continua em `GET /datasets/:id/tables`).
+Mesmo acesso da listagem. Dataset inexistente = lista vazia.
+
+Saída: `data` = `[{ id, name, sqlName, rowCount, lastDataAt, source }]` (por nome), `meta.serverTime` (ISO, relógio do servidor).
+
+- `lastDataAt`: última carga **concluída** (upload, sync ou derivada), **mesmo com conteúdo igual ao anterior**. Carga que falhou
+  não mexe nele. Tabela recarregada todo dia com os mesmos dados avança todo dia; parada = nenhuma carga concluiu.
+- `rowCount`: texto (inteiro de 64 bits).
+- `source`: `null` para tabela de upload/derivada; para fonte de sync, `{ id, mode, active, lastStatus, lastRefreshedAt, nextRefreshAt,
+  lastError }`. `lastError` de conexão (host, IP, firewall) vem genérico.
+
 ## `GET /api/v1/tables/:id/rows`
 
 | Parâmetro | Regra |
