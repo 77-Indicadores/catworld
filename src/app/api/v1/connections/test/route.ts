@@ -10,9 +10,9 @@ import { statRemoteFile } from "@/server/connections/ftp-watch";
 
 const sshTunnelSchema = z.object({
   sshTunnelEnabled: z.boolean().default(false),
-  sshHost: z.string().min(1).optional(),
+  sshHost: z.string().trim().min(1).optional(),
   sshPort: z.coerce.number().int().min(1).max(65535).default(22).optional(),
-  sshUsername: z.string().min(1).optional(),
+  sshUsername: z.string().trim().min(1).optional(),
   sshAuthMethod: z.enum(["password", "privateKey"]).optional(),
   sshPassword: z.string().optional(),
   sshPrivateKey: z.string().optional(),
@@ -33,22 +33,22 @@ function buildSshTunnelData(input: z.infer<typeof sshTunnelSchema>) {
 
 const postgresSchema = z.object({
   provider: z.literal("postgres"),
-  server: z.string().min(1),
+  server: z.string().trim().min(1),
   port: z.coerce.number().int().min(1).max(65535).default(5432),
-  databaseName: z.string().min(1),
+  databaseName: z.string().trim().min(1),
   sslMode: z.enum(["disable", "require", "verify-full"]).default("require"),
-  username: z.string().min(1),
+  username: z.string().trim().min(1),
   password: z.string().min(1),
 }).merge(sshTunnelSchema);
 
 const mssqlSchema = z.object({
   provider: z.literal("mssql"),
-  server: z.string().min(1),
+  server: z.string().trim().min(1),
   port: z.coerce.number().int().min(1).max(65535).default(1433),
-  databaseName: z.string().min(1),
+  databaseName: z.string().trim().min(1),
   encrypt: z.boolean().default(true),
   trustServerCert: z.boolean().default(false),
-  username: z.string().min(1),
+  username: z.string().trim().min(1),
   password: z.string().min(1),
 }).merge(sshTunnelSchema);
 
@@ -60,12 +60,12 @@ const mssqlSchema = z.object({
  */
 const firebirdFtpSchema = z.object({
   provider: z.literal("firebird-ftp"),
-  server: z.string().min(1),
+  server: z.string().trim().min(1),
   port: z.coerce.number().int().min(1).max(65535).default(21),
-  username: z.string().min(1),
+  username: z.string().trim().min(1),
   password: z.string().min(1),
-  remotePath: z.string().min(1),
-  filePattern: z.string().min(1),
+  remotePath: z.string().trim().min(1),
+  filePattern: z.string().trim().min(1),
 });
 
 export async function POST(request: NextRequest) {
@@ -79,16 +79,16 @@ export async function POST(request: NextRequest) {
     if (raw.connectionId && !raw.password) {
       const editSchema = z.object({
         connectionId: z.string().min(1),
-        server: z.string().min(1),
+        server: z.string().trim().min(1),
         port: z.coerce.number().int().min(1).max(65535),
-        databaseName: z.string().min(1).optional(),
-        username: z.string().min(1),
+        databaseName: z.string().trim().min(1).optional(),
+        username: z.string().trim().min(1),
         // mssql-specific TLS overrides (optional — fall back to stored sslMode)
         encrypt: z.boolean().optional(),
         trustServerCert: z.boolean().optional(),
         // firebird-ftp: nao envia senha nova, mas o formulario pode ter mudado o caminho/padrao remoto
-        remotePath: z.string().min(1).optional(),
-        filePattern: z.string().min(1).optional(),
+        remotePath: z.string().trim().min(1).optional(),
+        filePattern: z.string().trim().min(1).optional(),
       }).merge(sshTunnelSchema);
       const edit = editSchema.parse(raw);
       const existing = await prisma.connection.findUniqueOrThrow({

@@ -30,6 +30,14 @@ export function isQueryTimeout(error: unknown): boolean {
   return /Timeout: Request failed to complete/i.test(e.message);
 }
 
+/** Falha ao CONECTAR (mssql ConnectionError; DNS/recusa/rota de qualquer driver). Nao inclui timeout de consulta. */
+export function isConnectionFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (error.name === "ConnectionError") return true;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" && ["ENOTFOUND", "ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH", "EAI_AGAIN"].includes(code);
+}
+
 export function queryTimeoutError(seconds?: number) {
   return new ApiError(408, "QUERY_TIMEOUT", `A consulta excedeu o tempo limite${seconds ? ` de ${seconds}s` : ""}. Filtre mais, selecione menos colunas ou use "stream": true.`);
 }
@@ -52,6 +60,14 @@ export async function handleApiError(error: unknown, context?: Record<string, un
   if (error instanceof SyntaxError && /JSON|Unexpected (token|end)|Expected /i.test(error.message)) {
     auditRequestFailed(400, "INVALID_JSON");
     return fail(400, "INVALID_JSON", "O corpo da requisição não é um JSON válido.");
+  }
+  // Banco de origem/storage fora do ar ou inalcancavel (host errado, DNS, timeout ao CONECTAR): 502, nao erro interno. Antes caia
+  // como 500 + Sentry a cada tentativa (visto: conexao salva com espaco no host). Timeout de CONSULTA nao entra aqui (isQueryTimeout).
+  if (isConnectionFailure(error)) {
+    auditRequestFailed(502, "DATABASE_UNAVAILABLE");
+    const errorId = randomUUID().slice(0, 8);
+    console.warn(`[api] banco indisponivel ${errorId}: ${(error as Error).message}`);
+    return fail(502, "DATABASE_UNAVAILABLE", "Não foi possível conectar ao banco de dados. Verifique a conexão (host, porta, rede) e tente novamente.", { errorId });
   }
   // Violacao de unicidade do Prisma (P2002) e conflito do CLIENTE (409), nao falha do servidor.
   if (typeof error === "object" && error !== null && (error as { code?: unknown }).code === "P2002") {

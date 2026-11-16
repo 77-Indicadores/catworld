@@ -63,6 +63,26 @@ describe("handleApiError", () => {
     expect(console.error).toHaveBeenCalled();
   });
 
+  it("falha ao CONECTAR no banco (host errado, DNS, timeout de conexao): 502 sem host, fora do Sentry", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const timeout = Object.assign(new Error("Failed to connect to vps-x.somosbr.app:14333 in 10000ms"), { name: "ConnectionError", code: "ETIMEOUT" });
+    const dns = Object.assign(new Error("getaddrinfo ENOTFOUND  vps-x.somosbr.app"), { code: "ENOTFOUND" });
+    for (const e of [timeout, dns]) {
+      const r = await handleApiError(e);
+      expect(r.status).toBe(502);
+      const b = await body(r);
+      expect(b.error.code).toBe("DATABASE_UNAVAILABLE");
+      expect(JSON.stringify(b)).not.toContain("somosbr");
+      expect(b.error.details.errorId).toMatch(/^[0-9a-f]{8}$/);
+    }
+    expect(sentry.captureException).not.toHaveBeenCalled();
+  });
+
+  it("timeout de CONSULTA (RequestError ETIMEOUT) nao vira 502", async () => {
+    const r = await handleApiError(Object.assign(new Error("Timeout: Request failed to complete in 30000ms"), { name: "RequestError", code: "ETIMEOUT" }));
+    expect(r.status).toBe(500);
+  });
+
   it("nao espera o Sentry.flush (que aqui nunca resolve)", async () => {
     const r = await Promise.race([
       handleApiError(new Error("x")),
