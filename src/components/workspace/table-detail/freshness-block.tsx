@@ -22,6 +22,25 @@ export function FreshnessBlock({ table, derived }: { table: WorkspaceTable; deri
   const error = derived?.lastError ?? table.source?.lastError ?? null;
   const rows = presentCount(table.rowCount);
   const bytes = Number(table.sizeBytes);
+  // Fonte ao vivo nao guarda copia: cada consulta vai na origem. A data/linhas/tamanho gravados sao do cadastro e
+  // pareciam "dado antigo" para quem le a tela — mostra que o dado e sempre o atual em vez deles.
+  if (!derived && table.source?.mode === "live") {
+    return (
+      <section aria-labelledby="td-freshness" className="border-b border-base-300 p-4">
+        <h4 id="td-freshness" className="mb-2.5 text-[11px] font-semibold text-base-content/70">Frescor</h4>
+        <div className="mb-3"><StatusBadge status={fresh.tone} label={fresh.label} /></div>
+        <dl className="space-y-1.5 text-xs">
+          <Row label="Dados">Consultados direto na origem, sempre atuais</Row>
+        </dl>
+        {error && (
+          <div role="alert" className="mt-3 rounded bg-error/10 px-2 py-1.5 font-mono text-[11px] text-error">
+            <p className="mb-0.5 font-sans font-medium">Última consulta falhou</p>
+            {error}
+          </div>
+        )}
+      </section>
+    );
+  }
 
   return (
     <section aria-labelledby="td-freshness" className="border-b border-base-300 p-4">

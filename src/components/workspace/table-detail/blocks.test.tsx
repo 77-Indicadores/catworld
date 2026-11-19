@@ -51,6 +51,15 @@ describe("FreshnessBlock", () => {
     expect(screen.getByText("Atrasada")).toBeInTheDocument();
     expect(screen.getByText(/Deveria ter atualizado em/)).toBeInTheDocument();
   });
+  it("fonte ao vivo não mostra data de cadastro nem contagem como se fosse dado antigo", () => {
+    const old = new Date(Date.now() - 80 * 86400_000).toISOString();
+    const s = source({ mode: "live", refreshCron: null, nextRefreshAt: null, lastRefreshedAt: null, lastStatus: "ready" });
+    render(<FreshnessBlock table={table({ source: s, lastDataAt: old, rowCount: "0", lastUpload: null })} derived={null} />);
+    expect(screen.getByText("Ao vivo")).toBeInTheDocument();
+    expect(screen.getByText(/Consultados direto na origem/)).toBeInTheDocument();
+    expect(screen.queryByText("Dados atualizados")).toBeNull();
+    expect(screen.queryByText("Linhas")).toBeNull();
+  });
   it("derivada usa o estado da própria derivada", () => {
     render(<FreshnessBlock table={table({ lastUpload: null })} derived={derived} />);
     expect(screen.getByText("Manual")).toBeInTheDocument();

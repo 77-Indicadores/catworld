@@ -70,6 +70,13 @@ describe("BatchGroupRow: várias tabelas de uma importação", () => {
     render(<BatchGroupRow groupId="g" datasetId="d1" sources={[a]} tables={[table(a)]} onSelectTable={noop} onChanged={noop} />);
     expect(screen.getByText(/última/)).toBeInTheDocument();
   });
+  it("grupo ao vivo não mostra a data de cadastro ao lado de cada tabela (parecia dado antigo)", () => {
+    const a = source({ id: "a", sourceGroupId: "g", mode: "live", refreshCron: null, nextRefreshAt: null, lastRefreshedAt: null, lastStatus: "ready" });
+    const t = { ...table(a), lastDataAt: "2026-09-01T23:19:00.000Z" };
+    const { container } = render(<BatchGroupRow groupId="g" datasetId="d1" sources={[a]} tables={[t]} onSelectTable={noop} onChanged={noop} />);
+    expect(screen.getAllByText("Ao vivo").length).toBeGreaterThan(0);
+    expect(container.textContent).not.toMatch(/01\/09\/2026/);
+  });
   it("grupo pausado = 'Pausada', sem julgar erro", () => {
     const a = source({ id: "a", sourceGroupId: "g", active: false, lastStatus: "failed", lastError: "x" });
     render(<BatchGroupRow groupId="g" datasetId="d1" sources={[a]} tables={[table(a)]} onSelectTable={noop} onChanged={noop} />);

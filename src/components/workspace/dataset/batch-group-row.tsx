@@ -99,7 +99,8 @@ export function BatchGroupRow({ groupId, datasetId, sources, tables, onSelectTab
               <Table2 size={11} className="shrink-0 text-base-content/65" />
               <span className="flex-1 truncate font-mono">{t.name}</span>
               {t.source && <StatusBadge status={sourceBadge(t.source).status} label={sourceBadge(t.source).label} />}
-              {t.lastDataAt && (
+              {/* ao vivo: a data gravada e a do cadastro, nao a do dado (que e sempre o atual) — esconder evita parecer desatualizada */}
+              {t.lastDataAt && t.source?.mode !== "live" && (
                 <span className="shrink-0 text-base-content/65"><Time iso={t.lastDataAt} /></span>
               )}
             </button>
