@@ -43,6 +43,9 @@ function options(endpoint: FirebirdEndpoint): Options {
     // Firebird antigos para campos de valor) NAO e afetado por isto — continua float, por isso mapFirebirdType
     // marca esses como lossyNumeric.
     numericMode: "string",
+    // BLOB SUB_TYPE 1 (texto longo, comum em OBS/HISTORICO de ERP) chega como string ja resolvida pelo driver.
+    // Sem isto vinha uma funcao de leitura por celula, e ler essas funcoes no meio do streaming travava a conexao.
+    blobAsText: true,
     // NAO forcar wireCrypt aqui: e a conexao com o NOSSO servidor (o que restaurou o arquivo), nunca com o do
     // cliente, entao usamos a negociacao padrao do driver. Forcar DISABLE (pensado originalmente para talvez
     // precisar falar com um Firebird 2.5/3.0 antigo) quebra contra Firebird 5.x, que e o motor que a imagem usa
@@ -237,6 +240,8 @@ export function uniqueFirebirdColumnNames(raw: string[]): string[] {
 // primeiro fazia varias colunas com "AS" diferentes colidirem no mesmo nome generico. `||` (nao `??`) e
 // proposital: string vazia deve cair para o fallback tambem.
 const rawOutputName = (col: FbOutputMeta) => col.alias || col.field || "?";
+/** Tipo de wire com o bit de nulidade zerado (o protocolo usa tipo+1 para "aceita nulo"). */
+const isWireBlob = (col: FbOutputMeta) => (col.type & ~1) === 520;
 
 /**
  * Prepara o statement SEM executar e devolve a descricao das colunas de saida. Antes a sondagem era
@@ -314,15 +319,46 @@ export async function* streamFirebirdRows(endpoint: FirebirdEndpoint, query: str
   try {
     // Linhas como ARRAY (por posicao) e nomes do statement preparado, deduplicados do mesmo jeito que em
     // queryColumnsFirebird: em objeto, colunas de mesmo nome ("a.*, b.*") se sobrescreviam e a 2a sumia.
-    const names = uniqueFirebirdColumnNames((await describeFirebirdStatement(db, statement)).map(rawOutputName));
-    // queryStream ja e um Readable object-mode com backpressure (driver nativo) — nao precisamos do manual
-    // pause/resume que mssql.ts faz a mao, o driver Firebird ja entrega isso pronto.
+    const output = await describeFirebirdStatement(db, statement);
+    const names = uniqueFirebirdColumnNames(output.map(rawOutputName));
+    const toRow = (cells: unknown[]) => {
+      const row: Record<string, unknown> = {};
+      for (let i = 0; i < names.length; i++) row[names[i]!] = cells[i];
+      return row;
+    };
+    const blobCols = output.map((col, i) => (isWireBlob(col) ? i : -1)).filter((i) => i >= 0);
+    if (blobCols.length > 0) {
+      // Com BLOB, o streaming do node-firebird nao e confiavel: depois de algumas centenas de linhas ele trava ou
+      // responde "Invalid BLOB ID" (reproduzido contra Firebird 5.0.4 real, com linhas em objeto OU em array, mais
+      // facil com leitura lenta — exatamente o caso da carga, que pausa enquanto grava no storage). Lendo tudo de uma
+      // vez numa transacao propria, o driver resolve os BLOBs de texto (blobAsText) antes de devolver; so depois
+      // as linhas sao repassadas em lotes. Consultas de ERP com BLOB costumam ser cadastros (milhares de linhas).
+      const binary = blobCols.filter((i) => output[i]!.subType !== 1);
+      if (binary.length > 0) {
+        console.warn(`[firebird] BLOB binario sem leitura confiavel no driver; gravado como nulo: ${binary.map((i) => names[i]).join(", ")}`);
+      }
+      const tx = await (db as unknown as { transactionAsync: (iso: number[]) => Promise<FbTransaction & { queryAsync: (q: string, p: unknown[], o: unknown) => Promise<unknown[][]>; commitAsync: () => Promise<void> }> })
+        .transactionAsync(Firebird.ISOLATION_READ_COMMITTED_READ_ONLY);
+      let all: unknown[][];
+      try {
+        all = await tx.queryAsync(statement, [], { asObject: false });
+      } finally {
+        await tx.rollbackAsync().catch(() => undefined);
+      }
+      for (let start = 0; start < all.length; start += batchSize) {
+        yield all.slice(start, start + batchSize).map((cells) => {
+          for (const i of binary) cells[i] = null;
+          return toRow(cells);
+        });
+      }
+      return;
+    }
+    // Sem BLOB: queryStream ja e um Readable object-mode com backpressure (driver nativo) — nao precisamos do
+    // manual pause/resume que mssql.ts faz a mao, o driver Firebird ja entrega isso pronto.
     const stream = db.queryStream(statement, [], { asObject: false } as never);
     let batch: Record<string, unknown>[] = [];
     for await (const cells of stream as AsyncIterable<unknown[]>) {
-      const row: Record<string, unknown> = {};
-      for (let i = 0; i < names.length; i++) row[names[i]!] = cells[i];
-      batch.push(row);
+      batch.push(toRow(cells));
       if (batch.length >= batchSize) { yield batch; batch = []; }
     }
     if (batch.length > 0) yield batch;
