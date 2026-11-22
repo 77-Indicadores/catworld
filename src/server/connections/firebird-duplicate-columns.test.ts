@@ -24,7 +24,7 @@ const db = {
   queryStream: vi.fn(() => Readable.from([[1, "ABC1234", "XYZ9876", "QQQ0000"]], { objectMode: true })),
   detachAsync: vi.fn(async () => undefined),
 };
-vi.mock("node-firebird", () => ({ attachAsync: vi.fn(async () => db), ISOLATION_READ_COMMITTED_READ_ONLY: [1] }));
+vi.mock("node-firebird", () => ({ attachAsync: vi.fn(async () => db), ISOLATION_READ_COMMITTED_READ_ONLY: [1], ISOLATION_READ_COMMITTED: [2] }));
 
 const { queryColumnsFirebird, streamFirebirdRows, uniqueFirebirdColumnNames } = await import("./firebird");
 const endpoint = { host: "h", port: 3050, database: "/x.fdb", user: "sysdba", password: "p" };

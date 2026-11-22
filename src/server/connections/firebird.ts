@@ -337,8 +337,11 @@ export async function* streamFirebirdRows(endpoint: FirebirdEndpoint, query: str
       if (binary.length > 0) {
         console.warn(`[firebird] BLOB binario sem leitura confiavel no driver; gravado como nulo: ${binary.map((i) => names[i]).join(", ")}`);
       }
+      // Leitura-escrita (nunca READ_ONLY) e desfeita no fim: procedures de ERP gravam no meio do SELECT (ex.: o
+      // contador S_GER_RETCONTADOR do Siecon) e falhavam com "Attempted update during read-only transaction".
+      // O rollback descarta essas escritas — o banco e a copia efemera restaurada do backup, nunca o do cliente.
       const tx = await (db as unknown as { transactionAsync: (iso: number[]) => Promise<FbTransaction & { queryAsync: (q: string, p: unknown[], o: unknown) => Promise<unknown[][]>; commitAsync: () => Promise<void> }> })
-        .transactionAsync(Firebird.ISOLATION_READ_COMMITTED_READ_ONLY);
+        .transactionAsync(Firebird.ISOLATION_READ_COMMITTED);
       let all: unknown[][];
       try {
         all = await tx.queryAsync(statement, [], { asObject: false });
