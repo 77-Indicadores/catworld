@@ -202,25 +202,66 @@ export function safeStatementFirebird(query: string): string {
   return validated.statement;
 }
 
+/** Descritor de saida de um statement preparado (subconjunto de xsqlvar do node-firebird que usamos). */
+type FbOutputMeta = { type: number; subType?: number | null; length?: number | null; nativeLength?: number; scale?: number | null; nullable?: boolean; field?: string; alias?: string };
+type FbPreparedStatement = { output?: FbOutputMeta[]; release: () => void };
+
+/**
+ * Nomes das colunas de saida, sem repeticao. Consultas de ERP costumam ser "SELECT a.*, b.*" sobre tabelas que
+ * repetem colunas (FORN_CIDADE, EQ_PLACA...). O Firebird aceita isso num SELECT de topo, mas o Catworld
+ * precisa de um nome por coluna: a 2a ocorrencia vira NOME_2, a 3a NOME_3 (comparando ja normalizado, para
+ * nao colidir depois do sqlIdentifier). A ordem e a do statement, e e por ela que as linhas sao lidas.
+ */
+export function uniqueFirebirdColumnNames(raw: string[]): string[] {
+  // 1a passada reserva o nome de toda 1a ocorrencia: uma coluna que de fato se chama NOME_2 mais adiante
+  // fica com o proprio nome, e a repetida de NOME pula para NOME_3.
+  const used = new Set(raw.map((name) => sqlIdentifier(name)));
+  const seen = new Set<string>();
+  return raw.map((name) => {
+    const key = sqlIdentifier(name);
+    if (!seen.has(key)) { seen.add(key); return name; }
+    let n = 2;
+    while (used.has(sqlIdentifier(`${name}_${n}`))) n++;
+    const candidate = `${name}_${n}`;
+    used.add(sqlIdentifier(candidate));
+    return candidate;
+  });
+}
+
+// col.alias (isc_info_sql_alias) e sempre o nome certo: para uma coluna real, o driver ja preenche igual ao nome
+// do campo; para uma expressao com "AS apelido" explicito, e o apelido; so fica vazio no caso raro de nao ter nem
+// um nem outro. col.field (isc_info_sql_field) e o nome BRUTO do Firebird — para expressoes computadas sem "AS"
+// (subquery escalar, SUM(...), concatenacao) o Firebird preenche com um nome generico da propria expressao
+// ("CONCATENATION", "SUM", ou ate string vazia para subquery), nunca com o apelido dado pelo usuario. Usar `field`
+// primeiro fazia varias colunas com "AS" diferentes colidirem no mesmo nome generico. `||` (nao `??`) e
+// proposital: string vazia deve cair para o fallback tambem.
+const rawOutputName = (col: FbOutputMeta) => col.alias || col.field || "?";
+
+/**
+ * Prepara o statement SEM executar e devolve a descricao das colunas de saida. Antes a sondagem era
+ * "SELECT FIRST 0 * FROM (consulta) cw_source_probe", e uma tabela derivada nao aceita nome de coluna repetido
+ * ("Column X was specified multiple times") — consultas validas do ERP eram recusadas. Preparar tambem nao roda
+ * a procedure selecionavel, so valida e descreve.
+ */
+async function describeFirebirdStatement(db: Database, statement: string): Promise<FbOutputMeta[]> {
+  const prepared = await (db as unknown as { newStatementAsync: (q: string) => Promise<FbPreparedStatement> }).newStatementAsync(statement);
+  try {
+    return [...(prepared.output ?? [])];
+  } finally {
+    prepared.release();
+  }
+}
+
 export async function queryColumnsFirebird(endpoint: FirebirdEndpoint, query: string): Promise<SourceColumn[]> {
   const statement = safeStatementFirebird(query);
   try {
     return await withFirebird(endpoint, async (db) => {
-      // Sem TOP 0 nativo: FIRST 0 é o equivalente Firebird (dialeto 3) para sondar forma sem ler linhas.
-      const result = await db.queryAsync<Record<string, unknown>>(`SELECT FIRST 0 * FROM (${statement}) cw_source_probe`, [], { withMeta: true });
-      return result.fields.map((col) => {
-        // col.alias (isc_info_sql_alias) e sempre o nome certo: para uma coluna real, o driver ja preenche
-        // igual ao nome do campo; para uma expressao com "AS apelido" explicito, e o apelido; so fica vazio
-        // no caso raro de nao ter nem um nem outro. col.field (isc_info_sql_field) e o nome BRUTO do Firebird
-        // — para expressoes computadas sem "AS" (subquery escalar, SUM(...), concatenacao) o Firebird preenche
-        // com um nome generico da propria expressao ("CONCATENATION", "SUM", ou ate string vazia para
-        // subquery), nunca com o apelido dado pelo usuario. Usar `field` primeiro (como era antes) fazia
-        // varias colunas com "AS" diferentes colidirem no mesmo nome generico quando materializadas (ex.:
-        // 4 subqueries "AS x1/x2/x3/x4" todas viravam "campo" — sqlIdentifier("") — e a fonte falhava ao
-        // criar com "coluna especificada mais de uma vez"). `||` (nao `??`) e proposital: string vazia deve
-        // cair para o fallback tambem, nao só null/undefined.
-        const name = col.alias || col.field || "?";
-        const m = mapFirebirdWireType({ type: col.type, subType: col.subType ?? null, length: col.length ?? null, scale: col.scale ?? 0 });
+      const output = await describeFirebirdStatement(db, statement);
+      const names = uniqueFirebirdColumnNames(output.map(rawOutputName));
+      return output.map((col, i) => {
+        const name = names[i]!;
+        const length = col.nativeLength !== undefined ? col.nativeLength : (col.length ?? null);
+        const m = mapFirebirdWireType({ type: col.type, subType: col.subType ?? null, length, scale: col.scale ?? 0 });
         return { originalName: name, sqlName: sqlIdentifier(name), sqlType: m.sqlType, nullable: col.nullable !== false, ...(m.lossyNumeric ? { lossyNumeric: true } : {}) };
       });
     });
@@ -261,11 +302,16 @@ export async function* streamFirebirdRows(endpoint: FirebirdEndpoint, query: str
   const statement = safeStatementFirebird(query);
   const db = await Firebird.attachAsync(options(endpoint));
   try {
+    // Linhas como ARRAY (por posicao) e nomes do statement preparado, deduplicados do mesmo jeito que em
+    // queryColumnsFirebird: em objeto, colunas de mesmo nome ("a.*, b.*") se sobrescreviam e a 2a sumia.
+    const names = uniqueFirebirdColumnNames((await describeFirebirdStatement(db, statement)).map(rawOutputName));
     // queryStream ja e um Readable object-mode com backpressure (driver nativo) — nao precisamos do manual
     // pause/resume que mssql.ts faz a mao, o driver Firebird ja entrega isso pronto.
-    const stream = db.queryStream(statement);
+    const stream = db.queryStream(statement, [], { asObject: false } as never);
     let batch: Record<string, unknown>[] = [];
-    for await (const row of stream as AsyncIterable<Record<string, unknown>>) {
+    for await (const cells of stream as AsyncIterable<unknown[]>) {
+      const row: Record<string, unknown> = {};
+      for (let i = 0; i < names.length; i++) row[names[i]!] = cells[i];
       batch.push(row);
       if (batch.length >= batchSize) { yield batch; batch = []; }
     }

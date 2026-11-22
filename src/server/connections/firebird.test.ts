@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  executeFirebirdReadOnly, listTablesFirebird, sourceClockFirebird, tableColumnsFirebird, testFirebird,
+  executeFirebirdReadOnly, listTablesFirebird, queryColumnsFirebird, sourceClockFirebird, streamFirebirdRows, tableColumnsFirebird, testFirebird,
   type FirebirdEndpoint,
 } from "./firebird";
 
@@ -55,6 +55,16 @@ d("firebird adapter (Firebird real)", () => {
     expect(r.rowCount).toBe(3);
     const r2 = await executeFirebirdReadOnly(endpoint!, "SELECT NFE_CDG FROM FAT_NFE ORDER BY NFE_CDG", 30, 3, 3);
     expect(r2.rows[0]).not.toEqual(r.rows[0]);
+  });
+
+  it("consulta com colunas de mesmo nome (a.*, b.*): sonda e le as duas, sem 'specified multiple times'", async () => {
+    const sql = "SELECT a.RDB$RELATION_ID, b.RDB$RELATION_ID FROM RDB$DATABASE a CROSS JOIN RDB$DATABASE b";
+    const cols = await queryColumnsFirebird(endpoint!, sql);
+    expect(cols.map((c) => c.originalName)).toEqual(["RDB$RELATION_ID", "RDB$RELATION_ID_2"]);
+    const rows = [];
+    for await (const batch of streamFirebirdRows(endpoint!, sql)) rows.push(...batch);
+    expect(rows).toHaveLength(1);
+    expect(Object.keys(rows[0]!)).toEqual(["RDB$RELATION_ID", "RDB$RELATION_ID_2"]);
   });
 
   it("sourceClockFirebird devolve uma data valida", async () => {
