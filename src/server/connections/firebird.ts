@@ -204,7 +204,8 @@ export function safeStatementFirebird(query: string): string {
 
 /** Descritor de saida de um statement preparado (subconjunto de xsqlvar do node-firebird que usamos). */
 type FbOutputMeta = { type: number; subType?: number | null; length?: number | null; nativeLength?: number; scale?: number | null; nullable?: boolean; field?: string; alias?: string };
-type FbPreparedStatement = { output?: FbOutputMeta[]; release: () => void };
+type FbPreparedStatement = { output?: FbOutputMeta[]; dropAsync: () => Promise<void> };
+type FbTransaction = { newStatementAsync: (q: string) => Promise<FbPreparedStatement>; rollbackAsync: () => Promise<void> };
 
 /**
  * Nomes das colunas de saida, sem repeticao. Consultas de ERP costumam ser "SELECT a.*, b.*" sobre tabelas que
@@ -242,13 +243,22 @@ const rawOutputName = (col: FbOutputMeta) => col.alias || col.field || "?";
  * "SELECT FIRST 0 * FROM (consulta) cw_source_probe", e uma tabela derivada nao aceita nome de coluna repetido
  * ("Column X was specified multiple times") — consultas validas do ERP eram recusadas. Preparar tambem nao roda
  * a procedure selecionavel, so valida e descreve.
+ *
+ * Transacao propria (somente leitura) e DROP explicito do statement, nunca `db.newStatement` + `release()`:
+ * release devolve o statement ao cache do driver mandando fechar um cursor que nunca foi aberto, e a conexao
+ * ficava esperando uma resposta que nao vem — o detach travava e toda consulta Firebird parava (reproduzido
+ * contra Firebird 5.0.4 real; foi o que aconteceu em producao com a 1a versao desta funcao).
  */
 async function describeFirebirdStatement(db: Database, statement: string): Promise<FbOutputMeta[]> {
-  const prepared = await (db as unknown as { newStatementAsync: (q: string) => Promise<FbPreparedStatement> }).newStatementAsync(statement);
+  const tx = await (db as unknown as { transactionAsync: (iso: number[]) => Promise<FbTransaction> })
+    .transactionAsync(Firebird.ISOLATION_READ_COMMITTED_READ_ONLY);
   try {
-    return [...(prepared.output ?? [])];
+    const prepared = await tx.newStatementAsync(statement);
+    const output = [...(prepared.output ?? [])];
+    await prepared.dropAsync();
+    return output;
   } finally {
-    prepared.release();
+    await tx.rollbackAsync().catch(() => undefined);
   }
 }
 
