@@ -55,7 +55,8 @@ describe("colunas repetidas em consulta Firebird", () => {
     expect(tx.rollbackAsync).toHaveBeenCalledTimes(1);
     expect(cols.map((c) => c.originalName)).toEqual(["EQ_CDG", "EQ_PLACA", "EQ_PLACA_3", "eq_placa_2"]);
     expect(new Set(cols.map((c) => c.sqlName)).size).toBe(4);
-    expect(cols[1]!.sqlType).toBe("NVARCHAR(10)");
+    expect(cols[0]!.sqlType).toBe("BIGINT");
+    expect(cols[1]!.sqlType).toBe("NVARCHAR(MAX)");
   });
 
   it("sem BLOB: le em streaming por posicao, as duas colunas de mesmo nome com seus proprios valores", async () => {
@@ -80,5 +81,24 @@ describe("colunas repetidas em consulta Firebird", () => {
       [{ ID: 1, OBS: "texto", FOTO: null }, { ID: 2, OBS: null, FOTO: null }],
       [{ ID: 3, OBS: "outro", FOTO: null }],
     ]);
+  });
+  it("so tipos canonicos do storage (BIGINT/DECIMAL/DATE/DATETIME2/TIME/NVARCHAR(MAX)): INT, FLOAT ou NVARCHAR(n) viravam TEXT fisico", async () => {
+    output = [
+      { type: 500, alias: "S", field: "S", nullable: true, length: 2, scale: 0 },
+      { type: SQL_LONG, alias: "L", field: "L", nullable: true, length: 4, scale: 0 },
+      { type: 580, alias: "I64", field: "I64", nullable: true, length: 8, scale: 0 },
+      { type: SQL_LONG, alias: "NUM", field: "NUM", nullable: true, length: 4, scale: -2 },
+      { type: 480, alias: "DBL", field: "DBL", nullable: true, length: 8, scale: 0 },
+      { type: 570, alias: "DT", field: "DT", nullable: true, length: 4, scale: 0 },
+      { type: 510, alias: "TS", field: "TS", nullable: true, length: 8, scale: 0 },
+      { type: SQL_VARYING, alias: "V", field: "V", nullable: true, length: 40, scale: 0, subType: 0 },
+      { type: 32764, alias: "B", field: "B", nullable: true, length: 1, scale: 0 },
+      { type: SQL_BLOB, alias: "BL", field: "BL", nullable: true, length: 8, scale: 0, subType: 0 },
+    ];
+    const cols = await queryColumnsFirebird(endpoint, "SELECT * FROM T");
+    expect(cols.map((c) => c.sqlType)).toEqual([
+      "BIGINT", "BIGINT", "BIGINT", "DECIMAL(9,2)", "NVARCHAR(MAX)", "DATE", "DATETIME2", "NVARCHAR(MAX)", "NVARCHAR(MAX)", "NVARCHAR(MAX)",
+    ]);
+    expect(cols[4]!.lossyNumeric).toBe(true);
   });
 });

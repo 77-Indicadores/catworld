@@ -17,6 +17,7 @@ import { validateReadOnlySql } from "@/server/security/sql-safety";
 import { sqlIdentifier } from "@/server/security/naming";
 import { ApiError } from "@/server/http";
 import type { SourceColumn } from "./postgres";
+import { TEXT_TYPE, decimalOrText } from "./source-values";
 
 export type FirebirdEndpoint = {
   host: string;
@@ -98,27 +99,18 @@ function mapFirebirdType(row: FbFieldRow): { sqlType: string; lossyNumeric?: boo
   const isFixedPoint = scale < 0 && ([FB_TYPE.SHORT, FB_TYPE.LONG, FB_TYPE.INT64, FB_TYPE.INT128] as number[]).includes(row.FIELD_TYPE);
   if (isFixedPoint) {
     const precision = row.FIELD_PRECISION ?? (row.FIELD_TYPE === FB_TYPE.INT64 ? 18 : row.FIELD_TYPE === FB_TYPE.INT128 ? 38 : 9);
-    return { sqlType: `DECIMAL(${precision},${-scale})` };
+    return decimalOrText(precision, -scale);
   }
   switch (row.FIELD_TYPE) {
-    case FB_TYPE.SHORT: return { sqlType: "INT" };
-    case FB_TYPE.LONG: return { sqlType: "INT" };
-    case FB_TYPE.INT64: return { sqlType: "BIGINT" };
-    case FB_TYPE.INT128: return { sqlType: "DECIMAL(38,0)" };
-    case FB_TYPE.FLOAT: case FB_TYPE.DOUBLE: return { sqlType: "FLOAT", lossyNumeric: true };
+    case FB_TYPE.SHORT: case FB_TYPE.LONG: case FB_TYPE.INT64: return { sqlType: "BIGINT" };
+    case FB_TYPE.INT128: return decimalOrText(38, 0);
+    case FB_TYPE.FLOAT: case FB_TYPE.DOUBLE: return { sqlType: TEXT_TYPE, lossyNumeric: true };
     case FB_TYPE.DATE: return { sqlType: "DATE" };
     case FB_TYPE.TIME: return { sqlType: "TIME" };
     case FB_TYPE.TIMESTAMP: return { sqlType: "DATETIME2" };
-    case FB_TYPE.BOOLEAN: return { sqlType: "BIT" };
-    case FB_TYPE.CHAR: case FB_TYPE.VARCHAR: {
-      const len = row.FIELD_LENGTH ?? 255;
-      return { sqlType: `NVARCHAR(${Math.min(Math.max(len, 1), 4000)})` };
-    }
-    case FB_TYPE.BLOB:
-      // SUB_TYPE 1 = texto (memo); qualquer outro (0 = binário genérico, negativo = definido pelo usuário) vira binário.
-      return row.SUB_TYPE === 1 ? { sqlType: "NVARCHAR(MAX)" } : { sqlType: "VARBINARY(MAX)" };
+    // BOOLEAN, CHAR/VARCHAR e BLOB (texto ou binario, que a leitura entrega nulo) viram texto, como nos outros conectores.
     default:
-      return { sqlType: "NVARCHAR(MAX)" };
+      return { sqlType: TEXT_TYPE };
   }
 }
 
@@ -142,27 +134,19 @@ function mapFirebirdWireType(col: WireField): { sqlType: string; lossyNumeric?: 
   const isFixedPoint = scale < 0 && ([WIRE_TYPE.SHORT, WIRE_TYPE.LONG, WIRE_TYPE.INT64, WIRE_TYPE.INT128] as number[]).includes(col.type);
   if (isFixedPoint) {
     const precision = col.type === WIRE_TYPE.INT64 ? 18 : col.type === WIRE_TYPE.INT128 ? 38 : col.type === WIRE_TYPE.SHORT ? 4 : 9;
-    return { sqlType: `DECIMAL(${precision},${-scale})` };
+    return decimalOrText(precision, -scale);
   }
   switch (col.type) {
-    case WIRE_TYPE.SHORT: return { sqlType: "INT" };
-    case WIRE_TYPE.LONG: return { sqlType: "INT" };
-    case WIRE_TYPE.INT64: return { sqlType: "BIGINT" };
-    case WIRE_TYPE.INT128: return { sqlType: "DECIMAL(38,0)" };
+    case WIRE_TYPE.SHORT: case WIRE_TYPE.LONG: case WIRE_TYPE.INT64: return { sqlType: "BIGINT" };
+    case WIRE_TYPE.INT128: return decimalOrText(38, 0);
     case WIRE_TYPE.FLOAT: case WIRE_TYPE.DOUBLE: case WIRE_TYPE.D_FLOAT:
-    case WIRE_TYPE.DEC16: case WIRE_TYPE.DEC34: return { sqlType: "FLOAT", lossyNumeric: true };
+    case WIRE_TYPE.DEC16: case WIRE_TYPE.DEC34: return { sqlType: TEXT_TYPE, lossyNumeric: true };
     case WIRE_TYPE.TYPE_DATE: return { sqlType: "DATE" };
     case WIRE_TYPE.TYPE_TIME: case WIRE_TYPE.TIME_TZ: case WIRE_TYPE.TIME_TZ_EX: return { sqlType: "TIME" };
     case WIRE_TYPE.TIMESTAMP: case WIRE_TYPE.TIMESTAMP_TZ: case WIRE_TYPE.TIMESTAMP_TZ_EX: return { sqlType: "DATETIME2" };
-    case WIRE_TYPE.BOOLEAN: return { sqlType: "BIT" };
-    case WIRE_TYPE.TEXT: case WIRE_TYPE.VARYING: {
-      const len = col.length ?? 255;
-      return { sqlType: `NVARCHAR(${Math.min(Math.max(len, 1), 4000)})` };
-    }
-    case WIRE_TYPE.BLOB:
-      return col.subType === 1 ? { sqlType: "NVARCHAR(MAX)" } : { sqlType: "VARBINARY(MAX)" };
+    // BOOLEAN, CHAR/VARCHAR e BLOB viram texto, como nos outros conectores (ver mapFirebirdType).
     default:
-      return { sqlType: "NVARCHAR(MAX)" };
+      return { sqlType: TEXT_TYPE };
   }
 }
 

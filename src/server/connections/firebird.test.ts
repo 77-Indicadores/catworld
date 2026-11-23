@@ -45,7 +45,7 @@ d("firebird adapter (Firebird real)", () => {
   it("tableColumnsFirebird mapeia DOUBLE PRECISION como lossyNumeric", async () => {
     const cols = await tableColumnsFirebird(endpoint!, "public", "FAT_NFE");
     const valor = cols.find((c) => c.originalName === "NFE_VALOR");
-    expect(valor?.sqlType).toBe("FLOAT");
+    expect(valor?.sqlType).toBe("NVARCHAR(MAX)");
     expect(valor?.lossyNumeric).toBe(true);
   });
 

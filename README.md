@@ -2,6 +2,9 @@
 
 Camada de catálogo, governança e acesso sobre Azure SQL. O Catworld oferece frontend, API REST e SDK Python sem exigir drivers SQL nas aplicações consumidoras.
 
+> Vai cadastrar, editar ou recarregar queries/fontes de cliente (Postgres, SQL Server, Firebird via FTP)? Comece por
+> [`docs/guia-claude-catworld.md`](docs/guia-claude-catworld.md) — passo a passo da API, permissões e armadilhas conhecidas.
+
 ## Arquitetura
 
 - Next.js: frontend e `/api/v1`.
